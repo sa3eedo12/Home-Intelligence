@@ -1,0 +1,72 @@
+agent: home_automation
+version: 0.2.0
+description: Controls Home Assistant entities, monitors anomalies, suggests automations, and analyzes Ring doorbell events via Scrypted.
+defaults:
+  llm: qwen3:8b
+  timeout_s: 30
+capabilities:
+  - id: list_entities
+    description: List Home Assistant entities, optionally filtered by domain.
+    inputs: { domain: string? }
+    side_effects: false
+    cost: low
+  - id: get_entity_state
+    description: Return the current state and attributes of a Home Assistant entity by entity_id.
+    inputs: { entity_id: string }
+    side_effects: false
+    cost: low
+  - id: call_service
+    description: Call a Home Assistant service such as light.turn_on or scene.turn_on. Side-effecting.
+    inputs: { domain: string, service: string, data: object }
+    side_effects: true
+    require_confirmation: false
+    cost: low
+  - id: set_scene
+    description: Activate a Home Assistant scene by friendly name.
+    inputs: { scene_name: string }
+    side_effects: true
+    cost: low
+  - id: list_scenes
+    description: List all available scenes.
+    side_effects: false
+    cost: low
+  - id: doorbell.snapshot
+    description: Return the latest snapshot from the Ring doorbell (via Scrypted/HA camera entity).
+    inputs: { entity_id: string? }
+    side_effects: false
+    cost: low
+  - id: doorbell.summarize_event
+    description: On a doorbell ring or motion event, fetch the latest snapshot, run NPU vision (yolov8n) for person/package/vehicle detection, and return a short text summary plus structured detections.
+    inputs: { entity_id: string?, event_type: string }
+    side_effects: false
+    cost: medium
+  - id: doorbell.last_visitor
+    description: Summarize the most recent visitor event in the last N hours.
+    inputs: { hours: integer }
+    side_effects: false
+    cost: medium
+  - id: anomaly.scan
+    description: Run a z-score scan over the last 24h of state changes to detect anomalous device behavior.
+    inputs: { window_hours: integer }
+    side_effects: false
+    cost: medium
+  - id: suggest_automation
+    description: Analyze recent state changes and propose new Home Assistant automations as YAML.
+    inputs: { window_hours: integer }
+    side_effects: false
+    cost: high
+    llm: qwen3.6:35b-a3b
+  - id: ha.introspect
+    description: >
+      Discover all capabilities exposed by the Home Assistant MCP server, list existing
+      automations, count entities by domain, and surface configuration improvement
+      suggestions. Falls back gracefully when the mcp_server integration is not enabled.
+    inputs: {}
+    side_effects: false
+    cost: medium
+subscribes:
+  - events.home
+publishes:
+  - events.home
+  - notify.outbound
+  - memory.updates

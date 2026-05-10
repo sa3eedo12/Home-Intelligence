@@ -1,0 +1,7 @@
+quiet_hours: { start: "22:30", end: "07:00", tz: "Asia/Dubai" }
+allow_during_quiet:
+  - severity: critical
+rate_limits: []
+confirmation_required:
+  - capability_pattern: "home_automation.call_service"
+    when: "data.service in ['lock.unlock'] or domain == 'alarm_control_panel'"
