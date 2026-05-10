@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 
 
 class EventBus:
@@ -36,8 +37,9 @@ class EventBus:
         if group is not None:
             try:
                 await self.client.xgroup_create(stream, group, id="0", mkstream=True)
-            except Exception:
-                pass
+            except ResponseError as exc:
+                if "BUSYGROUP" not in str(exc):
+                    raise
 
         while True:
             if group:

@@ -22,9 +22,8 @@ class Embedder:
 
         async with self.pool.acquire() as conn:
             cached = await conn.fetchrow(
-                "SELECT vector FROM embedding_cache WHERE text_hash = $1 AND model = $2",
+                "SELECT vector FROM embedding_cache WHERE text_hash = $1",
                 text_hash,
-                self.npu_model,
             )
             if cached and cached["vector"] is not None:
                 return list(cached["vector"])

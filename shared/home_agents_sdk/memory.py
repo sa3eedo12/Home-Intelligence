@@ -14,7 +14,7 @@ class KVStore:
 
     async def get(self, key: str) -> str | None:
         value = await self.client.get(key)
-        return value if value is None else str(value)
+        return str(value) if value is not None else None
 
     async def set(self, key: str, value: str, ttl_seconds: int | None = None) -> None:
         await self.client.set(key, value, ex=ttl_seconds)
@@ -33,7 +33,8 @@ class EpisodicStore:
         columns = ", ".join(payload.keys())
         placeholders = ", ".join(f"${i}" for i, _ in enumerate(payload.values(), start=1))
         values = list(payload.values())
-        query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"
+        safe_table = {"alerts": "alerts", "reminders": "reminders", "workflows": "workflows"}[table]
+        query = f"INSERT INTO {safe_table} ({columns}) VALUES ({placeholders})"
         async with self.pool.acquire() as conn:
             await conn.execute(query, *values)
 
