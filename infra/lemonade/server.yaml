@@ -1,0 +1,22 @@
+# NOTE: Lemonade config schema may evolve. Validate this file against current Lemonade docs.
+models:
+  - id: qwen3-1.7b-int4
+    path: /models/qwen3-1.7b-int4
+    type: chat
+    quantization: int4
+    backend: xdna
+  - id: bge-m3-int8
+    path: /models/bge-m3-int8
+    type: embedding
+    quantization: int8
+    backend: xdna
+  - id: distil-whisper-small.en-int8
+    path: /models/distil-whisper-small.en-int8
+    type: stt
+    quantization: int8
+    backend: xdna
+  - id: yolov8n-int8
+    path: /models/yolov8n-int8
+    type: vision
+    quantization: int8
+    backend: xdna

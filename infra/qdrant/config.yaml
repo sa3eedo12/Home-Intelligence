@@ -1,0 +1,10 @@
+log_level: INFO
+storage:
+  storage_path: /qdrant/storage
+service:
+  enable_tls: false
+telemetry_disabled: true
+cluster:
+  enabled: false
+optimizers:
+  default_segment_number: 2
