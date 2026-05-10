@@ -33,12 +33,16 @@ class WorkflowEngine:
                 workflow_id,
             )
             row = await conn.fetchrow("SELECT payload FROM workflows WHERE id = $1", workflow_id)
-        return json.loads(row["payload"]) if row else {}
+        if row is None:
+            raise KeyError(f"Workflow not found: {workflow_id}")
+        return json.loads(row["payload"])
 
     async def mark_done(self, workflow_id: str, result: Any) -> None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("SELECT payload FROM workflows WHERE id = $1", workflow_id)
-            payload = json.loads(row["payload"]) if row else {}
+            if row is None:
+                raise KeyError(f"Workflow not found: {workflow_id}")
+            payload = json.loads(row["payload"])
             payload["result"] = result
             await conn.execute(
                 "UPDATE workflows SET status = 'done', payload = $1,"
@@ -50,7 +54,9 @@ class WorkflowEngine:
     async def mark_failed(self, workflow_id: str, error: str) -> None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("SELECT payload FROM workflows WHERE id = $1", workflow_id)
-            payload = json.loads(row["payload"]) if row else {}
+            if row is None:
+                raise KeyError(f"Workflow not found: {workflow_id}")
+            payload = json.loads(row["payload"])
             payload["error"] = error
             await conn.execute(
                 "UPDATE workflows SET status = 'failed', payload = $1,"

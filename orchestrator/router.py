@@ -96,6 +96,10 @@ class Router:
                 "reason": "",
             }
 
+    async def dispatch(self, agent: str, capability: str, inputs: dict) -> dict:
+        """Public proxy to registry dispatch, used by confirmation callbacks."""
+        return await self._registry.dispatch(agent, capability, inputs)
+
     async def _semantic_fallback(self, text: str) -> dict[str, Any] | None:
         results = await self._registry.semantic_search(text, top_k=3)
         if not results:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 
 from home_agents_sdk import vision
@@ -9,6 +10,8 @@ from home_agents_sdk.llm import OllamaClient
 from home_agents_sdk.tools import tool
 
 from .ha_client import get_ha_client
+
+_log = logging.getLogger(__name__)
 
 _bus: EventBus | None = None
 _llm: OllamaClient | None = None
@@ -76,15 +79,19 @@ async def summarize_event(event_type: str, entity_id: str | None = None) -> dict
     severity = "high" if "person" in detection_labels else "info"
 
     try:
-        bus = await _get_bus()
-        await bus.publish(
-            "notify.outbound",
-            {
-                "chat_id": int(os.getenv("TELEGRAM_CHAT_ID", "0")),
-                "text": f"🔔 {summary}",
-                "severity": severity,
-            },
-        )
+        chat_id_raw = os.getenv("TELEGRAM_CHAT_ID", "")
+        if not chat_id_raw:
+            _log.warning("TELEGRAM_CHAT_ID not set; skipping doorbell notification")
+        else:
+            bus = await _get_bus()
+            await bus.publish(
+                "notify.outbound",
+                {
+                    "chat_id": int(chat_id_raw),
+                    "text": f"🔔 {summary}",
+                    "severity": severity,
+                },
+            )
     except Exception:
         pass
 

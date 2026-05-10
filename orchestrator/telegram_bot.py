@@ -148,7 +148,7 @@ def _make_callback(allowed_ids: set[int], workflow_engine: WorkflowEngine, route
             inputs = payload.get("inputs", {})
             if agent and capability:
                 try:
-                    result = await router._registry.dispatch(agent, capability, inputs)
+                    result = await router.dispatch(agent, capability, inputs)
                     await workflow_engine.mark_done(workflow_id, result)
                     await query.edit_message_text(f"Done: {result}")
                 except Exception as exc:
