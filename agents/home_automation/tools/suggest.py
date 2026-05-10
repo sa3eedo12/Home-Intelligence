@@ -35,11 +35,30 @@ async def suggest_automation(window_hours: int = 24) -> dict:
 
     history_summary = "\n".join(summary_lines) or "No significant activity."
 
+    # Include existing automations so the LLM does not propose duplicates.
+    existing_automations: list[str] = []
+    try:
+        automation_states = await client.list_states(domain="automation")
+        existing_automations = [
+            s.get("attributes", {}).get("friendly_name", s["entity_id"])
+            for s in automation_states
+        ]
+    except Exception:
+        pass  # Non-fatal — proceed without the existing automation context.
+
+    existing_section = ""
+    if existing_automations:
+        existing_section = (
+            "\nExisting automations (do NOT propose duplicates):\n"
+            + "\n".join(f"- {name}" for name in existing_automations)
+            + "\n"
+        )
+
     prompt = f"""You are a Home Assistant automation expert.
 Based on the following device activity in the last {window_hours} hours:
 
 {history_summary}
-
+{existing_section}
 Suggest 2-3 useful Home Assistant automations as YAML. Reply ONLY with valid YAML, no prose."""
 
     llm = _get_llm()

@@ -11,7 +11,7 @@ from orchestrator.workflow import WorkflowEngine
 class InMemoryPool:
     """In-memory asyncpg pool mock that stores data in a dict."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._rows: dict[str, dict] = {}
 
     def acquire(self):

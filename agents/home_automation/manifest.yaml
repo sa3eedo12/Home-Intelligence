@@ -56,6 +56,14 @@ capabilities:
     side_effects: false
     cost: high
     llm: qwen3.6:35b-a3b
+  - id: ha.introspect
+    description: >
+      Discover all capabilities exposed by the Home Assistant MCP server, list existing
+      automations, count entities by domain, and surface configuration improvement
+      suggestions. Falls back gracefully when the mcp_server integration is not enabled.
+    inputs: {}
+    side_effects: false
+    cost: medium
 subscribes:
   - events.home
 publishes:

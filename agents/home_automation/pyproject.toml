@@ -5,6 +5,7 @@ description = "Home Automation agent: controls Home Assistant, analyzes Ring doo
 requires-python = ">=3.12"
 dependencies = [
   "home_agents_sdk",
+  "mcp>=1.23.0",  # HA MCP server client; 1.23.0 patches DNS-rebinding + DoS CVEs
 ]
 
 [project.optional-dependencies]
