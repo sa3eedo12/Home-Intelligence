@@ -41,7 +41,7 @@ Telegram / HA  ---> |  Orchestrator (PR 2)  |
 - [x] **PR 1 (this PR):** infra stack, compose overlays, shared SDK skeleton, docs
 - [x] **PR 2 (this PR):** orchestrator, Telegram bot, first agent, capability registry bootstrap
 - [x] **PR 3:** remaining agents and inter-agent workflows
-- [ ] **PR 4:** proactive scheduling, quiet hours, policy/rate limits
+- [x] **PR 4:** proactive scheduling, quiet hours, policy/rate limits
 
 ## 5) Setup
 
@@ -95,3 +95,21 @@ curl http://localhost:6333/healthz
 - Knowledge & Notes: "Search my notes for the air-fryer manual"
 - Household Operations: "What's on the shopping list?"
 - Entertainment: "Recommend a movie for tonight"
+
+## 10) Daily life (proactive flows)
+
+- `07:30` Asia/Dubai: `personal_assistant.morning_brief`
+- `21:00` Asia/Dubai: `personal_assistant.evening_recap`
+- Every 15 minutes: `system_health.anomaly_check`
+- `03:00`: `storage_backup.summarize_storage`
+- `03:30`: `storage_backup.validate_backup`
+- `02:00`: `knowledge_notes.index_path` over `NOTES_ROOT`
+- Event-driven: doorbell and system-threshold triggers from Redis streams
+
+## 11) Operating the system
+
+- `/quiet on|off|status` — temporary quiet-hours override
+- `/mute <agent|topic> [minutes]` and `/unmute <agent|topic>` — runtime suppression
+- `/jobs` and `/jobs run <id>` — inspect and run scheduler jobs
+- `GET /status` — machine-readable health + jobs + policy state
+- `GET /dashboard` — read-only HTML dashboard (auto-refresh every 30s)

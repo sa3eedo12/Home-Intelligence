@@ -1,11 +1,8 @@
 from __future__ import annotations
 
+import httpx
 from home_agents_sdk.telemetry import get_logger
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
-)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -15,7 +12,9 @@ from telegram.ext import (
     filters,
 )
 
+from .policy_engine import PolicyEngine
 from .router import Router
+from .scheduler import Scheduler
 from .voice import transcribe
 from .workflow import WorkflowEngine
 
@@ -26,13 +25,31 @@ def _is_allowed(user_id: int, allowed_ids: set[int]) -> bool:
     return user_id in allowed_ids
 
 
+async def _reply(update: Update, text: str) -> None:
+    if update.message is not None:
+        await update.message.reply_text(text)
+
+
+def _parse_minutes(raw: str | None, default_minutes: int, max_minutes: int) -> int:
+    if raw is None or not raw.isdigit():
+        return default_minutes
+    return min(max_minutes, max(1, int(raw)))
+
+
+async def _set_mute(policy_engine: PolicyEngine, key: str, minutes: int) -> int:
+    ttl_seconds = minutes * 60
+    await policy_engine._redis.set(f"policy:mute:{key}", "1", ex=ttl_seconds)
+    return ttl_seconds
+
+
 def _make_start(allowed_ids: set[int]):
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
             return
-        await update.message.reply_text(
+        await _reply(
+            update,
             "👋 Hello! I'm your Home Intelligence assistant."
-            " Send me a message or /ask to get started."
+            " Send me a message or /ask to get started.",
         )
 
     return start
@@ -48,9 +65,14 @@ def _make_help(allowed_ids: set[int]):
             "/help – Show this help\n"
             "/status – Show agent status\n"
             "/ask <message> – Route a request\n"
+            "/quiet on|off|status – Quiet-hours override\n"
+            "/mute <agent|topic> [minutes] – Temporarily mute notifications\n"
+            "/unmute <agent|topic> – Remove mute\n"
+            "/jobs – List scheduled jobs\n"
+            "/jobs run <id> – Run a job now\n"
             "Or just send a message directly."
         )
-        await update.message.reply_text(text)
+        await _reply(update, text)
 
     return help_cmd
 
@@ -65,7 +87,7 @@ def _make_status(allowed_ids: set[int]):
             text = f"Registered agents: {', '.join(agents) if agents else 'none'}"
         else:
             text = "Registry not available."
-        await update.message.reply_text(text)
+        await _reply(update, text)
 
     return status_cmd
 
@@ -76,7 +98,7 @@ def _make_ask(allowed_ids: set[int], router: Router):
             return
         text = " ".join(context.args or [])
         if not text:
-            await update.message.reply_text("Usage: /ask <your request>")
+            await _reply(update, "Usage: /ask <your request>")
             return
         user_id = str(update.effective_user.id)
         result = await router.handle(text, user_id)
@@ -105,7 +127,7 @@ def _make_voice(allowed_ids: set[int], router: Router):
             text = await transcribe(update.message.voice, context.bot)
         except Exception as exc:
             logger.warning("voice_transcribe_failed", error=str(exc))
-            await update.message.reply_text("Sorry, I couldn't transcribe that voice message.")
+            await _reply(update, "Sorry, I couldn't transcribe that voice message.")
             return
         user_id = str(update.effective_user.id)
         result = await router.handle(text, user_id)
@@ -125,6 +147,94 @@ def _make_photo(allowed_ids: set[int], router: Router):
         await _send_result(update, context, result)
 
     return photo_handler
+
+
+def _make_quiet(allowed_ids: set[int], policy_engine: PolicyEngine):
+    async def quiet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
+            return
+        mode = (context.args[0] if context.args else "status").lower()
+        overrides = policy_engine.policies.get("manual_overrides", {})
+        ttl_minutes = int(overrides.get("ttl_minutes_default", 60))
+        ttl_seconds = ttl_minutes * 60
+
+        if mode == "on":
+            await policy_engine.set_quiet_override("on", ttl_seconds)
+            await _reply(update, f"Quiet hours override set to ON for {ttl_minutes} min.")
+            return
+        if mode == "off":
+            await policy_engine.clear_quiet_override()
+            active = await policy_engine.quiet_hours_active()
+            await _reply(
+                update,
+                f"Quiet override cleared. Quiet hours are {'active' if active else 'inactive'}.",
+            )
+            return
+        if mode == "status":
+            active = await policy_engine.quiet_hours_active()
+            await _reply(update, f"Quiet hours are {'active' if active else 'inactive'}.")
+            return
+
+        await _reply(update, "Usage: /quiet on|off|status")
+
+    return quiet_cmd
+
+
+def _make_mute(allowed_ids: set[int], policy_engine: PolicyEngine):
+    async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
+            return
+        if not context.args:
+            await _reply(update, "Usage: /mute <agent|topic> [minutes]")
+            return
+        key = context.args[0]
+        overrides = policy_engine.policies.get("manual_overrides", {})
+        default_minutes = int(overrides.get("ttl_minutes_default", 60))
+        max_minutes = int(overrides.get("max_minutes", 720))
+        minutes = _parse_minutes(
+            context.args[1] if len(context.args) > 1 else None, default_minutes, max_minutes
+        )
+        ttl = await _set_mute(policy_engine, key, minutes)
+        await _reply(update, f"Muted {key} for {ttl} seconds.")
+
+    return mute_cmd
+
+
+def _make_unmute(allowed_ids: set[int], policy_engine: PolicyEngine):
+    async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
+            return
+        if not context.args:
+            await _reply(update, "Usage: /unmute <agent|topic>")
+            return
+        key = context.args[0]
+        await policy_engine._redis.delete(f"policy:mute:{key}")
+        await _reply(update, f"Unmuted {key}.")
+
+    return unmute_cmd
+
+
+def _make_jobs(allowed_ids: set[int], scheduler: Scheduler, admin_base_url: str):
+    async def jobs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
+            return
+        if context.args[:1] == ["run"] and len(context.args) > 1:
+            job_id = context.args[1]
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.post(f"{admin_base_url.rstrip('/')}/admin/run-job/{job_id}")
+                    resp.raise_for_status()
+                await _reply(update, f"Job {job_id} run result: {resp.json()}")
+            except Exception as exc:
+                await _reply(update, f"Failed to run job {job_id}: {exc}")
+            return
+
+        lines = ["Scheduled jobs:"]
+        for job in scheduler.list_jobs():
+            lines.append(f"- {job.id}: next={job.next_run_time or 'n/a'} status={job.last_status}")
+        await _reply(update, "\n".join(lines))
+
+    return jobs_cmd
 
 
 def _make_callback(allowed_ids: set[int], workflow_engine: WorkflowEngine, router: Router):
@@ -161,19 +271,19 @@ def _make_callback(allowed_ids: set[int], workflow_engine: WorkflowEngine, route
     return callback_handler
 
 
-async def _send_result(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict
-) -> None:
+async def _send_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict) -> None:
     reply_text = result.get("reply", "Done.")
     confirm = result.get("confirm")
     if confirm:
         workflow_id = confirm.get("workflow_id") or "pending"
-        keyboard = InlineKeyboardMarkup([
+        keyboard = InlineKeyboardMarkup(
             [
-                InlineKeyboardButton("✅ Confirm", callback_data=f"confirm:{workflow_id}"),
-                InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{workflow_id}"),
+                [
+                    InlineKeyboardButton("✅ Confirm", callback_data=f"confirm:{workflow_id}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{workflow_id}"),
+                ]
             ]
-        ])
+        )
         await update.message.reply_text(reply_text, reply_markup=keyboard)
     else:
         await update.message.reply_text(reply_text)
@@ -184,6 +294,9 @@ async def build_telegram_app(
     allowed_ids: set[int],
     router: Router,
     workflow_engine: WorkflowEngine,
+    policy_engine: PolicyEngine,
+    scheduler: Scheduler,
+    admin_base_url: str,
 ) -> Application:
     app = Application.builder().token(token).build()
     app.bot_data["registry"] = router._registry
@@ -192,9 +305,13 @@ async def build_telegram_app(
     app.add_handler(CommandHandler("help", _make_help(allowed_ids)))
     app.add_handler(CommandHandler("status", _make_status(allowed_ids)))
     app.add_handler(CommandHandler("ask", _make_ask(allowed_ids, router)))
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND, _make_text(allowed_ids, router)
-    ))
+    app.add_handler(CommandHandler("quiet", _make_quiet(allowed_ids, policy_engine)))
+    app.add_handler(CommandHandler("mute", _make_mute(allowed_ids, policy_engine)))
+    app.add_handler(CommandHandler("unmute", _make_unmute(allowed_ids, policy_engine)))
+    app.add_handler(CommandHandler("jobs", _make_jobs(allowed_ids, scheduler, admin_base_url)))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, _make_text(allowed_ids, router))
+    )
     app.add_handler(MessageHandler(filters.VOICE, _make_voice(allowed_ids, router)))
     app.add_handler(MessageHandler(filters.PHOTO, _make_photo(allowed_ids, router)))
     app.add_handler(CallbackQueryHandler(_make_callback(allowed_ids, workflow_engine, router)))

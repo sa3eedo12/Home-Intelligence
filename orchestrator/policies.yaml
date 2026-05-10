@@ -1,7 +1,39 @@
-quiet_hours: { start: "22:30", end: "07:00", tz: "Asia/Dubai" }
+quiet_hours:
+  enabled: true
+  start: "22:30"
+  end: "07:00"
+  tz: "Asia/Dubai"
+
 allow_during_quiet:
   - severity: critical
-rate_limits: []
+  - topic_pattern: "doorbell.*"
+  - capability_pattern: "personal_assistant.evening_recap"
+
+rate_limits:
+  - id: system_health.disk_warn
+    match: { agent: "system_health", topic: "disk_warn" }
+    max: 1
+    window_minutes: 60
+  - id: home_automation.suggestion
+    match: { agent: "home_automation", topic: "suggestion" }
+    max: 3
+    window_minutes: 1440
+  - id: doorbell.flood
+    match: { topic_pattern: "doorbell.*" }
+    max: 6
+    window_minutes: 10
+    rollup_message: "{count} more doorbell events in the last {window_minutes} min."
+
+dedupe:
+  default_fingerprint: "{agent}|{topic}|{text|sha256:64}"
+  window_minutes: 30
+
 confirmation_required:
   - capability_pattern: "home_automation.call_service"
-    when: "data.service in ['lock.unlock'] or domain == 'alarm_control_panel'"
+    when: "data.service in ['lock.unlock'] or data.domain == 'alarm_control_panel'"
+  - capability_pattern: "system_health.restart_container"
+  - capability_pattern: "household_ops.shopping_list_clear"
+
+manual_overrides:
+  ttl_minutes_default: 60
+  max_minutes: 720
