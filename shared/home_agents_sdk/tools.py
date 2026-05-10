@@ -20,7 +20,7 @@ def tool(
     side_effects: bool = False,
     **kwargs: Any,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    resolved_tool_id = tool_id or kwargs.get("id")
+    resolved_tool_id = tool_id if tool_id is not None else kwargs.get("id")
     if not resolved_tool_id:
         raise ValueError("tool_id is required")
 

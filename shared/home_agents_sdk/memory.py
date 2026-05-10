@@ -26,12 +26,21 @@ class KVStore:
 
 
 class EpisodicStore:
+    _allowed_columns: dict[str, set[str]] = {
+        "alerts": {"agent", "severity", "topic", "payload", "acknowledged_at"},
+        "reminders": {"user_id", "text", "due_at", "recurrence", "status"},
+        "workflows": {"id", "status", "payload", "updated_at"},
+    }
+
     def __init__(self, pool: asyncpg.Pool) -> None:
         self.pool = pool
 
     async def write(self, table: str, payload: dict[str, Any]) -> None:
-        if table not in {"alerts", "reminders", "workflows"}:
+        if table not in self._allowed_columns:
             raise ValueError("Unsupported table")
+        unknown = set(payload) - self._allowed_columns[table]
+        if unknown:
+            raise ValueError(f"Unsupported columns for {table}: {sorted(unknown)}")
         columns = ", ".join(payload.keys())
         placeholders = ", ".join(f"${i}" for i in range(1, len(payload) + 1))
         values = list(payload.values())

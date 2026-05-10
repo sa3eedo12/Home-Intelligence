@@ -19,9 +19,9 @@ class NPUClient:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.request(method, f"{self.base_url}{path}", **kwargs)
         except httpx.TimeoutException as exc:
-            raise NPUUnavailable("NPU service timeout") from exc
+            raise NPUUnavailable(f"NPU service timeout: {exc}") from exc
         except httpx.HTTPError as exc:
-            raise NPUUnavailable("NPU service unavailable") from exc
+            raise NPUUnavailable(f"NPU service unavailable: {exc}") from exc
 
         if response.status_code >= 500:
             raise NPUUnavailable(f"NPU service 5xx error: {response.status_code}")

@@ -7,8 +7,13 @@ from collections.abc import Callable
 import structlog
 from fastapi import FastAPI, Request
 
+_STRUCTLOG_CONFIGURED = False
+
 
 def _configure_structlog() -> None:
+    global _STRUCTLOG_CONFIGURED
+    if _STRUCTLOG_CONFIGURED:
+        return
     structlog.configure(
         processors=[
             structlog.processors.TimeStamper(fmt="iso"),
@@ -16,6 +21,7 @@ def _configure_structlog() -> None:
             structlog.processors.JSONRenderer(),
         ],
     )
+    _STRUCTLOG_CONFIGURED = True
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:

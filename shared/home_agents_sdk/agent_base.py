@@ -8,6 +8,7 @@ import yaml
 from fastapi import FastAPI, HTTPException
 
 from .schemas import InvokeRequest, InvokeResponse, Manifest
+from .telemetry import get_logger
 from .tools import get_tool, list_tools
 
 
@@ -40,6 +41,7 @@ def build_app(agent_name: str, manifest_path: str) -> FastAPI:
     _validate_manifest_tools(manifest)
 
     app = FastAPI(title=f"{agent_name}-agent")
+    logger = get_logger(agent_name)
     ctx = {"bus": None, "memory": None, "llm": None, "npu": None}
 
     @app.get("/health")
@@ -59,6 +61,7 @@ def build_app(agent_name: str, manifest_path: str) -> FastAPI:
             result = await _invoke_tool(spec.fn, req.payload, ctx)
             return InvokeResponse(ok=True, result=result)
         except (TypeError, ValueError, KeyError) as exc:  # pragma: no cover - surfaced to caller
+            logger.warning("invoke_failed", capability=req.capability, error=str(exc))
             return InvokeResponse(ok=False, error=str(exc))
 
     return app
