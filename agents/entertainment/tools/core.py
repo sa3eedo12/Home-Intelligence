@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from typing import Any
@@ -91,9 +92,14 @@ async def _upsert_media(items: list[dict[str, Any]]) -> int:
     for idx, item in enumerate(items):
         text = f"{item.get('kind', '')} {item.get('title', '')} {item.get('summary', '')}".strip()
         vector = await emb.embed(text)
+        unique_source = (
+            f"{item.get('kind', '')}|{item.get('title', '')}|"
+            f"{item.get('year', '')}|{item.get('source', '')}|{idx}"
+        )
+        point_id = f"media-{hashlib.sha256(unique_source.encode()).hexdigest()[:24]}"
         points.append(
             models.PointStruct(
-                id=f"media-{idx}-{item.get('title', '').lower()}",
+                id=point_id,
                 vector=vector,
                 payload={
                     "kind": item.get("kind", "movie"),

@@ -284,7 +284,10 @@ async def evening_recap() -> dict[str, str]:
             ),
             today,
         )
-        alerts = await conn.fetch("SELECT topic FROM alerts ORDER BY created_at DESC LIMIT 3")
+        try:
+            alerts = await conn.fetch("SELECT topic FROM alerts ORDER BY created_at DESC LIMIT 3")
+        except Exception:
+            alerts = []
     body = (
         f"### Evening Recap\n"
         f"- Tomorrow: {', '.join(r['title'] for r in appointments) or 'No appointments'}\n"

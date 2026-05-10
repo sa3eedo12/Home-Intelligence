@@ -69,10 +69,10 @@ def _chunk_text(text: str, chunk_tokens: int = 500, overlap: int = 80) -> list[d
     step = max(1, chunk_tokens - overlap)
     for idx, start in enumerate(range(0, len(tokens), step)):
         stop = min(len(tokens), start + chunk_tokens)
-        chunk_tokens_slice = tokens[start:stop]
-        if not chunk_tokens_slice:
+        token_slice = tokens[start:stop]
+        if not token_slice:
             continue
-        chunk_text = " ".join(chunk_tokens_slice)
+        chunk_text = " ".join(token_slice)
         chunks.append(
             {
                 "chunk_index": idx,

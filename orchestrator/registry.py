@@ -127,5 +127,5 @@ class CapabilityRegistry:
     def capability_counts(self) -> dict[str, int]:
         counts = {agent: 0 for agent in self._agent_urls}
         for agent, _capability in self._capabilities:
-            counts[agent] = counts.get(agent, 0) + 1
+            counts[agent] += 1
         return counts

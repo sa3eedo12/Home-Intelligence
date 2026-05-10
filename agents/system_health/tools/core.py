@@ -147,6 +147,7 @@ def scan() -> dict[str, Any]:
 
 
 def _zscore_anomaly(series: Sequence[float], value: float, threshold: float) -> bool:
+    # We require at least 4 historical samples to avoid unstable z-scores on tiny windows.
     if len(series) < 4:
         return False
     sigma = pstdev(series)

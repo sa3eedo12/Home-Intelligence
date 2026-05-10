@@ -175,17 +175,28 @@ async def pantry_add(item: str, qty: float, unit: str, expiry: str | None = None
     expires_on = _parse_dt(expiry).date() if expiry else None
     pool = await _pool()
     async with pool.acquire() as conn:
-        await conn.execute(
+        updated = await conn.execute(
             """
-            INSERT INTO pantry(item, qty, unit, expires_on, updated_at)
-            VALUES ($1, $2, $3, $4, now())
-            ON CONFLICT DO NOTHING
+            UPDATE pantry
+            SET qty = qty + $2, unit = $3, expires_on = COALESCE($4, expires_on), updated_at = now()
+            WHERE lower(item) = lower($1)
             """,
             item,
             qty,
             unit,
             expires_on,
         )
+        if not updated.endswith("1"):
+            await conn.execute(
+                """
+                INSERT INTO pantry(item, qty, unit, expires_on, updated_at)
+                VALUES ($1, $2, $3, $4, now())
+                """,
+                item,
+                qty,
+                unit,
+                expires_on,
+            )
     return {"ok": True, "item": item}
 
 

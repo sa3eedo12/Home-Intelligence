@@ -36,6 +36,7 @@ def disk_usage(threshold_pct: float = 85.0) -> dict[str, Any]:
 
 
 def _iter_files(root: str, max_seconds_per_dir: float = 2.0):
+    """Yield files recursively with a per-directory time budget to avoid long scans stalling."""
     stack = [root]
     while stack:
         current = stack.pop()
@@ -143,7 +144,13 @@ def validate_backup(config_path: str = "/etc/storage_backup/backup_targets.yaml"
             continue
 
         entries = list(bpath.iterdir())
-        latest_mtime = max((e.stat().st_mtime for e in entries), default=0)
+        mtimes = []
+        for entry in entries:
+            try:
+                mtimes.append(entry.stat().st_mtime)
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+        latest_mtime = max(mtimes, default=0)
         age_hours = (time.time() - latest_mtime) / 3600 if latest_mtime else 99999
         glob_ok = all(any(fnmatch.fnmatch(e.name, g) for e in entries) for g in globs)
         ok = bool(entries) and age_hours <= max_age_hours and glob_ok
