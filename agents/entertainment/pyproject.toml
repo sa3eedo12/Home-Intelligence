@@ -1,0 +1,32 @@
+[project]
+name = "entertainment"
+version = "0.3.0"
+description = "Entertainment recommendation and media organization agent"
+requires-python = ">=3.12"
+dependencies = [
+  "home_agents_sdk",
+  "asyncpg>=0.29",
+  "qdrant-client>=1.10",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.4",
+]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "ASYNC"]

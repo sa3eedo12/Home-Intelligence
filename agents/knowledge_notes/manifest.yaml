@@ -1,0 +1,38 @@
+agent: knowledge_notes
+version: 0.3.0
+description: Document indexing, semantic search, summarization, and RAG Q&A for notes.
+defaults:
+  llm: qwen3:8b
+  timeout_s: 60
+capabilities:
+  - id: index_path
+    description: Walk a directory, chunk + embed supported docs, and upsert into Qdrant notes collection.
+    side_effects: true
+    cost: high
+  - id: search
+    description: Semantic search in notes collection and return top chunks.
+    side_effects: false
+    cost: low
+  - id: summarize
+    description: Summarize a document or search results.
+    side_effects: false
+    cost: medium
+    llm: qwen3:8b
+  - id: ask
+    description: RAG Q&A over indexed chunks with source markers.
+    side_effects: false
+    cost: high
+    llm: qwen3:8b
+  - id: list_indexed
+    description: Show indexed documents statistics.
+    side_effects: false
+    cost: low
+  - id: forget_path
+    description: Remove chunks for a given path.
+    side_effects: true
+    cost: low
+subscribes:
+  - memory.updates
+publishes:
+  - memory.updates
+  - notify.outbound

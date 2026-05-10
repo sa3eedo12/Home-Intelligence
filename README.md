@@ -40,7 +40,7 @@ Telegram / HA  ---> |  Orchestrator (PR 2)  |
 
 - [x] **PR 1 (this PR):** infra stack, compose overlays, shared SDK skeleton, docs
 - [x] **PR 2 (this PR):** orchestrator, Telegram bot, first agent, capability registry bootstrap
-- [ ] **PR 3:** remaining agents and inter-agent workflows
+- [x] **PR 3:** remaining agents and inter-agent workflows
 - [ ] **PR 4:** proactive scheduling, quiet hours, policy/rate limits
 
 ## 5) Setup
@@ -85,3 +85,13 @@ curl http://localhost:6333/healthz
 - **gfx1150 detection issues:** in `docker-compose.rocm.yml`, `HSA_OVERRIDE_GFX_VERSION=11.5.1` is set for Radeon 890M; fallback to `11.0.0` if needed.
 - **NPU permissions:** ensure `/dev/accel/accel0` exists and your runtime can access group `render`.
 - **Model conversion:** conversion scripts are placeholders; adapt exact commands to current Lemonade + AMD Quark documentation.
+
+## 9) Try each agent
+
+- Home Automation: "turn off the living room lights"
+- Personal Assistant: "Remind me to renew my car insurance on Dec 15"
+- System Health: "How is the system?"
+- Storage & Backup: "Find duplicates in /mnt/media"
+- Knowledge & Notes: "Search my notes for the air-fryer manual"
+- Household Operations: "What's on the shopping list?"
+- Entertainment: "Recommend a movie for tonight"

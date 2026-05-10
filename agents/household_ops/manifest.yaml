@@ -1,0 +1,62 @@
+agent: household_ops
+version: 0.3.0
+description: Chores, shopping, pantry, and meal planning.
+defaults:
+  llm: qwen3:8b
+  timeout_s: 45
+capabilities:
+  - id: chores_add
+    description: Add a chore with optional recurrence.
+    side_effects: true
+    cost: low
+  - id: chores_list
+    description: List pending chores.
+    side_effects: false
+    cost: low
+  - id: chores_complete
+    description: Mark a chore complete and roll recurrence.
+    side_effects: true
+    cost: low
+  - id: shopping_list_add
+    description: Add comma-separated shopping items.
+    side_effects: true
+    cost: low
+  - id: shopping_list_show
+    description: Show current shopping list.
+    side_effects: false
+    cost: low
+  - id: shopping_list_check
+    description: Check items as completed.
+    side_effects: true
+    cost: low
+  - id: shopping_list_clear
+    description: Clear shopping list.
+    side_effects: true
+    require_confirmation: true
+    cost: low
+  - id: pantry_add
+    description: Add pantry item quantity.
+    side_effects: true
+    cost: low
+  - id: pantry_consume
+    description: Decrement pantry quantity.
+    side_effects: true
+    cost: low
+  - id: pantry_low_stock
+    description: List low-stock pantry items.
+    side_effects: false
+    cost: low
+  - id: meal_plan
+    description: Plan meals for N days using pantry and preferences.
+    side_effects: false
+    cost: high
+    llm: qwen3.6:35b-a3b
+  - id: meal_recipe
+    description: Return recipe for a planned meal.
+    side_effects: false
+    cost: medium
+subscribes:
+  - events.home
+publishes:
+  - events.system
+  - notify.outbound

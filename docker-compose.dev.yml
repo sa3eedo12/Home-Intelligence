@@ -27,6 +27,30 @@ services:
     ports:
       - "8101:8000"
 
+  personal_assistant:
+    ports:
+      - "8102:8000"
+
+  system_health:
+    ports:
+      - "8103:8000"
+
+  storage_backup:
+    ports:
+      - "8104:8000"
+
+  knowledge_notes:
+    ports:
+      - "8105:8000"
+
+  household_ops:
+    ports:
+      - "8106:8000"
+
+  entertainment:
+    ports:
+      - "8107:8000"
+
   sdk-dev:
     image: python:3.12-slim
     working_dir: /workspace/shared

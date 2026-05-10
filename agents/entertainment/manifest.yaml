@@ -1,0 +1,37 @@
+agent: entertainment
+version: 0.3.0
+description: Recommendations, library indexing/search, and watch history.
+defaults:
+  llm: qwen3:8b
+  timeout_s: 45
+capabilities:
+  - id: recommend
+    description: Recommend media by mood/type using local catalog or LLM fallback.
+    side_effects: false
+    cost: medium
+  - id: library_index
+    description: Index local media library from JSON or directory walk into Qdrant.
+    side_effects: true
+    cost: high
+  - id: library_search
+    description: Search indexed media metadata.
+    side_effects: false
+    cost: low
+  - id: mark_watched
+    description: Mark title watched/played.
+    side_effects: true
+    cost: low
+  - id: recently_watched
+    description: Show recent watch/play entries.
+    side_effects: false
+    cost: low
+  - id: discover
+    description: LLM-only discovery outside local library.
+    side_effects: false
+    cost: medium
+    llm: qwen3:8b
+subscribes:
+  - events.home
+publishes:
+  - notify.outbound
+  - events.system
