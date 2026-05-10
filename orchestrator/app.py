@@ -40,7 +40,9 @@ def _parse_agent_urls(raw: str) -> dict[str, str]:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Startup
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    database_url = os.environ.get("DATABASE_URL", "postgresql://agents:changeme@postgres:5432/agents")
+    database_url = os.environ.get(
+        "DATABASE_URL", "postgresql://agents:changeme@postgres:5432/agents"
+    )
     qdrant_url = os.environ.get("QDRANT_URL", "http://qdrant:6333")
     ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434")
     lemonade_url = os.environ.get("LEMONADE_URL", "http://lemonade:8000")
@@ -153,6 +155,7 @@ async def status() -> dict:
         "redis": results[3],
         "qdrant": results[4],
         "agents": app.state.registry.agents(),
+        "capability_counts": app.state.registry.capability_counts(),
     }
 
 

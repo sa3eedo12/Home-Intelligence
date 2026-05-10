@@ -1,0 +1,41 @@
+agent: system_health
+version: 0.3.0
+description: Hardware and container monitoring, anomaly checks, and optimization suggestions.
+defaults:
+  llm: qwen3:8b
+  timeout_s: 30
+capabilities:
+  - id: scan
+    description: One-shot scan including CPU, memory, disk, process, and container health.
+    side_effects: false
+    cost: medium
+  - id: container_status
+    description: List all containers with status, restart count, and recent logs.
+    side_effects: false
+    cost: low
+  - id: restart_container
+    description: Restart a container by name.
+    side_effects: true
+    require_confirmation: true
+    cost: low
+  - id: top_processes
+    description: Top N process consumers by CPU or memory.
+    side_effects: false
+    cost: low
+  - id: gpu_status
+    description: Return ROCm status from rocm-smi if available.
+    side_effects: false
+    cost: low
+  - id: anomaly_check
+    description: Compare current metrics to rolling baseline and detect anomalies.
+    side_effects: false
+    cost: medium
+  - id: suggest_optimizations
+    description: Propose actionable optimization steps from observed health metrics.
+    side_effects: false
+    cost: high
+subscribes:
+  - events.system
+publishes:
+  - events.system
+  - notify.outbound

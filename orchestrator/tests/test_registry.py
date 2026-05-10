@@ -54,6 +54,7 @@ async def test_bootstrap_embeds_capabilities():
     registry = _make_registry()
     await registry.bootstrap()
     registry._qdrant.upsert.assert_called()
+    assert registry.capability_counts()["home_automation"] == 2
 
 
 @pytest.mark.asyncio

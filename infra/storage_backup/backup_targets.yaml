@@ -1,0 +1,5 @@
+backups:
+  - name: home-config
+    path: /mnt/backups/home-config
+    max_age_hours: 36
+    expect_globs: ["*.tar.zst"]

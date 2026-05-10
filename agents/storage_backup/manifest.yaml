@@ -1,0 +1,37 @@
+agent: storage_backup
+version: 0.3.0
+description: Disk usage, duplicate detection, largest files, and backup validation.
+defaults:
+  llm: qwen3:8b
+  timeout_s: 45
+capabilities:
+  - id: disk_usage
+    description: Per-mount disk usage and threshold flags.
+    side_effects: false
+    cost: low
+  - id: largest_files
+    description: Top N largest files under a path.
+    side_effects: false
+    cost: medium
+  - id: find_duplicates
+    description: Find duplicate files using size and SHA-256 in collision groups.
+    side_effects: false
+    cost: high
+  - id: validate_backup
+    description: Validate backup recency, non-empty path, and expected globs.
+    side_effects: false
+    cost: medium
+  - id: cleanup_suggestions
+    description: Produce safe read-only cleanup suggestions.
+    side_effects: false
+    cost: high
+    llm: qwen3.6:35b-a3b
+  - id: summarize_storage
+    description: Telegram-friendly storage status summary.
+    side_effects: false
+    cost: low
+subscribes:
+  - events.system
+publishes:
+  - events.system
+  - notify.outbound

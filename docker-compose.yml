@@ -100,6 +100,12 @@ services:
       lemonade: { condition: service_healthy }
       ollama: { condition: service_healthy }
       home_automation: { condition: service_started }
+      personal_assistant: { condition: service_started }
+      system_health: { condition: service_started }
+      storage_backup: { condition: service_started }
+      knowledge_notes: { condition: service_started }
+      household_ops: { condition: service_started }
+      entertainment: { condition: service_started }
     networks: [agents]
     restart: unless-stopped
     healthcheck:
@@ -113,6 +119,127 @@ services:
       context: .
       dockerfile: agents/home_automation/Dockerfile
     env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  personal_assistant:
+    build:
+      context: .
+      dockerfile: agents/personal_assistant/Dockerfile
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  system_health:
+    build:
+      context: .
+      dockerfile: agents/system_health/Dockerfile
+    env_file: .env
+    pid: "host"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  storage_backup:
+    build:
+      context: .
+      dockerfile: agents/storage_backup/Dockerfile
+    env_file: .env
+    volumes:
+      - /mnt:/mnt:ro
+      - /home:/host-home:ro
+      - ./infra/storage_backup/backup_targets.yaml:/etc/storage_backup/backup_targets.yaml:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  knowledge_notes:
+    build:
+      context: .
+      dockerfile: agents/knowledge_notes/Dockerfile
+    env_file: .env
+    volumes:
+      - ./data/notes:/data/notes
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  household_ops:
+    build:
+      context: .
+      dockerfile: agents/household_ops/Dockerfile
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  entertainment:
+    build:
+      context: .
+      dockerfile: agents/entertainment/Dockerfile
+    env_file: .env
+    volumes:
+      - ./data/media:/data/media
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
