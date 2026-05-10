@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import Any
 
 import httpx
@@ -11,6 +12,7 @@ logger = get_logger("registry")
 
 _COLLECTION = "capabilities"
 _VECTOR_SIZE = 1024
+_NS = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")  # uuid.NAMESPACE_URL
 
 
 class CapabilityRegistry:
@@ -80,7 +82,7 @@ class CapabilityRegistry:
                 logger.warning("registry_embed_failed", agent=agent_id, cap=cap_id, error=str(exc))
                 continue
 
-            point_id = abs(hash(f"{agent_id}:{cap_id}")) % (2**63)
+            point_id = str(uuid.uuid5(_NS, f"{agent_id}:{cap_id}"))
             points.append(
                 models.PointStruct(
                     id=point_id,
