@@ -15,9 +15,17 @@ class ToolSpec:
 _TOOLS: dict[str, ToolSpec] = {}
 
 
-def tool(id: str, side_effects: bool = False) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def tool(
+    tool_id: str | None = None,
+    side_effects: bool = False,
+    **kwargs: Any,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    resolved_tool_id = tool_id or kwargs.get("id")
+    if not resolved_tool_id:
+        raise ValueError("tool_id is required")
+
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-        _TOOLS[id] = ToolSpec(id=id, side_effects=side_effects, fn=fn)
+        _TOOLS[resolved_tool_id] = ToolSpec(id=resolved_tool_id, side_effects=side_effects, fn=fn)
         return fn
 
     return decorator

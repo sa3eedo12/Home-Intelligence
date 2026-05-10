@@ -14,7 +14,9 @@ class KVStore:
 
     async def get(self, key: str) -> str | None:
         value = await self.client.get(key)
-        return str(value) if value is not None else None
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        return value if value is not None else None
 
     async def set(self, key: str, value: str, ttl_seconds: int | None = None) -> None:
         await self.client.set(key, value, ex=ttl_seconds)
@@ -31,7 +33,7 @@ class EpisodicStore:
         if table not in {"alerts", "reminders", "workflows"}:
             raise ValueError("Unsupported table")
         columns = ", ".join(payload.keys())
-        placeholders = ", ".join(f"${i}" for i, _ in enumerate(payload.values(), start=1))
+        placeholders = ", ".join(f"${i}" for i in range(1, len(payload) + 1))
         values = list(payload.values())
         safe_table = {"alerts": "alerts", "reminders": "reminders", "workflows": "workflows"}[table]
         query = f"INSERT INTO {safe_table} ({columns}) VALUES ({placeholders})"

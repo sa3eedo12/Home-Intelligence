@@ -8,7 +8,7 @@ import yaml
 from fastapi import FastAPI, HTTPException
 
 from .schemas import InvokeRequest, InvokeResponse, Manifest
-from .tools import get_tool, list_tools, tool
+from .tools import get_tool, list_tools
 
 
 async def _invoke_tool(fn: Any, payload: dict[str, Any], ctx: dict[str, Any]) -> Any:
@@ -58,10 +58,10 @@ def build_app(agent_name: str, manifest_path: str) -> FastAPI:
         try:
             result = await _invoke_tool(spec.fn, req.payload, ctx)
             return InvokeResponse(ok=True, result=result)
-        except Exception as exc:  # pragma: no cover - surfaced to caller
+        except (TypeError, ValueError, KeyError) as exc:  # pragma: no cover - surfaced to caller
             return InvokeResponse(ok=False, error=str(exc))
 
     return app
 
 
-__all__ = ["build_app", "tool"]
+__all__ = ["build_app"]

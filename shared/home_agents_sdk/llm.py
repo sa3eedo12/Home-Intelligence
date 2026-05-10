@@ -14,7 +14,7 @@ class OllamaClient:
         messages: list[dict[str, str]],
         model: str | None = None,
         temperature: float = 0.2,
-        format: str | None = None,
+        response_format: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
@@ -22,8 +22,8 @@ class OllamaClient:
             "stream": False,
             "options": {"temperature": temperature},
         }
-        if format is not None:
-            payload["format"] = format
+        if response_format is not None:
+            payload["format"] = response_format
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(f"{self.base_url}/api/chat", json=payload)
             resp.raise_for_status()
@@ -34,7 +34,7 @@ class OllamaClient:
         prompt: str,
         model: str | None = None,
         temperature: float = 0.2,
-        format: str | None = None,
+        response_format: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
@@ -42,8 +42,8 @@ class OllamaClient:
             "stream": False,
             "options": {"temperature": temperature},
         }
-        if format is not None:
-            payload["format"] = format
+        if response_format is not None:
+            payload["format"] = response_format
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(f"{self.base_url}/api/generate", json=payload)
             resp.raise_for_status()

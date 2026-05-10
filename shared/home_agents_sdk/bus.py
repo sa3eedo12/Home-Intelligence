@@ -53,9 +53,9 @@ class EventBus:
             else:
                 messages = await self.client.xread({stream: "$"}, count=10, block=1000)
 
-            for stream_name, entries in messages:
-                for message_id, fields in entries:
-                    payload = json.loads(fields.get("payload", "{}"))
+            for _stream_name, entries in messages:
+                for _message_id, _fields in entries:
+                    payload = json.loads(_fields.get("payload", "{}"))
                     await handler(payload)
                     if group:
-                        await self.client.xack(stream_name, group, message_id)
+                        await self.client.xack(_stream_name, group, _message_id)
