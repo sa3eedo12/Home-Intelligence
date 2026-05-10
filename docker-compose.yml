@@ -88,6 +88,44 @@ services:
       retries: 6
     networks: [agents]
 
+  orchestrator:
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      qdrant: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+      home_automation: { condition: service_started }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  home_automation:
+    build:
+      context: .
+      dockerfile: agents/home_automation/Dockerfile
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
 networks:
   agents:
     driver: bridge

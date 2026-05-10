@@ -39,7 +39,7 @@ Telegram / HA  ---> |  Orchestrator (PR 2)  |
 ## 4) Status: PR 1 of 4 — foundation only
 
 - [x] **PR 1 (this PR):** infra stack, compose overlays, shared SDK skeleton, docs
-- [ ] **PR 2:** orchestrator, Telegram bot, first agent, capability registry bootstrap
+- [x] **PR 2 (this PR):** orchestrator, Telegram bot, first agent, capability registry bootstrap
 - [ ] **PR 3:** remaining agents and inter-agent workflows
 - [ ] **PR 4:** proactive scheduling, quiet hours, policy/rate limits
 

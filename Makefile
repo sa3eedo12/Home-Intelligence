@@ -33,11 +33,19 @@ prepare-npu-models: ## Prepare all NPU models on host
 test-sdk: ## Run SDK tests
 >cd shared && pytest
 
+test-orchestrator: ## Run orchestrator tests
+>cd orchestrator && pytest
+
+test-home-automation: ## Run home_automation agent tests
+>cd agents/home_automation && pytest
+
 fmt: ## Format SDK code
 >ruff format shared
 
-lint: ## Lint SDK code
->ruff check shared
+lint: ## Lint all Python code
+>ruff check shared orchestrator agents
+
+test: test-sdk test-orchestrator test-home-automation ## Run all tests
 
 help: ## List available targets
 >@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "%-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST)

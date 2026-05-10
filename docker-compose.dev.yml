@@ -19,6 +19,14 @@ services:
     ports:
       - "8000:8000"
 
+  orchestrator:
+    ports:
+      - "8080:8000"
+
+  home_automation:
+    ports:
+      - "8101:8000"
+
   sdk-dev:
     image: python:3.12-slim
     working_dir: /workspace/shared
