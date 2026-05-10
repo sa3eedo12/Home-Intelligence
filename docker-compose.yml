@@ -1,0 +1,105 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    env_file: .env
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [agents]
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [agents]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    env_file: .env
+    command: ["./qdrant", "--config-path", "/qdrant/config/config.yaml"]
+    volumes:
+      - qdrant-data:/qdrant/storage
+      - ./infra/qdrant/config.yaml:/qdrant/config/config.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [agents]
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:11434/api/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [agents]
+
+  lemonade:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    env_file: .env
+    command:
+      - sh
+      - -lc
+      - |
+        python - <<'PY'
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == '/health':
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'ok')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+            def log_message(self, format, *args):
+                pass
+        HTTPServer(('0.0.0.0', 8000), Handler).serve_forever()
+        PY
+    volumes:
+      - lemonade-models:/models
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [agents]
+
+networks:
+  agents:
+    driver: bridge
+
+volumes:
+  redis-data:
+  pg-data:
+  qdrant-data:
+  ollama-data:
+  lemonade-models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./infra/lemonade/models

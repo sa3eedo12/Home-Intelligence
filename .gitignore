@@ -1,0 +1,14 @@
+.env
+.env.local
+infra/lemonade/models/*
+!infra/lemonade/models/.gitkeep
+data/
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+node_modules/
+.idea/
+.vscode/

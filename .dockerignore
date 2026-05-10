@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+.env.local
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+node_modules/
+data/

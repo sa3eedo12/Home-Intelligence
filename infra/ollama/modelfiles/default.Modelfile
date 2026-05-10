@@ -1,0 +1,4 @@
+FROM qwen3:8b
+PARAMETER temperature 0.2
+PARAMETER num_ctx 8192
+SYSTEM """You are a helpful home assistant. Respond concisely. When asked to take an action, use the provided tools."""

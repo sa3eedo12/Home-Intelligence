@@ -1,0 +1,15 @@
+services:
+  lemonade:
+    # TODO: Confirm this tag against latest AMD Lemonade docs for your host setup.
+    image: amd/lemonade-server:latest
+    devices:
+      - /dev/accel/accel0
+    group_add:
+      - render
+    volumes:
+      - ./infra/lemonade/models:/models:ro
+      - ./infra/lemonade/server.yaml:/etc/lemonade/server.yaml:ro
+    environment:
+      LEMONADE_MODELS_DIR: /models
+      LEMONADE_HOST: 0.0.0.0
+      LEMONADE_PORT: "8000"
