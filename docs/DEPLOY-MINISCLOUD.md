@@ -95,6 +95,7 @@ These paths must exist on the host before deployment:
 - No NPU acceleration on this path; Lemonade is a placeholder HTTP stub
 - The ROCm overlay is not applied here
 - `system_health` keeps `/proc` and `/sys`, but Docker-socket-based introspection is disabled on containerd hosts
+- `storage_backup` only sees the repo-managed `data/media` and `data/notes` folders on this GUI path
 
 ## Troubleshooting
 
