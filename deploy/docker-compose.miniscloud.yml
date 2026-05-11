@@ -168,9 +168,11 @@ services:
   storage_backup:
     image: ghcr.io/sa3eedo12/home-intelligence/storage_backup:latest
     env_file: .env
+    environment:
+      STORAGE_SCAN_ROOTS: /data/media,/data/notes
     volumes:
-      - ${HOME_INTEL_DIR}/data/media:/mnt:ro
-      - ${HOME_INTEL_DIR}/data/notes:/host-home:ro
+      - ${HOME_INTEL_DIR}/data/media:/data/media:ro
+      - ${HOME_INTEL_DIR}/data/notes:/data/notes:ro
       - ${HOME_INTEL_DIR}/infra/storage_backup/backup_targets.yaml:/etc/storage_backup/backup_targets.yaml:ro
     depends_on:
       redis: { condition: service_healthy }
