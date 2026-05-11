@@ -4,7 +4,16 @@ import importlib
 import sys
 from pathlib import Path
 
+import yaml
 from home_agents_sdk.tools import clear_tools
+
+
+def test_manifest_optional_types_are_yaml_parseable():
+    manifest = yaml.safe_load((Path(__file__).parent.parent / "manifest.yaml").read_text(encoding="utf-8"))
+    capabilities = {cap["id"]: cap for cap in manifest["capabilities"]}
+    assert capabilities["list_entities"]["inputs"]["domain"] == "string?"
+    assert capabilities["doorbell.snapshot"]["inputs"]["entity_id"] == "string?"
+    assert capabilities["doorbell.summarize_event"]["inputs"]["entity_id"] == "string?"
 
 
 def test_manifest_and_tools_consistent():
