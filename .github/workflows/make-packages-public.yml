@@ -33,11 +33,13 @@ jobs:
             exit 1
           fi
 
+          response_file=$(mktemp "$RUNNER_TEMP/ghcr-visibility-XXXXXX.json")
+          trap 'rm -f "$response_file"' EXIT
           encoded=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1], safe=''))" "$PACKAGE")
 
           # User-scope endpoint is correct for this repo owner account.
           # If ownership moves to an org, use /orgs/{org}/packages/... instead.
-          http_code=$(curl -sS -o /tmp/resp.json -w "%{http_code}" -X PATCH \
+          http_code=$(curl -sS -o "$response_file" -w "%{http_code}" -X PATCH \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -47,8 +49,12 @@ jobs:
 
           if [ "$http_code" = "204" ]; then
             echo "✅ $PACKAGE is now public"
+          elif [ "$http_code" = "404" ]; then
+            echo "::error::Package $PACKAGE was not found (HTTP 404). Verify the package exists in GHCR and the PAT owner has access."
+            cat "$response_file" || true
+            exit 1
           else
             echo "::error::Failed to make $PACKAGE public (HTTP $http_code)"
-            cat /tmp/resp.json || true
+            cat "$response_file" || true
             exit 1
           fi
