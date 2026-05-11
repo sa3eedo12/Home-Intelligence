@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import re
 import sys
 from pathlib import Path
 
@@ -10,6 +11,11 @@ from home_agents_sdk.tools import clear_tools
 
 def test_manifest_optional_types_are_yaml_parseable():
     manifest_path = Path(__file__).parent.parent / "manifest.yaml"
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    assert not re.search(
+        r":\s*(string\?|integer\?|boolean\?|object\?|array\?|number\?)(\s*[},]|$)",
+        manifest_text,
+    )
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     capabilities = {cap["id"]: cap for cap in manifest["capabilities"]}
     assert capabilities["list_entities"]["inputs"]["domain"] == "string?"

@@ -2,6 +2,10 @@ from pathlib import Path
 
 
 def test_dockerfile_runs_orchestrator_as_package() -> None:
+    repo_orchestrator_dir = Path(__file__).resolve().parents[1]
+    assert (repo_orchestrator_dir / "pyproject.toml").exists()
+    assert (repo_orchestrator_dir / "__init__.py").exists()
+
     dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
     text = dockerfile.read_text(encoding="utf-8")
 
