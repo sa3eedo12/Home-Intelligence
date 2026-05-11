@@ -9,7 +9,7 @@ import yaml
 from home_agents_sdk.tools import clear_tools
 
 
-def test_manifest_optional_types_are_yaml_parseable():
+def test_manifest_optional_types_are_quoted():
     manifest_path = Path(__file__).parent.parent / "manifest.yaml"
     manifest_text = manifest_path.read_text(encoding="utf-8")
     assert not re.search(
