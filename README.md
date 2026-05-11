@@ -43,6 +43,10 @@ Telegram / HA  ---> |  Orchestrator (PR 2)  |
 - [x] **PR 3:** remaining agents and inter-agent workflows
 - [x] **PR 4:** proactive scheduling, quiet hours, policy/rate limits
 
+## Deploy on Minis Cloud OS / nerdctl GUIs (no SSH)
+
+For appliance-style Compose GUIs that run on top of `nerdctl` / `containerd`, use the image-only deployment path in [docs/DEPLOY-MINISCLOUD.md](docs/DEPLOY-MINISCLOUD.md). This path pulls prebuilt GHCR images and does not apply the NPU overlay.
+
 ## 5) Setup
 
 ```bash

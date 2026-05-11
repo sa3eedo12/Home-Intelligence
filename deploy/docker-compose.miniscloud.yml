@@ -1,0 +1,249 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    env_file: .env
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - ${HOME_INTEL_DIR}/infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [agents]
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ${HOME_INTEL_DIR}/infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [agents]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    env_file: .env
+    command: ["./qdrant", "--config-path", "/qdrant/config/config.yaml"]
+    volumes:
+      - qdrant-data:/qdrant/storage
+      - ${HOME_INTEL_DIR}/infra/qdrant/config.yaml:/qdrant/config/config.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [agents]
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:11434/api/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [agents]
+
+  lemonade:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    env_file: .env
+    command:
+      - sh
+      - -lc
+      - |
+        python - <<'PY'
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == '/health':
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'ok')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+            def log_message(self, format, *args):
+                pass
+        HTTPServer(('0.0.0.0', 8000), Handler).serve_forever()
+        PY
+    volumes:
+      - lemonade-models:/models
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [agents]
+
+  orchestrator:
+    image: ghcr.io/sa3eedo12/home-intelligence/orchestrator:latest
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      qdrant: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+      home_automation: { condition: service_started }
+      personal_assistant: { condition: service_started }
+      system_health: { condition: service_started }
+      storage_backup: { condition: service_started }
+      knowledge_notes: { condition: service_started }
+      household_ops: { condition: service_started }
+      entertainment: { condition: service_started }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  home_automation:
+    image: ghcr.io/sa3eedo12/home-intelligence/home_automation:latest
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  personal_assistant:
+    image: ghcr.io/sa3eedo12/home-intelligence/personal_assistant:latest
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  system_health:
+    image: ghcr.io/sa3eedo12/home-intelligence/system_health:latest
+    env_file: .env
+    pid: "host"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      # Docker-socket-based introspection is disabled on containerd hosts.
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  storage_backup:
+    image: ghcr.io/sa3eedo12/home-intelligence/storage_backup:latest
+    env_file: .env
+    volumes:
+      - ${HOME_INTEL_DIR}/data:/mnt:ro
+      - ${HOME_INTEL_DIR}/data:/host-home:ro
+      - ${HOME_INTEL_DIR}/infra/storage_backup/backup_targets.yaml:/etc/storage_backup/backup_targets.yaml:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  knowledge_notes:
+    image: ghcr.io/sa3eedo12/home-intelligence/knowledge_notes:latest
+    env_file: .env
+    volumes:
+      - ${HOME_INTEL_DIR}/data/notes:/data/notes
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  household_ops:
+    image: ghcr.io/sa3eedo12/home-intelligence/household_ops:latest
+    env_file: .env
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  entertainment:
+    image: ghcr.io/sa3eedo12/home-intelligence/entertainment:latest
+    env_file: .env
+    volumes:
+      - ${HOME_INTEL_DIR}/data/media:/data/media
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      lemonade: { condition: service_healthy }
+      ollama: { condition: service_healthy }
+    networks: [agents]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+networks:
+  agents:
+    driver: bridge
+
+volumes:
+  redis-data:
+  pg-data:
+  qdrant-data:
+  ollama-data:
+  lemonade-models:
