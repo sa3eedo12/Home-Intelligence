@@ -7,7 +7,7 @@ defaults:
 capabilities:
   - id: list_entities
     description: List Home Assistant entities, optionally filtered by domain.
-    inputs: { domain: string? }
+    inputs: { domain: "string?" }
     side_effects: false
     cost: low
   - id: get_entity_state
@@ -32,12 +32,12 @@ capabilities:
     cost: low
   - id: doorbell.snapshot
     description: Return the latest snapshot from the Ring doorbell (via Scrypted/HA camera entity).
-    inputs: { entity_id: string? }
+    inputs: { entity_id: "string?" }
     side_effects: false
     cost: low
   - id: doorbell.summarize_event
     description: On a doorbell ring or motion event, fetch the latest snapshot, run NPU vision (yolov8n) for person/package/vehicle detection, and return a short text summary plus structured detections.
-    inputs: { entity_id: string?, event_type: string }
+    inputs: { entity_id: "string?", event_type: string }
     side_effects: false
     cost: medium
   - id: doorbell.last_visitor
