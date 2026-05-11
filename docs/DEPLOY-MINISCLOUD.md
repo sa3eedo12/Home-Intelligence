@@ -95,7 +95,8 @@ These paths must exist on the host before deployment:
 - No NPU acceleration on this path; Lemonade is a placeholder HTTP stub
 - The ROCm overlay is not applied here
 - `system_health` keeps `/proc` and `/sys`, but Docker-socket-based introspection is disabled on containerd hosts
-- `storage_backup` only sees the repo-managed `data/media` and `data/notes` folders on this GUI path; the compose file overrides `STORAGE_SCAN_ROOTS` accordingly even though `deploy/.env.miniscloud.example` keeps the base-stack default value
+- `storage_backup` only sees the repo-managed `data/media` and `data/notes` folders on this GUI path
+- `deploy/docker-compose.miniscloud.yml` overrides `STORAGE_SCAN_ROOTS` to match those mounts, while `deploy/.env.miniscloud.example` keeps the base-stack default for consistency with `.env.example`
 
 ## Troubleshooting
 
