@@ -5,6 +5,7 @@ description = "Home-Intelligence orchestrator: Telegram bot + intent router + wo
 requires-python = ">=3.12"
 dependencies = [
   "home_agents_sdk",
+  "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]
