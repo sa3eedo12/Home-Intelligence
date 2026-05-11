@@ -169,6 +169,7 @@ services:
     image: ghcr.io/sa3eedo12/home-intelligence/storage_backup:latest
     env_file: .env
     environment:
+      # This GUI-only path mounts only the repo-managed data folders, so narrow scan roots to match.
       STORAGE_SCAN_ROOTS: /data/media,/data/notes
     volumes:
       - ${HOME_INTEL_DIR}/data/media:/data/media:ro
