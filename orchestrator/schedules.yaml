@@ -1,0 +1,71 @@
+jobs:
+  - id: morning_brief
+    description: "Daily morning briefing"
+    trigger: cron
+    cron: { hour: 7, minute: 30 }
+    dispatch:
+      agent: personal_assistant
+      capability: morning_brief
+      inputs: {}
+    notify:
+      severity: info
+      topic: brief.morning
+
+  - id: evening_recap
+    description: "Daily evening recap"
+    trigger: cron
+    cron: { hour: 21, minute: 0 }
+    dispatch:
+      agent: personal_assistant
+      capability: evening_recap
+      inputs: {}
+    notify: { severity: info, topic: brief.evening }
+
+  - id: system_anomaly_check
+    description: "Periodic system anomaly check"
+    trigger: interval
+    interval: { minutes: 15 }
+    dispatch:
+      agent: system_health
+      capability: anomaly_check
+      inputs: {}
+
+  - id: storage_summary
+    description: "Nightly storage summary"
+    trigger: cron
+    cron: { hour: 3, minute: 0 }
+    dispatch:
+      agent: storage_backup
+      capability: summarize_storage
+      inputs: {}
+    notify: { severity: notice, topic: storage.summary }
+
+  - id: backup_validate
+    description: "Daily backup validation"
+    trigger: cron
+    cron: { hour: 3, minute: 30 }
+    dispatch:
+      agent: storage_backup
+      capability: validate_backup
+      inputs: {}
+    notify: { severity: notice, topic: storage.backup_validate }
+
+  - id: notes_index
+    description: "Nightly notes indexing"
+    trigger: cron
+    cron: { hour: 2, minute: 0 }
+    dispatch:
+      agent: knowledge_notes
+      capability: index_path
+      inputs: { path: "${NOTES_ROOT}" }
+    notify: { severity: debug, topic: notes.index }
+
+  - id: pantry_low_stock_check
+    description: "Mid-week low pantry stock check"
+    trigger: cron
+    cron: { day_of_week: "wed,sat", hour: 18, minute: 0 }
+    dispatch:
+      agent: household_ops
+      capability: pantry_low_stock
+      inputs: {}
+    notify: { severity: notice, topic: household.pantry_low }

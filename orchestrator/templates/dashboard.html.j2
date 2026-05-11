@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="30">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home Intelligence Dashboard</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <main>
+    <h1>Home Intelligence Dashboard</h1>
+
+    <section>
+      <h2>Stack health</h2>
+      <ul>
+      {% for service, details in status.stack.items() %}
+        <li><strong>{{ service }}</strong>: {{ "ok" if details.ok else "down" }}</li>
+      {% endfor %}
+      </ul>
+    </section>
+
+    <section>
+      <h2>Agents</h2>
+      <ul>
+      {% for agent in status.agents %}
+        <li>{{ agent }}</li>
+      {% endfor %}
+      </ul>
+    </section>
+
+    <section>
+      <h2>Scheduled jobs</h2>
+      <ul>
+      {% for job in status.jobs %}
+        <li>{{ job.id }} — next: {{ job.next_run_time or "n/a" }} — last: {{ job.last_status }}</li>
+      {% endfor %}
+      </ul>
+    </section>
+
+    <section>
+      <h2>Recent notifications</h2>
+      <ul>
+      {% for item in status.recent_notifications %}
+        <li>{{ item.ts }} | {{ item.topic }} | {{ item.severity }} | {{ item.decision }}{% if item.reason %} ({{ item.reason }}){% endif %}</li>
+      {% endfor %}
+      </ul>
+    </section>
+
+    <section>
+      <h2>Active overrides</h2>
+      <ul>
+      {% for mute in status.active_mutes %}
+        <li>{{ mute.key }} ({{ mute.ttl_seconds }}s)</li>
+      {% endfor %}
+      <li>quiet override: {{ status.quiet_override }}</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Models</h2>
+      <ul>
+        <li>NPU models: {{ status.models.npu|join(', ') }}</li>
+        <li>iGPU models: {{ status.models.igpu|join(', ') }}</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>

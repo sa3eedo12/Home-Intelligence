@@ -1,0 +1,41 @@
+triggers:
+  - id: doorbell_motion
+    stream: events.home
+    match:
+      type: doorbell_motion
+    dispatch:
+      agent: home_automation
+      capability: doorbell.summarize_event
+      inputs: { event_type: "doorbell_motion" }
+    notify_from_result:
+      text_field: summary
+      topic: doorbell.motion
+      severity: notice
+      keyboard:
+        - - { text: "Mute 30 min", callback: "mute:doorbell:30" }
+          - { text: "Ignore", callback: "noop" }
+
+  - id: doorbell_ring
+    stream: events.home
+    match:
+      type: doorbell_ring
+    dispatch:
+      agent: home_automation
+      capability: doorbell.summarize_event
+      inputs: { event_type: "doorbell_ring" }
+    notify_from_result:
+      text_field: summary
+      topic: doorbell.ring
+      severity: alert
+      keyboard:
+        - - { text: "Speak", callback: "ha:notify:doorbell" }
+          - { text: "Ignore", callback: "noop" }
+
+  - id: system_metric_breach
+    stream: events.system
+    match:
+      severity_min: warn
+    notify_from_payload:
+      text_template: "{metric}={value} crossed threshold ({threshold}). Host: {host}."
+      topic_template: "system.{metric}"
+      severity_field: severity

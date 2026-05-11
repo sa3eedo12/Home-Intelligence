@@ -1,29 +1,42 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import asyncpg
+import yaml
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from home_agents_sdk.bus import EventBus
 from home_agents_sdk.embeddings import Embedder
 from home_agents_sdk.llm import OllamaClient
 from home_agents_sdk.npu import NPUClient
 from home_agents_sdk.telemetry import get_logger
 from qdrant_client import AsyncQdrantClient
+from redis.asyncio import Redis
 
+from .admin import router as admin_router
+from .dashboard import router as dashboard_router
 from .health import probe_lemonade, probe_ollama, probe_postgres, probe_qdrant, probe_redis
 from .notify import run_consumer
+from .policy_engine import PolicyEngine
+from .reactive import Reactive
 from .registry import CapabilityRegistry
 from .router import Router
-from .scheduler import build_scheduler
+from .scheduler import Scheduler
 from .telegram_bot import build_telegram_app, send
 from .workflow import WorkflowEngine
 
 logger = get_logger("orchestrator")
+
+
+HERE = Path(__file__).resolve().parent
 
 
 def _parse_agent_urls(raw: str) -> dict[str, str]:
@@ -36,9 +49,71 @@ def _parse_agent_urls(raw: str) -> dict[str, str]:
     return result
 
 
+def _load_yaml(path: Path) -> dict[str, Any]:
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+async def _build_status(app: FastAPI) -> dict[str, Any]:
+    results = await asyncio.gather(
+        probe_ollama(app.state.ollama_url),
+        probe_lemonade(app.state.lemonade_url),
+        probe_postgres(app.state.pool),
+        probe_redis(app.state.redis_url),
+        probe_qdrant(app.state.qdrant_url),
+    )
+    recent = await app.state.policy_engine.get_recent_decisions(limit=20)
+    recent_alerts = [
+        item
+        for item in recent
+        if str(item.get("severity", "")).lower() in {"warn", "alert", "critical"}
+    ][:10]
+
+    outbound = await app.state.redis.xrevrange("notify.outbound", count=5)
+    last_outbound: list[dict[str, Any]] = []
+    for message_id, fields in outbound:
+        try:
+            payload = json.loads(fields.get("payload", "{}"))
+        except Exception:
+            payload = {"raw": fields.get("payload")}
+        payload["id"] = message_id
+        last_outbound.append(payload)
+
+    quiet_override = await app.state.redis.get("policy:override:quiet")
+    return {
+        "stack": {
+            "ollama": results[0],
+            "lemonade": results[1],
+            "postgres": results[2],
+            "redis": results[3],
+            "qdrant": results[4],
+            "orchestrator": {"ok": True},
+        },
+        "agents": app.state.registry.agents(),
+        "capability_counts": app.state.registry.capability_counts(),
+        "jobs": [
+            {
+                "id": job.id,
+                "next_run_time": job.next_run_time,
+                "last_run_time": job.last_run_time,
+                "last_status": job.last_status,
+            }
+            for job in app.state.scheduler.list_jobs()
+        ],
+        "recent_alerts": recent_alerts,
+        "recent_notifications": recent,
+        "last_outbound": last_outbound,
+        "suppression_counts": await app.state.policy_engine.get_stats(),
+        "active_mutes": await app.state.policy_engine.get_active_mutes(),
+        "quiet_override": quiet_override,
+        "models": {
+            "igpu": results[0].get("models", []),
+            "npu": results[1].get("models", []),
+        },
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # Startup
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
     database_url = os.environ.get(
         "DATABASE_URL", "postgresql://agents:changeme@postgres:5432/agents"
@@ -49,16 +124,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     router_model = os.environ.get("ROUTER_MODEL", "qwen3-1.7b-int4")
     embed_model = os.environ.get("EMBED_MODEL", "bge-m3-int8")
     telegram_token = os.environ.get("TELEGRAM_TOKEN", "")
+    telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "0")
     allowed_ids_raw = os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "")
     agent_urls_raw = os.environ.get("AGENT_URLS", "")
+    admin_base_url = os.environ.get("ORCHESTRATOR_BASE_URL", "http://localhost:8080")
 
-    allowed_ids: set[int] = set()
-    for uid in allowed_ids_raw.split(","):
-        uid = uid.strip()
-        if uid.isdigit():
-            allowed_ids.add(int(uid))
+    allowed_ids: set[int] = {
+        int(uid.strip()) for uid in allowed_ids_raw.split(",") if uid.strip().isdigit()
+    }
 
-    # Infrastructure
     pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
     bus = EventBus(redis_url)
     try:
@@ -66,59 +140,84 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         logger.warning("bus_connect_failed", error=str(exc))
 
-    # Clients
+    redis = Redis.from_url(redis_url, decode_responses=True)
+    await redis.set("config:telegram_chat_id", telegram_chat_id)
+
     npu = NPUClient(lemonade_url)
     llm = OllamaClient(ollama_url)
     qdrant = AsyncQdrantClient(url=qdrant_url)
     embedder = Embedder(npu=npu, llm=llm, pool=pool, npu_model=embed_model)
 
-    # Core services
     workflow_engine = WorkflowEngine(pool)
     agent_urls = _parse_agent_urls(agent_urls_raw)
     registry = CapabilityRegistry(agent_urls=agent_urls, qdrant=qdrant, embedder=embedder)
     await registry.bootstrap()
     router = Router(npu=npu, registry=registry, router_model=router_model)
 
-    # Telegram
+    policy_engine = PolicyEngine(_load_yaml(HERE / "policies.yaml"), redis)
+    scheduler = Scheduler(
+        registry=registry, redis=redis, schedules_path=str(HERE / "schedules.yaml")
+    )
+    await scheduler.start()
+    reactive = Reactive(
+        registry=registry, redis=redis, triggers_path=str(HERE / "reactive_triggers.yaml")
+    )
+    await reactive.start()
+
     tg_app = await build_telegram_app(
         token=telegram_token,
         allowed_ids=allowed_ids,
         router=router,
         workflow_engine=workflow_engine,
+        policy_engine=policy_engine,
+        scheduler=scheduler,
+        admin_base_url=admin_base_url,
     )
     await tg_app.initialize()
     await tg_app.start()
     if telegram_token and telegram_token != "replace-with-token-from-botfather":
         await tg_app.updater.start_polling(drop_pending_updates=True)
 
-    # Background tasks
     async def _send_fn(chat_id: int, text: str, keyboard: Any) -> None:
-        await send(tg_app, chat_id, text)
+        await send(tg_app, chat_id, text, reply_markup=keyboard)
 
-    notify_task = asyncio.create_task(run_consumer(redis_url, _send_fn))
+    notify_task = asyncio.create_task(
+        run_consumer(redis=redis, policy_engine=policy_engine, send_fn=_send_fn)
+    )
 
-    # Scheduler (no jobs - Jobs added in PR 4)
-    scheduler = build_scheduler()
-    scheduler.start()
-
-    # Store state
     app.state.pool = pool
     app.state.registry = registry
     app.state.router = router
     app.state.tg_app = tg_app
     app.state.notify_task = notify_task
     app.state.scheduler = scheduler
+    app.state.policy_engine = policy_engine
+    app.state.reactive = reactive
+    app.state.redis = redis
     app.state.redis_url = redis_url
     app.state.qdrant_url = qdrant_url
     app.state.ollama_url = ollama_url
     app.state.lemonade_url = lemonade_url
+    app.state.status_provider = lambda: _build_status(app)
+
+    async def _reload_from_signal() -> None:
+        await policy_engine.reload(_load_yaml(HERE / "policies.yaml"))
+        await scheduler.reload()
+        await reactive.reload()
+
+    def _handle_sighup(_sig: int, _frame: Any) -> None:
+        asyncio.create_task(_reload_from_signal())
+
+    try:
+        signal.signal(signal.SIGHUP, _handle_sighup)
+    except Exception:
+        logger.warning("sighup_handler_unavailable")
 
     logger.info("orchestrator_started")
-
     yield
 
-    # Shutdown
-    scheduler.shutdown(wait=False)
+    await reactive.stop()
+    await scheduler.shutdown()
     notify_task.cancel()
     try:
         await tg_app.updater.stop()
@@ -126,11 +225,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         pass
     await tg_app.stop()
     await tg_app.shutdown()
+    await redis.aclose()
     await pool.close()
     logger.info("orchestrator_stopped")
 
 
 app = FastAPI(title="orchestrator", lifespan=lifespan)
+app.include_router(admin_router)
+app.include_router(dashboard_router)
+app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
 
 @app.get("/health")
@@ -141,22 +244,7 @@ async def health() -> dict:
 
 @app.get("/status")
 async def status() -> dict:
-    results = await asyncio.gather(
-        probe_ollama(app.state.ollama_url),
-        probe_lemonade(app.state.lemonade_url),
-        probe_postgres(app.state.pool),
-        probe_redis(app.state.redis_url),
-        probe_qdrant(app.state.qdrant_url),
-    )
-    return {
-        "ollama": results[0],
-        "lemonade": results[1],
-        "postgres": results[2],
-        "redis": results[3],
-        "qdrant": results[4],
-        "agents": app.state.registry.agents(),
-        "capability_counts": app.state.registry.capability_counts(),
-    }
+    return await _build_status(app)
 
 
 @app.post("/route")
