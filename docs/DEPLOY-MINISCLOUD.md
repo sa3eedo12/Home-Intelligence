@@ -14,6 +14,13 @@ It should also help on other image-only Compose GUIs that cannot run local `buil
 - A Docker Compose GUI / stack editor
 - No SSH or host shell required
 
+## First-time GHCR package visibility setup
+
+1. Create a classic Personal Access Token at https://github.com/settings/tokens/new with scopes `write:packages` and `read:packages`.
+2. Add it to this repo as a secret named `GHCR_ADMIN_PAT` at `Settings → Secrets and variables → Actions → New repository secret`.
+3. Run the **"Make GHCR packages public"** workflow once from the Actions tab (`Actions → Make GHCR packages public → Run workflow`).
+4. After it completes, the 8 GHCR images are publicly pullable and Minis Cloud / nerdctl GUIs can deploy `deploy/docker-compose.miniscloud.yml` without credentials.
+
 ## Step 1: Download the repo zip
 
 In the file manager, use **Download from URL** and fetch:
@@ -116,3 +123,7 @@ If the GUI error is too generic, isolate the missing path with a tiny test conta
 4. Repeat with the next path until you find the missing source.
 
 That is usually faster than debugging the full stack all at once.
+
+### "no container to start" with no logs for an agent service
+
+If deployment fails with a generic error and no service logs, GHCR is most likely rejecting the image pull because that package is still private. Run the **"Make GHCR packages public"** workflow, then deploy again.
