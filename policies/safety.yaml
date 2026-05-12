@@ -1,0 +1,28 @@
+# Three-tier safety policy.
+# Each entry matches by agent + capability glob; the first matching tier wins.
+tiers:
+  auto:
+    description: "Low-risk, fully reversible. The assistant may execute without asking."
+    rules:
+      - { agent: "home_automation", capability: "set_scene", note: "scene activations" }
+      - { agent: "home_automation", capability: "call_service_in_area", domain_in: ["light", "switch", "fan"], note: "lights/switches/fans" }
+      - { agent: "knowledge_notes", capability_pattern: "*.list" }
+      - { agent: "knowledge_notes", capability_pattern: "*.confirm" }
+  suggest:
+    description: "Medium-risk or interpretive. Surface as an inbox card and require user confirmation."
+    rules:
+      - { agent: "home_automation", capability: "call_service", domain_in: ["climate", "media_player", "vacuum"], note: "AC, media, vacuum" }
+      - { agent: "personal_assistant", capability: "infer" }
+      - { agent: "household_ops", capability_pattern: "*" }
+      - { agent: "*", capability_pattern: "*delete*" }
+      - { agent: "*", capability_pattern: "*forget*" }
+  never:
+    description: "High-risk or irreversible. The assistant refuses and asks the user to do it manually."
+    rules:
+      - { agent: "home_automation", capability: "call_service", domain_in: ["lock", "alarm_control_panel"], note: "doors, alarm" }
+      - { agent: "*", capability_pattern: "*payment*" }
+      - { agent: "*", capability_pattern: "*purchase*" }
+      - { agent: "*", capability_pattern: "*reset*" }
+
+defaults:
+  unmatched_tier: "suggest"   # if no rule matches, default to asking

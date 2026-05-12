@@ -34,6 +34,13 @@ def _build_app() -> FastAPI:
         run_once=AsyncMock(return_value={"brief_id": 1}),
         status={"running": False, "started_at": None, "phase": None},
     )
+    app.state.safety = SimpleNamespace(
+        explain=lambda agent, capability, inputs: {
+            "tier": "never",
+            "matched_rule": {"agent": agent, "capability": capability},
+            "reason": f"blocked {inputs.get('domain')}",
+        }
+    )
     app.state.reflection_store = SimpleNamespace(
         list_proposals=AsyncMock(
             return_value=[
@@ -307,6 +314,23 @@ def test_run_reflection_invokes_reflector() -> None:
             break
         time.sleep(0.05)
     app.state.reflector.run_once.assert_awaited_once()
+
+
+def test_safety_explain_uses_configured_policy() -> None:
+    app = _build_app()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/admin/safety/explain",
+            json={
+                "agent": "home_automation",
+                "capability": "call_service",
+                "inputs": {"domain": "lock"},
+            },
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["tier"] == "never"
+    assert body["reason"] == "blocked lock"
 
 
 def test_format_proposal_returns_markdown_blob() -> None:

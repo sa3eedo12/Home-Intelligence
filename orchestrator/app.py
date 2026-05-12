@@ -27,6 +27,7 @@ from redis.asyncio import Redis
 
 from .activity import ActivityAggregator
 from .admin import router as admin_router
+from .advisor import Advisor
 from .dashboard import router as dashboard_router
 from .event_recorder import EventRecorder
 from .health import probe_lemonade, probe_ollama, probe_postgres, probe_qdrant, probe_redis
@@ -42,6 +43,7 @@ from .reactive import Reactive
 from .reflector import NightlyReflector
 from .registry import CapabilityRegistry
 from .router import Router
+from .safety import SafetyPolicy
 from .scheduler import Scheduler
 from .sse import router as sse_router
 from .telegram_bot import build_telegram_app, send
@@ -217,6 +219,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await registry.bootstrap()
     default_model = os.environ.get("DEFAULT_MODEL", "qwen3:8b")
     humanizer_model = os.environ.get("HUMANIZER_MODEL", default_model)
+    safety = SafetyPolicy(path=os.environ.get("SAFETY_POLICY_PATH", "policies/safety.yaml"))
+    reflection_store = ReflectionStore(pool)
     router = Router(
         npu=npu,
         registry=registry,
@@ -224,6 +228,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         llm=llm,
         llm_fallback_model=default_model,
         humanizer_model=humanizer_model,
+        safety=safety,
+        proposal_store=reflection_store,
     )
 
     policy_engine = PolicyEngine(_load_yaml(HERE / "policies.yaml"), redis)
@@ -236,10 +242,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         reasoner_model=reasoner_model,
         fallback_model=default_model,
     )
+    reflector.store = reflection_store
+    advisor = Advisor(
+        pool=pool,
+        redis=redis,
+        llm=llm,
+        registry=registry,
+        safety=safety,
+        default_model=default_model,
+    )
+    advisor.store = reflection_store
     tg_app_holder: dict[str, Any] = {}
 
     async def _run_reflector(_inputs: dict[str, Any]) -> dict[str, Any]:
         return await reflector.run_once()
+
+    async def _run_advisor(_inputs: dict[str, Any]) -> dict[str, Any]:
+        return await advisor.run_once()
 
     async def _send_reflection_digest(inputs: dict[str, Any]) -> dict[str, Any]:
         tg_app_ref = tg_app_holder.get("app")
@@ -276,6 +295,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         timezone=os.environ.get("TZ", "Asia/Dubai"),
         internal_callbacks={
             "reflector.run": _run_reflector,
+            "advisor.run": _run_advisor,
             "morning_brief.send": _send_reflection_digest,
         },
     )
@@ -359,8 +379,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.notify_task = notify_task
     app.state.scheduler = scheduler
     app.state.policy_engine = policy_engine
+    app.state.safety = safety
     app.state.reflector = reflector
-    app.state.reflection_store = reflector.store
+    app.state.advisor = advisor
+    app.state.reflection_store = reflection_store
     app.state.reactive = reactive
     app.state.redis = redis
     app.state.redis_url = redis_url
@@ -376,6 +398,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     async def _reload_from_signal() -> None:
         await policy_engine.reload(_load_yaml(HERE / "policies.yaml"))
+        safety.reload()
         await scheduler.reload()
         await reactive.reload()
 
@@ -430,5 +453,6 @@ async def status() -> dict:
 async def route(body: dict) -> dict:
     text = body.get("text", "")
     user_id = body.get("user_id", "api")
+    autonomous = bool(body.get("autonomous", False))
     router: Router = app.state.router
-    return await router.handle(text, user_id)
+    return await router.handle(text, user_id, autonomous=autonomous)
