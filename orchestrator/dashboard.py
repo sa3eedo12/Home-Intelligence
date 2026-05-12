@@ -11,6 +11,7 @@ from home_agents_sdk.reflection_store import ReflectionStore
 from home_agents_sdk.telemetry import get_logger
 
 from .admin import build_onboarding_state
+from .data_science.common import current_embedding_model, decode_json
 from .observers.utils import APPLIANCE_SYNONYMS
 
 router = APIRouter(tags=["dashboard"])
@@ -50,6 +51,94 @@ def _reflection_store(request: Request) -> Any:
     if store is not None:
         return store
     return ReflectionStore(getattr(request.app.state, "pool", None))
+
+
+async def _data_science_snapshot(request: Request) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "reports": [],
+        "maintenance_runs": [],
+        "last_lora_run": None,
+        "embedding": {"current_model": _current_embedding_model(request), "stale_event_count": 0},
+    }
+    pool = getattr(request.app.state, "pool", None)
+    if pool is None:
+        return snapshot
+    try:
+        async with pool.acquire() as conn:
+            report_rows = await conn.fetch(
+                """
+                SELECT kind, period_label, file_path, summary, generated_at
+                FROM reports
+                ORDER BY generated_at DESC
+                LIMIT 10
+                """
+            )
+            maintenance_rows = await conn.fetch(
+                """
+                SELECT ts, summary, payload
+                FROM event_log
+                WHERE agent = 'data_science'
+                  AND capability = 'maintenance'
+                ORDER BY ts DESC
+                LIMIT 7
+                """
+            )
+            lora_row = await conn.fetchrow(
+                """
+                SELECT id, started_at, finished_at, status, model_base,
+                       training_file, quality_score, error
+                FROM lora_training_runs
+                ORDER BY started_at DESC
+                LIMIT 1
+                """
+            )
+            stale_count = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM event_log
+                WHERE embedding_model IS DISTINCT FROM $1
+                """,
+                snapshot["embedding"]["current_model"],
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("data_science_dashboard_snapshot_failed", error=str(exc))
+        return snapshot
+
+    snapshot["reports"] = [_dashboard_row(row) for row in report_rows]
+    snapshot["maintenance_runs"] = [_maintenance_row(row) for row in maintenance_rows]
+    snapshot["last_lora_run"] = _dashboard_row(lora_row) if lora_row else None
+    snapshot["embedding"]["stale_event_count"] = int(stale_count or 0)
+    return snapshot
+
+
+def _current_embedding_model(request: Request) -> str:
+    reembed = getattr(request.app.state, "reembed", None)
+    value = getattr(reembed, "current_model", None)
+    if value:
+        return str(value)
+    return current_embedding_model(getattr(request.app.state, "embedder", None))
+
+
+def _dashboard_row(row: Any) -> dict[str, Any]:
+    data = dict(row)
+    for key, value in list(data.items()):
+        if hasattr(value, "isoformat"):
+            data[key] = value.isoformat()
+    return data
+
+
+def _maintenance_row(row: Any) -> dict[str, Any]:
+    data = _dashboard_row(row)
+    payload = decode_json(data.get("payload"), {})
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "ts": data.get("ts"),
+        "summary": data.get("summary"),
+        "status": payload.get("status") or "ok",
+        "archived_rows": payload.get("archived_rows", 0),
+        "errors": payload.get("errors") or [],
+    }
 
 
 async def _about_you_snapshot(request: Request) -> dict[str, list[dict[str, Any]]]:
@@ -220,6 +309,15 @@ async def dashboard(request: Request) -> HTMLResponse:
         request=request,
         name="dashboard.html.j2",
         context={"status": await _status(request)},
+    )
+
+
+@router.get("/dashboard/data-science", response_class=HTMLResponse)
+async def data_science(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request=request,
+        name="data_science.html.j2",
+        context={"data_science": await _data_science_snapshot(request)},
     )
 
 
