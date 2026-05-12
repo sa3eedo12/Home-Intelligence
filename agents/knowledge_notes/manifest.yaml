@@ -46,6 +46,74 @@ capabilities:
     inputs: { query: string, top_k: "integer?" }
     side_effects: false
     cost: low
+  - id: things.list
+    description: List known household things such as appliances, vehicles, rooms, pets, and people.
+    inputs: { type: "string?" }
+    side_effects: false
+    cost: low
+  - id: things.put
+    description: Add or update a household thing with structured attributes and Home Assistant entity links.
+    inputs: { type: string, friendly_name: string, attributes: "object?", ha_entity_ids: "array?", photo_path: "string?", confidence: "number?", source: "string?" }
+    side_effects: true
+    cost: low
+  - id: things.forget
+    description: Forget a household thing by registry id.
+    inputs: { thing_id: integer }
+    side_effects: true
+    cost: low
+  - id: things.confirm
+    description: Mark a household thing as reviewed and confirmed by the user.
+    inputs: { thing_id: integer }
+    side_effects: true
+    cost: low
+  - id: habits.list
+    description: List learned habits, optionally filtered by subject label.
+    inputs: { subject: "string?" }
+    side_effects: false
+    cost: low
+  - id: habits.put
+    description: Add or update a learned habit pattern such as a repeated time window or cadence.
+    inputs: { subject: string, pattern: object, frequency: "string?", confidence: "number?", source: "string?", last_observed_at: "string?" }
+    side_effects: true
+    cost: low
+  - id: habits.forget
+    description: Forget a learned habit by registry id.
+    inputs: { habit_id: integer }
+    side_effects: true
+    cost: low
+  - id: habits.confirm
+    description: Mark a learned habit as reviewed by the user.
+    inputs: { habit_id: integer }
+    side_effects: true
+    cost: low
+  - id: preferences.list
+    description: List learned user or household preferences.
+    side_effects: false
+    cost: low
+  - id: preferences.put
+    description: Add or update a learned preference as a JSON value.
+    inputs: { key: string, value: object, confidence: "number?", source: "string?" }
+    side_effects: true
+    cost: low
+  - id: preferences.forget
+    description: Forget a learned preference by key.
+    inputs: { key: string }
+    side_effects: true
+    cost: low
+  - id: routines.list
+    description: List named household routines with steps and schedules.
+    side_effects: false
+    cost: low
+  - id: routines.put
+    description: Add or update a named routine with JSON steps and an optional schedule.
+    inputs: { name: string, steps: object, schedule: "object?", source: "string?", last_run_at: "string?" }
+    side_effects: true
+    cost: low
+  - id: routines.forget
+    description: Forget a routine by registry id.
+    inputs: { routine_id: integer }
+    side_effects: true
+    cost: low
 subscribes:
   - memory.updates
 publishes:

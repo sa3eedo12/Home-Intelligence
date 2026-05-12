@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from home_agents_sdk.bus import EventBus
 from home_agents_sdk.embeddings import Embedder
 from home_agents_sdk.event_log import EventLogStore
+from home_agents_sdk.knowledge_graph import KnowledgeGraph
 from home_agents_sdk.llm import OllamaClient
 from home_agents_sdk.npu import NPUClient
 from home_agents_sdk.telemetry import get_logger
@@ -256,6 +257,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.lemonade_url = lemonade_url
     app.state.activity_aggregator = activity_aggregator
     app.state.event_recorder = event_recorder
+    app.state.knowledge_graph = KnowledgeGraph(pool=pool)
     app.state.status_provider = lambda: _build_status(app)
 
     async def _reload_from_signal() -> None:

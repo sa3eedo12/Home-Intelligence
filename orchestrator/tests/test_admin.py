@@ -33,6 +33,18 @@ def _build_app() -> FastAPI:
         snapshot=lambda: {"agents": [], "window_minutes": 5, "total_events": 0},
         recent_events=lambda limit=50: [],
     )
+    app.state.knowledge_graph = SimpleNamespace(
+        confirm_thing=AsyncMock(return_value={"id": 1, "last_confirmed_at": "now"}),
+        confirm_habit=AsyncMock(return_value={"id": 2, "last_observed_at": "now"}),
+        confirm_preference=AsyncMock(return_value={"key": "lights", "updated_at": "now"}),
+        confirm_routine=AsyncMock(return_value={"id": 3, "last_run_at": "now"}),
+        forget_thing=AsyncMock(return_value=True),
+        forget_habit=AsyncMock(return_value=True),
+        forget_preference=AsyncMock(return_value=True),
+        forget_routine=AsyncMock(return_value=True),
+        patch_row=AsyncMock(return_value={"id": 1, "friendly_name": "Washer"}),
+        evidence_for=AsyncMock(return_value=[{"id": 9, "summary": "Washer completed"}]),
+    )
     return app
 
 
@@ -142,6 +154,55 @@ def test_invoke_capability_requires_agent_and_capability() -> None:
     app = _build_app()
     with TestClient(app) as client:
         resp = client.post("/admin/invoke", json={"agent": "", "capability": "x"})
+    assert resp.status_code == 400
+
+
+def test_knowledge_confirm_calls_matching_method() -> None:
+    app = _build_app()
+    with TestClient(app) as client:
+        resp = client.post("/admin/knowledge/confirm", json={"table": "things", "id": 1})
+    assert resp.status_code == 200
+    assert resp.json()["item"]["last_confirmed_at"] == "now"
+    app.state.knowledge_graph.confirm_thing.assert_awaited_once_with(1)
+
+
+def test_knowledge_evidence_returns_event_rows() -> None:
+    app = _build_app()
+    with TestClient(app) as client:
+        resp = client.get("/admin/knowledge/evidence?table=things&id=1")
+    assert resp.status_code == 200
+    assert resp.json()["items"][0]["summary"] == "Washer completed"
+    app.state.knowledge_graph.evidence_for.assert_awaited_once_with("things", 1)
+
+
+def test_knowledge_forget_calls_matching_method() -> None:
+    app = _build_app()
+    with TestClient(app) as client:
+        resp = client.post("/admin/knowledge/forget", json={"table": "preferences", "id": "lights"})
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] is True
+    app.state.knowledge_graph.forget_preference.assert_awaited_once_with("lights")
+
+
+def test_knowledge_patch_whitelists_fields() -> None:
+    app = _build_app()
+    with TestClient(app) as client:
+        resp = client.patch(
+            "/admin/knowledge/things/1",
+            json={"friendly_name": "Washer", "ignored": "nope"},
+        )
+    assert resp.status_code == 200
+    app.state.knowledge_graph.patch_row.assert_awaited_once_with(
+        "things",
+        1,
+        {"friendly_name": "Washer"},
+    )
+
+
+def test_knowledge_patch_rejects_unknown_table() -> None:
+    app = _build_app()
+    with TestClient(app) as client:
+        resp = client.patch("/admin/knowledge/unknown/1", json={"name": "x"})
     assert resp.status_code == 400
 
 
