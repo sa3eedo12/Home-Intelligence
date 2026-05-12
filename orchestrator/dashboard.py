@@ -82,8 +82,15 @@ async def morning_brief(request: Request) -> HTMLResponse:
     brief = briefs[0] if briefs else None
     body = (brief or {}).get("body_json") or {}
     proposals = body.get("proposals") or await store.list_proposals(limit=50)
+    reflector = getattr(request.app.state, "reflector", None)
+    reflection_state = reflector.status if reflector is not None else {"running": False}
     return templates.TemplateResponse(
         request=request,
         name="morning_brief.html.j2",
-        context={"status": await _status(request), "brief": brief, "proposals": proposals},
+        context={
+            "status": await _status(request),
+            "brief": brief,
+            "proposals": proposals,
+            "reflection_state": reflection_state,
+        },
     )

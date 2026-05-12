@@ -11,10 +11,23 @@
   <header class="brief-topbar">
     <a href="/dashboard" class="back-link">← Dashboard</a>
     <h1>🌅 Morning Brief</h1>
+    <button type="button" id="run-now-btn" class="run-now">Run reflection now</button>
   </header>
 
+  <div id="reflection-banner"
+       class="reflection-banner {{ 'visible' if reflection_state and reflection_state.running else '' }}"
+       data-running="{{ '1' if reflection_state and reflection_state.running else '0' }}">
+    <span class="spinner" aria-hidden="true"></span>
+    <span class="reflection-banner-text">
+      Reflection is running…
+      <span id="reflection-phase" class="reflection-phase">{{ reflection_state.phase or 'starting' }}</span>
+      <span id="reflection-elapsed" class="reflection-elapsed"></span>
+    </span>
+    <small>The page will refresh automatically when it finishes.</small>
+  </div>
+
   {% set reflection = status.reflection if status and status.reflection else {'healthy': false} %}
-  {% if not reflection.healthy %}
+  {% if not reflection.healthy and not (reflection_state and reflection_state.running) %}
     <div class="health-banner">
       Reflection is stale or has not run yet{% if reflection.age_hours is not none %}
       ({{ '%.1f' % reflection.age_hours }}h old){% endif %}.

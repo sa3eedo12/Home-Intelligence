@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -29,7 +30,10 @@ def _build_app() -> FastAPI:
         xadd=AsyncMock(return_value="1-0"),
     )
     app.state.registry = SimpleNamespace(dispatch=AsyncMock(return_value={"ok": True}))
-    app.state.reflector = SimpleNamespace(run_once=AsyncMock(return_value={"brief_id": 1}))
+    app.state.reflector = SimpleNamespace(
+        run_once=AsyncMock(return_value={"brief_id": 1}),
+        status={"running": False, "started_at": None, "phase": None},
+    )
     app.state.reflection_store = SimpleNamespace(
         list_proposals=AsyncMock(
             return_value=[
@@ -252,7 +256,15 @@ def test_run_reflection_invokes_reflector() -> None:
     with TestClient(app) as client:
         resp = client.post("/admin/reflection/run")
     assert resp.status_code == 200
-    assert resp.json()["result"] == {"brief_id": 1}
+    body = resp.json()
+    # New behavior: returns immediately with started=True (background task).
+    assert body["started"] is True
+    # Give the background task a moment to invoke the mocked run_once.
+    import time
+    for _ in range(20):
+        if app.state.reflector.run_once.await_count >= 1:
+            break
+        time.sleep(0.05)
     app.state.reflector.run_once.assert_awaited_once()
 
 
@@ -272,3 +284,111 @@ def test_format_proposal_returns_404_for_unknown_id() -> None:
     with TestClient(app) as client:
         resp = client.post("/admin/proposals/999/format")
     assert resp.status_code == 404
+
+
+def test_reflection_run_kicks_off_background_and_returns_immediately() -> None:
+    """POST /admin/reflection/run must NOT block on the LLM. It schedules a
+    background task and returns the current status immediately."""
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.admin import router as admin_router
+
+    app = FastAPI()
+    app.include_router(admin_router)
+
+    long_event = asyncio.Event()
+    started = asyncio.Event()
+
+    async def _slow_run():
+        started.set()
+        await long_event.wait()  # would block forever if awaited inline
+
+    app.state.reflector = SimpleNamespace(
+        run_once=_slow_run,
+        status={"running": False, "started_at": None, "phase": None},
+        _status={},
+    )
+
+    with TestClient(app) as client:
+        resp = client.post("/admin/reflection/run")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["started"] is True
+
+
+def test_reflection_run_reports_already_running_without_starting_again() -> None:
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.admin import router as admin_router
+
+    call_count = {"n": 0}
+
+    async def _run():
+        call_count["n"] += 1
+
+    app = FastAPI()
+    app.include_router(admin_router)
+    app.state.reflector = SimpleNamespace(
+        run_once=_run,
+        status={"running": True, "started_at": "2026-01-01T00:00:00+00:00"},
+        _status={},
+    )
+    with TestClient(app) as client:
+        resp = client.post("/admin/reflection/run")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["started"] is False
+    assert body["status"]["running"] is True
+    assert call_count["n"] == 0
+
+
+def test_reflection_status_returns_configured_false_when_missing() -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.admin import router as admin_router
+
+    app = FastAPI()
+    app.include_router(admin_router)
+    with TestClient(app) as client:
+        resp = client.get("/admin/reflection/status")
+    assert resp.status_code == 200
+    assert resp.json()["configured"] is False
+
+
+def test_reflection_status_proxies_reflector_status() -> None:
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.admin import router as admin_router
+
+    app = FastAPI()
+    app.include_router(admin_router)
+    app.state.reflector = SimpleNamespace(
+        status={
+            "running": True,
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "phase": "generate_proposals",
+            "elapsed_seconds": 17.3,
+            "last_finished_at": None,
+            "last_brief_id": None,
+            "last_error": None,
+            "last_duration_seconds": None,
+        }
+    )
+    with TestClient(app) as client:
+        resp = client.get("/admin/reflection/status")
+    body = resp.json()
+    assert body["configured"] is True
+    assert body["running"] is True
+    assert body["phase"] == "generate_proposals"
+    assert body["elapsed_seconds"] == 17.3

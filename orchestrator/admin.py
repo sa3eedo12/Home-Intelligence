@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -131,8 +132,46 @@ async def run_reflection(request: Request) -> dict:
     reflector = getattr(request.app.state, "reflector", None)
     if reflector is None:
         raise HTTPException(status_code=503, detail="reflection is not configured")
-    result = await reflector.run_once()
-    return {"ok": True, "result": result}
+
+    # If a run is already in progress, just report its status — don't queue another.
+    if reflector.status.get("running"):
+        return {"ok": True, "started": False, "status": reflector.status}
+
+    # Kick the reflection off in the background and return immediately so the
+    # browser doesn't wait minutes for the LLM. The Morning Brief page polls
+    # /admin/reflection/status to know when it's done.
+    asyncio.create_task(_safe_run_reflection(reflector), name="reflection-manual")
+    return {"ok": True, "started": True, "status": reflector.status}
+
+
+async def _safe_run_reflection(reflector: Any) -> None:
+    try:
+        await reflector.run_once()
+    except Exception as exc:  # noqa: BLE001
+        # NightlyReflector already logs and stores last_error; just swallow here
+        # so the background task doesn't fire a noisy "Task exception" warning.
+        try:
+            reflector._status["last_error"] = str(exc)  # noqa: SLF001
+        except Exception:
+            pass
+
+
+@router.get("/admin/reflection/status")
+async def reflection_status(request: Request) -> dict:
+    reflector = getattr(request.app.state, "reflector", None)
+    if reflector is None:
+        return {
+            "configured": False,
+            "running": False,
+            "started_at": None,
+            "phase": None,
+            "elapsed_seconds": None,
+            "last_finished_at": None,
+            "last_brief_id": None,
+            "last_error": None,
+            "last_duration_seconds": None,
+        }
+    return {"configured": True, **reflector.status}
 
 
 @router.post("/admin/proposals/{proposal_id}/format")

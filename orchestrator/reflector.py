@@ -148,31 +148,103 @@ class NightlyReflector:
         self.reasoner_model = reasoner_model or os.environ.get("REASONER_MODEL", "qwen3.6:35b-a3b")
         self.fallback_model = fallback_model or os.environ.get("DEFAULT_MODEL", "qwen3:8b")
         self.store = ReflectionStore(pool)
+        # Live status surfaced through GET /admin/reflection/status so the
+        # Morning Brief page can show a "running…" banner while the
+        # nightly job (or a manual run) is mid-flight.
+        self._status: dict[str, Any] = {
+            "running": False,
+            "started_at": None,
+            "phase": None,
+            "last_finished_at": None,
+            "last_brief_id": None,
+            "last_error": None,
+            "last_duration_seconds": None,
+        }
+
+    @property
+    def status(self) -> dict[str, Any]:
+        snapshot = dict(self._status)
+        if snapshot["running"] and snapshot.get("started_at"):
+            try:
+                started = datetime.fromisoformat(str(snapshot["started_at"]))
+                snapshot["elapsed_seconds"] = (
+                    datetime.now(UTC) - started
+                ).total_seconds()
+            except ValueError:
+                snapshot["elapsed_seconds"] = None
+        else:
+            snapshot["elapsed_seconds"] = None
+        return snapshot
 
     async def run_once(self) -> dict[str, Any]:
+        if self._status.get("running"):
+            logger.info(
+                "reflection_already_running",
+                started_at=self._status.get("started_at"),
+            )
+            return {"ok": False, "error": "reflection_already_running", "status": self.status}
+
+        start = datetime.now(UTC)
+        self._status.update(
+            {
+                "running": True,
+                "started_at": start.isoformat(),
+                "phase": "starting",
+                "last_error": None,
+            }
+        )
         errors: list[dict[str, str]] = []
-        evidence = await self._phase("gather_evidence", self._gather_evidence, errors, {})
-        audit = await self._phase("self_audit", self._self_audit, errors, {}, evidence)
-        gaps = await self._phase("knowledge_gaps", self._knowledge_gaps, errors, [])
-        patterns = await self._phase("pattern_mining", self._pattern_mining, errors, [], evidence)
-        proposals = await self._phase(
-            "generate_proposals",
-            self._generate_proposals,
-            errors,
-            [],
-            evidence,
-            audit,
-            gaps,
-            patterns,
-        )
-        applied = await self._phase(
-            "apply_auto_confirm_rules", self._apply_auto_confirm_rules, errors, [], proposals
-        )
-        body = self._build_brief_body(evidence, audit, gaps, patterns, applied, errors)
-        brief_id = await self._phase("save_brief", self._save_brief, errors, 0, body)
-        body["brief_id"] = brief_id
-        body["ok"] = True
-        return body
+        try:
+            self._status["phase"] = "gather_evidence"
+            evidence = await self._phase("gather_evidence", self._gather_evidence, errors, {})
+            self._status["phase"] = "self_audit"
+            audit = await self._phase("self_audit", self._self_audit, errors, {}, evidence)
+            self._status["phase"] = "knowledge_gaps"
+            gaps = await self._phase("knowledge_gaps", self._knowledge_gaps, errors, [])
+            self._status["phase"] = "pattern_mining"
+            patterns = await self._phase(
+                "pattern_mining", self._pattern_mining, errors, [], evidence
+            )
+            self._status["phase"] = "generate_proposals"
+            proposals = await self._phase(
+                "generate_proposals",
+                self._generate_proposals,
+                errors,
+                [],
+                evidence,
+                audit,
+                gaps,
+                patterns,
+            )
+            self._status["phase"] = "apply_auto_confirm_rules"
+            applied = await self._phase(
+                "apply_auto_confirm_rules",
+                self._apply_auto_confirm_rules,
+                errors,
+                [],
+                proposals,
+            )
+            self._status["phase"] = "save_brief"
+            body = self._build_brief_body(evidence, audit, gaps, patterns, applied, errors)
+            brief_id = await self._phase("save_brief", self._save_brief, errors, 0, body)
+            body["brief_id"] = brief_id
+            body["ok"] = True
+            self._status["last_brief_id"] = brief_id
+            return body
+        except Exception as exc:
+            logger.warning("reflection_run_failed", error=str(exc))
+            self._status["last_error"] = str(exc)
+            raise
+        finally:
+            finished = datetime.now(UTC)
+            self._status.update(
+                {
+                    "running": False,
+                    "phase": None,
+                    "last_finished_at": finished.isoformat(),
+                    "last_duration_seconds": (finished - start).total_seconds(),
+                }
+            )
 
     async def _phase(
         self,

@@ -127,3 +127,65 @@ button:disabled {
     min-width: 0;
   }
 }
+
+/* === reflection-in-progress banner === */
+.brief-topbar .run-now {
+  margin-left: auto;
+  background: var(--accent, #58a6ff);
+  color: #0d1117;
+  border: 0;
+  border-radius: 6px;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.brief-topbar .run-now:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.reflection-banner {
+  display: none;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  background: rgba(88, 166, 255, 0.12);
+  border: 1px solid rgba(88, 166, 255, 0.4);
+  color: #cae0ff;
+  padding: 0.7rem 1rem;
+  margin: 0.6rem 1rem 0;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+.reflection-banner.visible { display: flex; }
+.reflection-banner small {
+  flex-basis: 100%;
+  color: #8b949e;
+  font-size: 0.75rem;
+  margin-top: 0.2rem;
+}
+
+.reflection-banner .spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(202, 224, 255, 0.4);
+  border-top-color: #58a6ff;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.reflection-phase {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  padding: 0.05rem 0.4rem;
+  margin: 0 0.2rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+}
+
+.reflection-elapsed {
+  color: #8b949e;
+  font-size: 0.75rem;
+}
