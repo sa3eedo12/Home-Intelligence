@@ -48,12 +48,14 @@ class Router:
         router_model: str,
         llm: OllamaClient | None = None,
         llm_fallback_model: str | None = None,
+        humanizer_model: str | None = None,
     ) -> None:
         self._npu = npu
         self._registry = registry
         self._router_model = router_model
         self._llm = llm
         self._llm_fallback_model = llm_fallback_model
+        self._humanizer_model = humanizer_model or llm_fallback_model or router_model
 
     async def handle(self, text: str, user_id: str) -> dict[str, Any]:
         classification = await self._classify(text)
@@ -75,10 +77,16 @@ class Router:
 
         if agent is None or capability is None:
             fallback = await self._semantic_fallback(text)
-            if fallback is None:
+            if fallback is not None:
+                agent = fallback["agent"]
+                capability = fallback["capability"]
+            elif self._registry.get_capability("personal_assistant", "chat") is not None:
+                # Conversational catch-all: smalltalk, greetings, general questions.
+                agent = "personal_assistant"
+                capability = "chat"
+                inputs = {"text": text}
+            else:
                 return {"reply": "I don't have a capability for that yet."}
-            agent = fallback["agent"]
-            capability = fallback["capability"]
 
         cap_meta = self._registry.get_capability(agent, capability)
         if cap_meta and cap_meta.get("require_confirmation"):
@@ -98,10 +106,13 @@ class Router:
 
         try:
             result = await self._registry.dispatch(agent, capability, inputs)
-            return {"reply": str(result)}
         except Exception as exc:
             logger.warning("router_dispatch_failed", error=str(exc))
             return {"reply": f"Error dispatching request: {exc}"}
+
+        # Humanize the result unless the agent already returned natural text.
+        reply_text = await self._humanize(text, agent, capability, result)
+        return {"reply": reply_text}
 
     async def _classify(self, text: str) -> dict[str, Any]:
         capabilities = self._registry.list_capabilities()
@@ -166,6 +177,73 @@ class Router:
             return None
         payload = best["payload"]
         return {"agent": payload.get("agent"), "capability": payload.get("capability")}
+
+    async def _humanize(
+        self,
+        text: str,
+        agent: str,
+        capability: str,
+        raw_result: Any,
+    ) -> str:
+        """Convert a tool's raw result into a friendly natural-language reply.
+
+        - If the result is already a plain string, return as-is.
+        - If the agent flagged the result as `already_natural` (e.g. the chat
+          capability), return its `reply` field directly.
+        - Otherwise, ask the local LLM to rephrase the result for the user.
+        - Falls back to a JSON dump of the result if the LLM is unavailable.
+        """
+        # Unwrap the SDK's invoke envelope: {"ok": True, "result": <payload>}.
+        payload = raw_result
+        if isinstance(raw_result, dict) and "result" in raw_result:
+            payload = raw_result["result"]
+
+        # Conversational tools can short-circuit humanization.
+        if isinstance(payload, dict) and payload.get("already_natural") and "reply" in payload:
+            return str(payload["reply"])
+
+        if isinstance(payload, str):
+            return payload
+
+        if self._llm is None:
+            return json.dumps(payload, ensure_ascii=False, default=str)
+
+        compact = json.dumps(payload, ensure_ascii=False, default=str)
+        if len(compact) > 4000:
+            compact = compact[:4000] + "…(truncated)"
+
+        system = (
+            "You are Home Intelligence — a friendly, concise home AI assistant. "
+            "You receive a user message and a JSON result from a tool. "
+            "Reply in 1-6 short sentences, using natural language only. "
+            "Group items by area when applicable. Use bullet points for lists "
+            "longer than three items. Hide technical fields like entity_id and "
+            "domain unless the user explicitly asked for them. If the data shows "
+            "many items in 'unavailable' state, mention the count once and skip "
+            "them unless the user asked to see them."
+        )
+        user = (
+            f"User asked: {text!r}\n"
+            f"Capability: {agent}.{capability}\n"
+            f"Tool returned (JSON):\n{compact}\n\n"
+            "Compose the user-facing reply now."
+        )
+        try:
+            resp = await self._llm.chat(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                model=self._humanizer_model,
+                temperature=0.4,
+            )
+        except Exception as exc:
+            logger.warning("router_humanize_failed", error=str(exc))
+            return json.dumps(payload, ensure_ascii=False, default=str)
+        content = (resp.get("message") or {}).get("content")
+        if not content:
+            return json.dumps(payload, ensure_ascii=False, default=str)
+        return str(content).strip()
 
 
 def _empty_classification() -> dict[str, Any]:

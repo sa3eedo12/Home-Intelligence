@@ -5,6 +5,16 @@ defaults:
   llm: qwen3:8b
   timeout_s: 30
 capabilities:
+  - id: chat
+    description: >
+      Conversational fallback for greetings ("hi", "thanks", "good morning"),
+      general questions, and any user message that doesn't map to a more
+      specific capability. Returns a friendly natural-language reply directly
+      from the local LLM (no humanization needed). Use this when no other
+      capability fits.
+    inputs: { text: string }
+    side_effects: false
+    cost: low
   - id: add_reminder
     description: Add a reminder with text and a natural-language due time.
     side_effects: true

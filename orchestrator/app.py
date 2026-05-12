@@ -167,12 +167,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     registry = CapabilityRegistry(agent_urls=agent_urls, qdrant=qdrant, embedder=embedder)
     await registry.bootstrap()
     default_model = os.environ.get("DEFAULT_MODEL", "qwen3:8b")
+    humanizer_model = os.environ.get("HUMANIZER_MODEL", default_model)
     router = Router(
         npu=npu,
         registry=registry,
         router_model=router_model,
         llm=llm,
         llm_fallback_model=default_model,
+        humanizer_model=humanizer_model,
     )
 
     policy_engine = PolicyEngine(_load_yaml(HERE / "policies.yaml"), redis)

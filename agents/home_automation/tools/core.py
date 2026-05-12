@@ -6,17 +6,41 @@ from .ha_client import get_ha_client
 
 
 @tool("list_entities")
-async def list_entities(domain: str | None = None) -> list[dict]:
+async def list_entities(
+    domain: str | None = None, include_unavailable: bool = False
+) -> dict:
+    """Return entities grouped by area, with friendly names. Defaults to
+    hiding unavailable entities so the response stays signal-rich.
+    """
     client = get_ha_client()
-    states = await client.list_states(domain=domain)
-    return [
-        {
-            "entity_id": s["entity_id"],
-            "state": s["state"],
-            "domain": s["entity_id"].split(".")[0],
-        }
-        for s in states
-    ]
+    items = await client.list_states_enriched(
+        domain=domain, include_unavailable=include_unavailable
+    )
+    by_area: dict[str, list[dict]] = {}
+    hidden_unavailable = 0
+    for item in items:
+        area = item.get("area") or "Unassigned"
+        by_area.setdefault(area, []).append(
+            {"name": item["name"], "state": item["state"], "entity_id": item["entity_id"]}
+        )
+    if not include_unavailable:
+        # Re-fetch with unavailable to count what's hidden, so the humanizer
+        # can mention them. Cheap because it hits the same /api/template.
+        try:
+            full = await client.list_states_enriched(
+                domain=domain, include_unavailable=True
+            )
+            hidden_unavailable = sum(
+                1 for it in full if it["state"] in ("unavailable", "unknown")
+            )
+        except Exception:
+            hidden_unavailable = 0
+    return {
+        "domain": domain,
+        "by_area": by_area,
+        "total_visible": sum(len(v) for v in by_area.values()),
+        "hidden_unavailable": hidden_unavailable,
+    }
 
 
 @tool("get_entity_state")

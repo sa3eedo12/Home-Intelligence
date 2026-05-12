@@ -6,8 +6,8 @@ defaults:
   timeout_s: 30
 capabilities:
   - id: list_entities
-    description: List Home Assistant entities, optionally filtered by domain.
-    inputs: { domain: "string?" }
+    description: List Home Assistant entities grouped by area with friendly names. Hides unavailable entities by default; reports how many were hidden so the user can ask to see them. Filterable by domain (light, switch, sensor, etc.).
+    inputs: { domain: "string?", include_unavailable: "boolean?" }
     side_effects: false
     cost: low
   - id: get_entity_state
@@ -62,6 +62,16 @@ capabilities:
       automations, count entities by domain, and surface configuration improvement
       suggestions. Falls back gracefully when the mcp_server integration is not enabled.
     inputs: {}
+    side_effects: false
+    cost: medium
+  - id: recent_appliance_activity
+    description: >
+      Report recent state and program/cycle attributes for a household appliance
+      (washer, dryer, dishwasher, oven, fridge, coffee machine, etc.). Returns
+      the current state, recent state changes, and integration-specific highlights
+      like 'program', 'remaining_time', 'finish_time'. Use this when the user asks
+      "what was the last wash cycle", "is the dishwasher done", "what's the oven set to".
+    inputs: { appliance: string, hours: "integer?" }
     side_effects: false
     cost: medium
 subscribes:

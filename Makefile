@@ -39,6 +39,9 @@ test-orchestrator: ## Run orchestrator tests
 test-home-automation: ## Run home_automation agent tests
 >cd agents/home_automation && pytest
 
+test-personal-assistant: ## Run personal_assistant agent tests
+>cd agents/personal_assistant && pytest
+
 test-system-health: ## Run system_health agent tests
 >cd agents/system_health && pytest
 
@@ -51,7 +54,7 @@ fmt: ## Format SDK code
 lint: ## Lint all Python code
 >ruff check shared orchestrator agents
 
-test: test-sdk test-orchestrator test-home-automation test-system-health test-dashboard-curator ## Run all tests
+test: test-sdk test-orchestrator test-home-automation test-personal-assistant test-system-health test-dashboard-curator ## Run all tests
 
 help: ## List available targets
 >@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "%-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST)

@@ -7,7 +7,7 @@ from home_agents_sdk.agent_base import build_app
 from home_agents_sdk.bus import EventBus
 from home_agents_sdk.telemetry import get_logger
 
-from tools import anomaly, core, doorbell, ha_mcp_client, scenes, suggest  # noqa: F401
+from tools import anomaly, appliance, core, doorbell, ha_mcp_client, scenes, suggest  # noqa: F401
 
 logger = get_logger("home_automation")
 app = build_app("home_automation", manifest_path="manifest.yaml")
