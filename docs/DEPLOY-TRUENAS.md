@@ -1,22 +1,40 @@
 # Deploy on TrueNAS SCALE (Custom Apps)
 
-This is the deployment path for **TrueNAS SCALE Fangtooth (25.04) or newer**, which uses a Docker-based app engine.
+This is the deployment path for **TrueNAS SCALE Goldeye (25.10) or newer**, which uses a Docker-based app engine. It also works on Fangtooth (25.04+) but Goldeye is the tested baseline.
 
 > ⚠️ TrueNAS SCALE Electric Eel (24.10) shipped Docker support but it was opt-in.
 > TrueNAS SCALE Dragonfish (24.04) and earlier used the (now-removed) `k3s`-based app engine
 > and are **not supported** by this guide. Upgrade your TrueNAS host first.
 
-This deployment uses the GHCR-published Home-Intelligence images and
-inline ROCm + NPU device passthrough so the iGPU and XDNA 2 NPU on a
-Minisforum N5 Pro are actually used by the agent stack.
+This deployment uses the GHCR-published Home-Intelligence images. The
+dashboard is exposed on the TrueNAS host's LAN at port `8080` and runs
+without authentication (single-user, LAN-only).
 
-The dashboard is exposed on the TrueNAS host's LAN at port `8080` and
-runs without authentication (single-user, LAN-only).
+## Hardware acceleration on TrueNAS today
+
+| Component | Status on TrueNAS 25.10 (Goldeye) | Why |
+|---|---|---|
+| **Radeon 890M (ROCm iGPU)** | ✅ Works | TrueNAS ships `amdgpu` + `amdkfd`. Containers share `/dev/kfd` and `/dev/dri/*`. |
+| **XDNA 2 NPU** | ❌ Not available | TrueNAS 25.10's kernel build doesn't enable `CONFIG_DRM_ACCEL_AMDXDNA`, so `/dev/accel/accel0` never appears. |
+
+The default `deploy/docker-compose.truenas.yml` therefore:
+- runs Ollama on the iGPU with full ROCm passthrough,
+- replaces the AMD Lemonade NPU image with a tiny CPU stub that
+  satisfies the `/health` probe so the rest of the stack stays healthy,
+- routes the "small" models (router + embeddings) to Ollama on the
+  iGPU instead of the NPU (`ROUTER_MODEL=qwen3:0.6b`,
+  `EMBED_MODEL=bge-m3` in `.env.truenas.example`).
+
+When iX Systems eventually enables `amdxdna` in a TrueNAS kernel
+build, `system_health.xdna_status` (see below) will start reporting
+`available` and you can switch back to the NPU-enabled Lemonade
+service — see the [Future: NPU-enabled variant](#future-npu-enabled-variant)
+appendix at the end of this doc.
 
 ## Confirmed target
 
 - Minisforum N5 Pro (AMD Ryzen AI 9 HX370 + Radeon 890M + XDNA 2 NPU + 96 GB RAM)
-- TrueNAS SCALE 25.04 (Fangtooth) or 25.10 (Goldeye)
+- TrueNAS SCALE 25.10 (Goldeye) or newer
 - Docker-based Apps engine
 
 ## Prerequisites
@@ -27,7 +45,7 @@ runs without authentication (single-user, LAN-only).
   "Make GHCR packages public" workflow once, as documented in
   [DEPLOY-MINISCLOUD.md](DEPLOY-MINISCLOUD.md)).
 
-## Step 1 — Verify GPU and NPU are visible to the host
+## Step 1 — Verify GPU is visible to the host
 
 > ⚠️ **Do not isolate the GPU** in System Settings → Advanced → GPU.
 > That setting binds the GPU to `vfio-pci` for VM passthrough and would
@@ -38,21 +56,26 @@ runs without authentication (single-user, LAN-only).
 In a Web Shell:
 
 ```bash
-ls /dev/kfd /dev/dri /dev/accel/accel0
-lsmod | grep -E "amdgpu|amdkfd|amdxdna"
+ls /dev/kfd /dev/dri
+lsmod | grep -E "amdgpu|amdkfd"
 ```
 
-You should see all three device entries and the modules loaded. If
-`/dev/accel/accel0` is missing, your TrueNAS kernel doesn't ship the
-`amdxdna` driver — see the troubleshooting section below.
+You should see `/dev/kfd`, `/dev/dri/card0`, `/dev/dri/renderD128`,
+and the `amdgpu` module loaded with all its DRM helpers.
 
-The Home-Intelligence stack will share these devices with any other
-Apps you have that also use the iGPU/NPU (Plex hardware transcoding,
-Jellyfin, Frigate, Immich ML, stable-diffusion, etc.). The driver
-multiplexes them; the only real constraint is **VRAM contention** —
-the iGPU's video memory is shared, so tune `OLLAMA_MAX_LOADED_MODELS`
-and `OLLAMA_KEEP_ALIVE` (see Step 3) so Ollama doesn't starve your
-other GPU-using apps.
+If you also want to confirm the NPU's status (it will be missing on
+current TrueNAS):
+
+```bash
+ls /dev/accel/accel0 2>/dev/null && echo "NPU available" || echo "NPU not available (expected on TrueNAS 25.10)"
+```
+
+The Home-Intelligence stack will share the GPU with any other Apps
+that also use it (Plex hardware transcoding, Jellyfin, Frigate,
+Immich ML, stable-diffusion, etc.). The driver multiplexes them; the
+only real constraint is **VRAM contention** — the iGPU's video memory
+is shared, so tune `OLLAMA_MAX_LOADED_MODELS` and `OLLAMA_KEEP_ALIVE`
+(see Step 3) so Ollama doesn't starve your other GPU-using apps.
 
 > ℹ️ If you actually want to dedicate the GPU to a VM, use TrueNAS's
 > isolation setting — but then you cannot run this stack on the host.
@@ -180,25 +203,32 @@ populate with an LLM-narrated summary.
 |---|---|---|
 | `redis`, `postgres`, `qdrant` | UID 568 (apps) | Standard apps user; data dirs chowned. |
 | `ollama` | root | Needs `/dev/kfd` + `/dev/dri` and ROCm device groups. |
-| `lemonade` | root | Needs `/dev/accel/accel0`. |
+| `lemonade` | UID 568 (apps) | CPU stub on TrueNAS; no host devices needed. |
 | `orchestrator` and most agents | UID 568 | Pure HTTP services, no privileged needs. |
 | `system_health` | root + `pid: host` | Needs `/proc` and `/sys` from the host. |
 | `storage_backup` | root | Needs to read TrueNAS pool datasets owned by various users. |
 
 ## Limitations on TrueNAS
 
+- **The XDNA 2 NPU is unusable on TrueNAS 25.10.** TrueNAS's kernel
+  build doesn't enable `CONFIG_DRM_ACCEL_AMDXDNA`, so the device
+  driver never appears and `/dev/accel/accel0` doesn't exist. The
+  default compose file replaces the AMD Lemonade image with a CPU
+  stub. `system_health.xdna_status` will report `not_present` — when
+  iX flips this kernel config in a future build, the same capability
+  will report `available` and you can switch to the NPU-enabled
+  variant. There's no workaround on the read-only TrueNAS root
+  filesystem; out-of-tree driver builds get wiped on every TrueNAS
+  update.
 - The TrueNAS apps engine does **not** expose `/var/run/docker.sock` to
   apps. `system_health.container_status` therefore reports
   `docker socket unavailable` and `restart_container` returns an error.
   All other `system_health` capabilities (`scan`, `top_processes`,
-  `gpu_status`, `anomaly_check`) work normally via `/proc` + `/sys` +
-  `rocm-smi`.
+  `gpu_status`, `xdna_status`, `anomaly_check`) work normally via
+  `/proc` + `/sys` + `rocm-smi`.
 - The dashboard has **no authentication**. Don't expose port `8080`
   outside your LAN. Put a reverse proxy with auth in front of it if you
   need remote access.
-- The Lemonade NPU image tag in this compose file is a placeholder;
-  AMD's `amd/lemonade-server` image name and tag may change. Confirm
-  against the latest AMD Lemonade documentation before deploying.
 
 ## Troubleshooting
 
@@ -226,12 +256,10 @@ Run the `mkdir -p` and `cp` commands from Step 2 again, then retry.
   System Settings → Advanced → GPU.
 
 ### `lemonade` container fails to start
-- `/dev/accel/accel0` is missing — confirm with `ls /dev/accel`.
-- Your build of TrueNAS does not include the `amdxdna` kernel module.
-  In that case, remove the `lemonade` `devices:` block and let
-  Lemonade fall back to CPU; or switch to the
-  [MinisCloud deployment](DEPLOY-MINISCLOUD.md) which uses a placeholder
-  Lemonade stub.
+- The default TrueNAS compose runs the CPU stub; it should never need
+  hardware. If it fails, check **Apps → Logs** for a Python traceback.
+- If you switched to the NPU-enabled variant manually, see the
+  appendix below.
 
 ### Dashboard shows `connecting…` indefinitely
 - The orchestrator container is not running; check **Apps → Logs**.
@@ -245,3 +273,56 @@ Run the `mkdir -p` and `cp` commands from Step 2 again, then retry.
   is down, but only after the first scheduled run (~60s after start).
 - Confirm the orchestrator's scheduler is running:
   `curl http://<truenas-ip>:8080/status | jq '.jobs[] | select(.id|startswith("dashboard_"))'`.
+
+---
+
+## Future: NPU-enabled variant
+
+When iX Systems enables `CONFIG_DRM_ACCEL_AMDXDNA` in a future TrueNAS
+kernel build, `system_health.xdna_status` will start reporting
+`available`. To take advantage of it:
+
+1. Install the AMD NPU firmware on the host
+   (`apt install linux-firmware` if iX hasn't already shipped it; check
+   `/lib/firmware/amdnpu/`).
+2. Replace the `lemonade` service in `deploy/docker-compose.truenas.yml`
+   with this NPU-enabled block:
+
+   ```yaml
+     lemonade:
+       image: amd/lemonade-server:latest
+       restart: unless-stopped
+       env_file: .env
+       devices:
+         - /dev/accel/accel0
+       group_add:
+         - "107"  # render — verify with `getent group render` on host
+       volumes:
+         - ${TRUENAS_APPDATA}/infra/lemonade/models:/models:ro
+         - ${TRUENAS_APPDATA}/infra/lemonade/server.yaml:/etc/lemonade/server.yaml:ro
+       environment:
+         LEMONADE_MODELS_DIR: /models
+         LEMONADE_HOST: 0.0.0.0
+         LEMONADE_PORT: "8000"
+       healthcheck:
+         test: ["CMD-SHELL", "curl -f http://localhost:8000/health"]
+         interval: 10s
+         timeout: 5s
+         retries: 6
+       networks: [agents]
+   ```
+
+3. Update `.env.truenas.example` (or your `.env`) to use the
+   NPU-quantized small models:
+
+   ```env
+   ROUTER_MODEL=qwen3-1.7b-int4
+   EMBED_MODEL=bge-m3-int8
+   ```
+
+4. Prepare the NPU model files under
+   `$TRUENAS_APPDATA/infra/lemonade/models/` per AMD Lemonade docs.
+5. Apps → Edit → paste updated YAML → Apply.
+
+The dashboard's curator will start narrating activity that hits the
+NPU, and `system_health.xdna_status` will continue to report `available`.

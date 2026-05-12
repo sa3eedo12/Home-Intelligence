@@ -106,6 +106,67 @@ async def gpu_status() -> dict[str, Any]:
         return {"ok": True, "raw": stdout.decode("utf-8", errors="ignore")}
 
 
+def _read_modules() -> str:
+    """Return the contents of /proc/modules (or the host-mounted version)."""
+    for path in ("/host/proc/modules", "/proc/modules"):
+        if os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    return fh.read()
+            except OSError:
+                continue
+    return ""
+
+
+@tool("xdna_status")
+def xdna_status() -> dict[str, Any]:
+    """Report XDNA NPU availability.
+
+    Returns one of three statuses:
+    - `available`     : driver loaded + device file present
+    - `driver_loaded` : driver loaded but device file missing (firmware
+                        issue or hardware not detected)
+    - `not_present`   : neither driver nor device — typical of TrueNAS
+                        SCALE 25.10 which doesn't enable
+                        CONFIG_DRM_ACCEL_AMDXDNA in its kernel build.
+    """
+    device_paths = ["/dev/accel/accel0", "/host/dev/accel/accel0"]
+    device_present = any(os.path.exists(p) for p in device_paths)
+
+    modules = _read_modules()
+    driver_loaded = any(
+        line.split(" ", 1)[0] == "amdxdna" for line in modules.splitlines() if line
+    )
+
+    if device_present and driver_loaded:
+        status = "available"
+        message = "XDNA NPU is loaded and the device file is present."
+    elif driver_loaded and not device_present:
+        status = "driver_loaded"
+        message = (
+            "amdxdna module is loaded but /dev/accel/accel0 is missing — "
+            "check firmware (/lib/firmware/amdnpu/) and dmesg for init errors."
+        )
+    elif device_present and not driver_loaded:
+        status = "device_only"
+        message = (
+            "Device file exists but amdxdna is not in /proc/modules — "
+            "unexpected; the device may be claimed by a different driver."
+        )
+    else:
+        status = "not_present"
+        message = (
+            "XDNA NPU not available. On TrueNAS SCALE 25.10 the kernel "
+            "doesn't ship the amdxdna driver; this is expected."
+        )
+    return {
+        "status": status,
+        "device_present": device_present,
+        "driver_loaded": driver_loaded,
+        "message": message,
+    }
+
+
 @tool("scan")
 def scan() -> dict[str, Any]:
     cpu = psutil.cpu_percent(interval=0.0)

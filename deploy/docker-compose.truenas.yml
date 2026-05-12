@@ -87,23 +87,48 @@ services:
     networks: [agents]
 
   lemonade:
-    # AMD Lemonade (XDNA 2 NPU). Confirm the tag against current AMD docs.
-    image: amd/lemonade-server:latest
+    # =====================================================================
+    # NOTE: TrueNAS SCALE 25.10 (Goldeye) does NOT ship the `amdxdna`
+    # kernel module, so the XDNA 2 NPU is unavailable on this OS today.
+    # We therefore run the same lightweight CPU stub used by the
+    # MinisCloud variant: a tiny Python HTTP server that satisfies the
+    # /health probe so the rest of the stack stays healthy. The
+    # orchestrator and curator route around the missing NPU by using
+    # iGPU-served models (see .env.truenas.example: ROUTER_MODEL,
+    # EMBED_MODEL).
+    #
+    # When iX Systems eventually enables CONFIG_DRM_ACCEL_AMDXDNA in a
+    # TrueNAS kernel build, replace this block with the NPU-enabled one
+    # documented in docs/DEPLOY-TRUENAS.md ("Future: NPU-enabled
+    # variant" appendix).
+    # =====================================================================
+    image: python:3.12-alpine
     restart: unless-stopped
     env_file: .env
-    devices:
-      - /dev/accel/accel0
-    group_add:
-      - "107"  # render
+    user: "568:568"
+    command:
+      - sh
+      - -lc
+      - |
+        python - <<'PY'
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == '/health':
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'ok')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+            def log_message(self, format, *args):
+                pass
+        HTTPServer(('0.0.0.0', 8000), Handler).serve_forever()
+        PY
     volumes:
-      - ${TRUENAS_APPDATA}/infra/lemonade/models:/models:ro
-      - ${TRUENAS_APPDATA}/infra/lemonade/server.yaml:/etc/lemonade/server.yaml:ro
-    environment:
-      LEMONADE_MODELS_DIR: /models
-      LEMONADE_HOST: 0.0.0.0
-      LEMONADE_PORT: "8000"
+      - lemonade-models:/models
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/health"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health | grep -q ok"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -300,3 +325,4 @@ volumes:
   pg-data:
   qdrant-data:
   ollama-data:
+  lemonade-models:

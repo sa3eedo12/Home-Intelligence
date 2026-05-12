@@ -1,5 +1,5 @@
 agent: system_health
-version: 0.3.0
+version: 0.4.0
 description: Hardware and container monitoring, anomaly checks, and optimization suggestions.
 defaults:
   llm: qwen3:8b
@@ -24,6 +24,10 @@ capabilities:
     cost: low
   - id: gpu_status
     description: Return ROCm status from rocm-smi if available.
+    side_effects: false
+    cost: low
+  - id: xdna_status
+    description: Return the status of the AMD XDNA NPU device (whether the kernel driver is loaded, the device file exists, and whether any process has it open). On TrueNAS 25.10 the driver is not enabled and this returns `not_present`.
     side_effects: false
     cost: low
   - id: anomaly_check
