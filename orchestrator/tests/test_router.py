@@ -432,3 +432,59 @@ async def test_chat_inputs_always_filled_with_user_text():
     assert result == {"reply": "Hi!"}
     args, _ = router._registry.dispatch.call_args  # noqa: SLF001
     assert args == ("personal_assistant", "chat", {"text": "hi there"})
+
+
+@pytest.mark.asyncio
+async def test_fast_path_routes_greetings_to_chat_without_llm_classify():
+    """'hi', 'thanks', 'good morning' must bypass classify+semantic entirely
+    so latency stays sub-second."""
+    npu = MagicMock()
+    npu.chat = AsyncMock()  # should NOT be called
+
+    registry = MagicMock()
+    registry.agents = MagicMock(return_value=["personal_assistant"])
+    registry.list_capabilities = MagicMock(
+        return_value=[{"agent": "personal_assistant", "id": "chat", "description": "chat"}]
+    )
+    registry.get_capability = MagicMock(return_value={"description": "chat"})
+    registry.dispatch = AsyncMock(
+        return_value={"ok": True, "result": {"reply": "Hi there!", "already_natural": True}}
+    )
+    registry.semantic_search = AsyncMock()  # should NOT be called
+
+    router = Router(
+        npu=npu,
+        registry=registry,
+        router_model="test-model",
+        llm=MagicMock(),
+        llm_fallback_model="qwen3:8b",
+    )
+    for greeting in [
+        "hi",
+        "Hi!",
+        "  hello.  ",
+        "Hey",
+        "good morning",
+        "Good Evening",
+        "thanks",
+        "thank you",
+        "ok",
+        "how are you",
+        "bye",
+    ]:
+        result = await router.handle(greeting, "user1")
+        assert result == {"reply": "Hi there!"}, f"greeting failed: {greeting!r}"
+
+    # The LLM classifier and semantic search were never invoked.
+    npu.chat.assert_not_called()
+    registry.semantic_search.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fast_path_does_not_swallow_real_commands():
+    """'list lights' or 'turn off the kitchen' must NOT hit the fast path."""
+    npu_resp = _make_npu_response("home_automation", "list_entities", {"domain": "light"})
+    router = _make_router(npu_resp, dispatch_response={"ok": True, "result": {"items": []}})
+    await router.handle("list my lights", "user1")
+    # The classifier WAS called for real commands.
+    router._npu.chat.assert_awaited_once()  # noqa: SLF001

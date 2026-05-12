@@ -211,6 +211,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     activity_aggregator = ActivityAggregator(redis)
     await activity_aggregator.start()
 
+    async def _warm_models() -> None:
+        """Send a tiny inference to Ollama on startup so the first user
+        request doesn't pay the cold-load tax. Best-effort; never blocks
+        startup if Ollama is slow."""
+        for model in {router_model, default_model}:
+            if not model:
+                continue
+            try:
+                await llm.chat(
+                    messages=[{"role": "user", "content": "warm"}],
+                    model=model,
+                    temperature=0.0,
+                )
+                logger.info("orchestrator_warm_model_ok", model=model)
+            except Exception as exc:
+                logger.info(
+                    "orchestrator_warm_model_skipped", model=model, error=str(exc)
+                )
+
+    warmup_task = asyncio.create_task(_warm_models(), name="orchestrator-warmup")
+
     app.state.pool = pool
     app.state.registry = registry
     app.state.router = router
@@ -247,6 +268,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await activity_aggregator.stop()
     await scheduler.shutdown()
     notify_task.cancel()
+    warmup_task.cancel()
     try:
         await tg_app.updater.stop()
     except Exception:
