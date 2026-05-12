@@ -48,6 +48,60 @@ def _format_proposal_markdown(proposal: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_KNOWLEDGE_CONFIRM_METHODS = {
+    "things": "confirm_thing",
+    "habits": "confirm_habit",
+    "preferences": "confirm_preference",
+    "routines": "confirm_routine",
+}
+_KNOWLEDGE_FORGET_METHODS = {
+    "things": "forget_thing",
+    "habits": "forget_habit",
+    "preferences": "forget_preference",
+    "routines": "forget_routine",
+}
+_KNOWLEDGE_PATCH_FIELDS = {
+    "things": {
+        "type",
+        "friendly_name",
+        "attributes",
+        "ha_entity_ids",
+        "photo_path",
+        "confidence",
+        "source",
+    },
+    "habits": {"subject", "pattern", "frequency", "confidence", "last_observed_at", "source"},
+    "preferences": {"value", "confidence", "source"},
+    "routines": {"name", "steps", "schedule", "last_run_at", "source"},
+}
+
+
+def _knowledge_graph(request: Request) -> Any:
+    graph = getattr(request.app.state, "knowledge_graph", None)
+    if graph is None:
+        raise HTTPException(status_code=503, detail="knowledge graph unavailable")
+    return graph
+
+
+def _knowledge_id(table: str, raw_id: Any) -> int | str:
+    if table == "preferences":
+        key = str(raw_id or "").strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="id is required")
+        return key
+    try:
+        return int(raw_id)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="id must be an integer") from exc
+
+
+def _knowledge_table(table: Any) -> str:
+    parsed = str(table or "").strip()
+    if parsed not in _KNOWLEDGE_PATCH_FIELDS:
+        raise HTTPException(status_code=400, detail="unknown knowledge table")
+    return parsed
+
+
 @router.post("/admin/reload-policies")
 async def reload_policies(request: Request) -> dict:
     app_state = request.app.state
@@ -93,6 +147,61 @@ async def format_proposal(proposal_id: int, request: Request) -> dict:
 @router.get("/admin/policies")
 async def get_policies(request: Request) -> dict:
     return request.app.state.policy_engine.policies
+
+
+@router.post("/admin/knowledge/confirm")
+async def knowledge_confirm(request: Request) -> dict:
+    body = await request.json()
+    table = _knowledge_table(body.get("table"))
+    row_id = _knowledge_id(table, body.get("id"))
+    graph = _knowledge_graph(request)
+    method = getattr(graph, _KNOWLEDGE_CONFIRM_METHODS[table], None)
+    if method is None:
+        raise HTTPException(status_code=400, detail="confirm is not supported for table")
+    item = await method(row_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="knowledge row not found")
+    return {"ok": True, "table": table, "id": row_id, "item": item}
+
+
+@router.get("/admin/knowledge/evidence")
+async def knowledge_evidence(table: str, id: str, request: Request) -> dict:  # noqa: A002
+    parsed_table = _knowledge_table(table)
+    row_id = _knowledge_id(parsed_table, id)
+    graph = _knowledge_graph(request)
+    return {"items": await graph.evidence_for(parsed_table, row_id)}
+
+
+@router.post("/admin/knowledge/forget")
+async def knowledge_forget(request: Request) -> dict:
+    body = await request.json()
+    table = _knowledge_table(body.get("table"))
+    row_id = _knowledge_id(table, body.get("id"))
+    graph = _knowledge_graph(request)
+    method = getattr(graph, _KNOWLEDGE_FORGET_METHODS[table], None)
+    if method is None:
+        raise HTTPException(status_code=400, detail="forget is not supported for table")
+    deleted = await method(row_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="knowledge row not found")
+    return {"ok": True, "table": table, "id": row_id, "deleted": True}
+
+
+@router.patch("/admin/knowledge/{table}/{row_id}")
+async def knowledge_patch(table: str, row_id: str, request: Request) -> dict:
+    parsed_table = _knowledge_table(table)
+    parsed_id = _knowledge_id(parsed_table, row_id)
+    body = await request.json()
+    updates = {
+        key: value for key, value in body.items() if key in _KNOWLEDGE_PATCH_FIELDS[parsed_table]
+    }
+    if not updates:
+        raise HTTPException(status_code=400, detail="no editable fields supplied")
+    graph = _knowledge_graph(request)
+    item = await graph.patch_row(parsed_table, parsed_id, updates)
+    if item is None:
+        raise HTTPException(status_code=404, detail="knowledge row not found")
+    return {"ok": True, "table": parsed_table, "id": parsed_id, "item": item}
 
 
 # === Dashboard button endpoints ============================================

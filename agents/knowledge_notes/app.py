@@ -7,7 +7,7 @@ from home_agents_sdk.agent_base import build_app
 from home_agents_sdk.bus import EventBus
 from home_agents_sdk.telemetry import get_logger
 
-from tools import core, events  # noqa: F401
+from tools import core, events, registry  # noqa: F401
 
 logger = get_logger("knowledge_notes")
 app = build_app("knowledge_notes", manifest_path="manifest.yaml")
