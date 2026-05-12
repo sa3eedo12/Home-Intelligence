@@ -75,6 +75,38 @@ jobs:
 
 
 @pytest.mark.asyncio
+async def test_internal_orchestrator_dispatch_runs_callback(tmp_path: Path) -> None:
+    schedules = tmp_path / "schedules.yaml"
+    schedules.write_text(
+        """
+jobs:
+  - id: reflect
+    trigger: interval
+    interval: { minutes: 5 }
+    dispatch: { agent: __orchestrator__, capability: reflector.run, inputs: {} }
+""",
+        encoding="utf-8",
+    )
+    callback = AsyncMock(return_value={"brief_id": 1})
+    registry = MagicMock()
+    registry.dispatch = AsyncMock()
+    scheduler = Scheduler(
+        registry=registry,
+        redis=FakeRedis(decode_responses=True),
+        schedules_path=str(schedules),
+        internal_callbacks={"reflector.run": callback},
+    )
+    await scheduler.start()
+    try:
+        result = await scheduler.run_job_now("reflect")
+        assert result == {"ok": True, "result": {"brief_id": 1}}
+        callback.assert_awaited_once_with({})
+        registry.dispatch.assert_not_awaited()
+    finally:
+        await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_job_execution_dispatches_and_emits_notify(tmp_path: Path) -> None:
     schedules = tmp_path / "schedules.yaml"
     schedules.write_text(

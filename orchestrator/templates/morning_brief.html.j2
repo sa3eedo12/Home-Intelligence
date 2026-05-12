@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Morning Brief · Home Intelligence</title>
+  <link rel="stylesheet" href="/static/morning_brief.css">
+  <script src="/static/morning_brief.js" defer></script>
+</head>
+<body>
+  <header class="brief-topbar">
+    <a href="/dashboard" class="back-link">← Dashboard</a>
+    <h1>🌅 Morning Brief</h1>
+  </header>
+
+  {% set reflection = status.reflection if status and status.reflection else {'healthy': false} %}
+  {% if not reflection.healthy %}
+    <div class="health-banner">
+      Reflection is stale or has not run yet{% if reflection.age_hours is not none %}
+      ({{ '%.1f' % reflection.age_hours }}h old){% endif %}.
+    </div>
+  {% endif %}
+
+  <main class="brief-shell">
+    {% if brief %}
+      {% set body = brief.body_json or {} %}
+      <section class="headline-card">
+        <p class="eyebrow">generated {{ brief.generated_at }}</p>
+        <h2>{{ brief.summary or body.summary or 'No summary available.' }}</h2>
+      </section>
+
+      <section class="brief-section">
+        <h2>Yesterday</h2>
+        <ul>
+          {% for item in body.yesterday or [] %}
+            <li><strong>#{{ item.id }}</strong> {{ item.summary }}</li>
+          {% else %}
+            <li class="empty">No notable events were logged.</li>
+          {% endfor %}
+        </ul>
+      </section>
+
+      <section class="brief-section">
+        <h2>Questions for you</h2>
+        <div class="card-grid">
+          {% for item in body.questions_for_you or [] %}
+            <article class="mini-card">
+              <h3>{{ item.title }}</h3>
+              <p>{{ item.rationale or item.kind }}</p>
+            </article>
+          {% else %}
+            <p class="empty">No questions today.</p>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="brief-section">
+        <h2>Suggestions for me</h2>
+        <div class="card-grid">
+          {% for item in body.suggestions_for_me or [] %}
+            <article class="mini-card">
+              <h3>{{ item.title }}</h3>
+              <p>{{ item.rationale }}</p>
+            </article>
+          {% else %}
+            <p class="empty">No operational suggestions today.</p>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="brief-section">
+        <h2>Code wishlist</h2>
+        <div class="card-grid">
+          {% for item in body.code_wishlist or [] %}
+            <article class="mini-card">
+              <h3>{{ item.title }}</h3>
+              <p>{{ item.rationale }}</p>
+            </article>
+          {% else %}
+            <p class="empty">No code wishlist items today.</p>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="brief-section">
+        <h2>Proposal cards</h2>
+        <div class="proposal-list">
+          {% for proposal in proposals %}
+            <article class="proposal-card" data-proposal-id="{{ proposal.id }}">
+              <div>
+                <p class="eyebrow">{{ proposal.kind }} · {{ proposal.status }} · {{ '%.0f' % ((proposal.confidence or 0) * 100) }}%</p>
+                <h3>{{ proposal.title }}</h3>
+                <p>{{ proposal.rationale }}</p>
+                {% if proposal.evidence_event_ids %}
+                  <p class="evidence">Evidence: events {{ proposal.evidence_event_ids|join(', ') }}</p>
+                {% endif %}
+              </div>
+              <div class="proposal-actions">
+                <button type="button" class="copy-prompt" data-proposal-id="{{ proposal.id }}">Copy prompt</button>
+                <button type="button" disabled title="Coming in Chapter 6">Open as GitHub issue</button>
+                <button type="button" disabled title="Coming in Chapter 6">Send to Copilot CLI on NAS</button>
+              </div>
+            </article>
+          {% else %}
+            <p class="empty">No saved proposals yet.</p>
+          {% endfor %}
+        </div>
+      </section>
+    {% else %}
+      <section class="headline-card">
+        <h2>No morning brief yet.</h2>
+        <p>Run reflection manually from the dashboard admin controls or wait for the 02:30 job.</p>
+      </section>
+    {% endif %}
+  </main>
+</body>
+</html>

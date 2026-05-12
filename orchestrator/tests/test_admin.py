@@ -29,6 +29,24 @@ def _build_app() -> FastAPI:
         xadd=AsyncMock(return_value="1-0"),
     )
     app.state.registry = SimpleNamespace(dispatch=AsyncMock(return_value={"ok": True}))
+    app.state.reflector = SimpleNamespace(run_once=AsyncMock(return_value={"brief_id": 1}))
+    app.state.reflection_store = SimpleNamespace(
+        list_proposals=AsyncMock(
+            return_value=[
+                {
+                    "id": 7,
+                    "kind": "code_change",
+                    "title": "Add retry tests",
+                    "rationale": "Calendar retries failed.",
+                    "evidence_event_ids": [11, 12],
+                    "confidence": 0.81,
+                    "status": "pending",
+                    "cost_estimate": "small",
+                    "impact_estimate": "fewer missed appointments",
+                }
+            ]
+        )
+    )
     app.state.activity_aggregator = SimpleNamespace(
         snapshot=lambda: {"agents": [], "window_minutes": 5, "total_events": 0},
         recent_events=lambda limit=50: [],
@@ -166,3 +184,30 @@ def test_activity_snapshot_returns_aggregator_data() -> None:
     body = resp.json()
     assert "agents" in body
     assert "recent" in body
+
+
+def test_run_reflection_invokes_reflector() -> None:
+    app = _build_app()
+    with TestClient(app) as client:
+        resp = client.post("/admin/reflection/run")
+    assert resp.status_code == 200
+    assert resp.json()["result"] == {"brief_id": 1}
+    app.state.reflector.run_once.assert_awaited_once()
+
+
+def test_format_proposal_returns_markdown_blob() -> None:
+    app = _build_app()
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/7/format")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["proposal_id"] == 7
+    assert "# Add retry tests" in body["markdown"]
+    assert "11, 12" in body["markdown"]
+
+
+def test_format_proposal_returns_404_for_unknown_id() -> None:
+    app = _build_app()
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/999/format")
+    assert resp.status_code == 404
