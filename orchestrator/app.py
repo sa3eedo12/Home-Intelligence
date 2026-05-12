@@ -30,6 +30,7 @@ from .admin import router as admin_router
 from .advisor import Advisor
 from .dashboard import router as dashboard_router
 from .event_recorder import EventRecorder
+from .github_client import GitHubClient
 from .health import probe_lemonade, probe_ollama, probe_postgres, probe_qdrant, probe_redis
 from .notify import run_consumer, send_morning_brief
 from .observers import ObserverRunner
@@ -193,6 +194,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     allowed_ids_raw = os.environ.get("TELEGRAM_ALLOWED_USER_IDS", "")
     agent_urls_raw = os.environ.get("AGENT_URLS", "")
     admin_base_url = os.environ.get("ORCHESTRATOR_BASE_URL", "http://localhost:8080")
+    github_repo_token = os.environ.get("GITHUB_REPO_TOKEN") or None
+    github_repo = os.environ.get("GITHUB_REPO") or None
 
     allowed_ids: set[int] = {
         int(uid.strip()) for uid in allowed_ids_raw.split(",") if uid.strip().isdigit()
@@ -221,6 +224,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     humanizer_model = os.environ.get("HUMANIZER_MODEL", default_model)
     safety = SafetyPolicy(path=os.environ.get("SAFETY_POLICY_PATH", "policies/safety.yaml"))
     reflection_store = ReflectionStore(pool)
+    github_client = GitHubClient(github_repo_token, github_repo)
     router = Router(
         npu=npu,
         registry=registry,
@@ -383,6 +387,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.reflector = reflector
     app.state.advisor = advisor
     app.state.reflection_store = reflection_store
+    app.state.github_client = github_client
     app.state.reactive = reactive
     app.state.redis = redis
     app.state.redis_url = redis_url

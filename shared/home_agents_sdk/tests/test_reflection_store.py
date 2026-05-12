@@ -110,6 +110,35 @@ async def test_add_update_profile_and_forget_execute_queries() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_delivery_updates_columns() -> None:
+    conn = MagicMock()
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+    store = ReflectionStore(_pool_with(conn))
+
+    await store.record_delivery(
+        7,
+        channel="github_issue",
+        github_issue_url="https://github.com/o/r/issues/7",
+        github_pr_url=None,
+        error=None,
+    )
+
+    conn.execute.assert_awaited_once()
+    args = conn.execute.await_args.args
+    assert "delivery_channel = $2" in args[0]
+    assert "dispatched_at = now()" in args[0]
+    assert "github_issue_url = COALESCE($3, github_issue_url)" in args[0]
+    assert "dispatch_error = COALESCE($5, dispatch_error)" in args[0]
+    assert args[1:] == (
+        7,
+        "github_issue",
+        "https://github.com/o/r/issues/7",
+        None,
+        None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_unavailable_pool_returns_empty_or_noop() -> None:
     store = ReflectionStore(None)
 
@@ -120,5 +149,6 @@ async def test_unavailable_pool_returns_empty_or_noop() -> None:
     assert await store.record_brief("x", {}) == 0
     assert await store.add_proposal(kind="code_change", title="x") == 0
     await store.update_proposal_status(1, "accepted")
+    await store.record_delivery(1, channel="github_issue", error="github not configured")
     await store.upsert_profile("wake_time", "07:00", 0.5, "test")
     await store.forget_profile("wake_time")
