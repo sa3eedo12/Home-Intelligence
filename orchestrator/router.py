@@ -212,6 +212,23 @@ class Router:
         """Public proxy to registry dispatch, used by confirmation callbacks."""
         return await self._registry.dispatch(agent, capability, inputs)
 
+    async def execute_pending(self, pending: dict[str, Any]) -> dict[str, Any]:
+        agent = pending.get("agent")
+        capability = pending.get("capability")
+        inputs = pending.get("inputs") or {}
+        if not agent or not capability:
+            return {"reply": "I couldn't execute that pending action."}
+
+        try:
+            result = await self._registry.dispatch(agent, capability, inputs)
+        except Exception as exc:
+            logger.warning("router_pending_dispatch_failed", error=str(exc))
+            return {"reply": f"Error dispatching request: {exc}"}
+
+        prompt_text = pending.get("prompt_text") or pending.get("reason") or "pending action"
+        reply_text = await self._humanize(str(prompt_text), agent, capability, result)
+        return {"reply": reply_text}
+
     async def _semantic_fallback(self, text: str) -> dict[str, Any] | None:
         results = await self._registry.semantic_search(text, top_k=3)
         if not results:

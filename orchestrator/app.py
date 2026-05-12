@@ -195,6 +195,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         policy_engine=policy_engine,
         scheduler=scheduler,
         admin_base_url=admin_base_url,
+        redis=redis,
     )
     await tg_app.initialize()
     await tg_app.start()

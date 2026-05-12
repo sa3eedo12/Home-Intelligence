@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import re
+from typing import Any
+
 import httpx
 from home_agents_sdk.telemetry import get_logger
+from redis.asyncio import Redis
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -12,6 +16,7 @@ from telegram.ext import (
     filters,
 )
 
+from .pending import clear_pending, get_pending, set_pending
 from .policy_engine import PolicyEngine
 from .router import Router
 from .scheduler import Scheduler
@@ -20,9 +25,44 @@ from .workflow import WorkflowEngine
 
 logger = get_logger("telegram_bot")
 
+_CONFIRM_RE = re.compile(r"^\s*(yes|yeah|yep|sure|confirm|do it|ok|okay|y)\b", re.IGNORECASE)
+_CANCEL_RE = re.compile(r"^\s*(no|nope|cancel|abort|stop|n)\b", re.IGNORECASE)
+
 
 def _is_allowed(user_id: int, allowed_ids: set[int]) -> bool:
     return user_id in allowed_ids
+
+
+def _confirmation_action(text: str) -> str | None:
+    if _CONFIRM_RE.search(text):
+        return "confirm"
+    if _CANCEL_RE.search(text):
+        return "cancel"
+    return None
+
+
+def _chat_id(update: Update) -> int | None:
+    effective_chat = getattr(update, "effective_chat", None)
+    if effective_chat is not None:
+        return int(effective_chat.id)
+    message = getattr(update, "message", None)
+    if message is not None:
+        chat_id = getattr(message, "chat_id", None)
+        if chat_id is not None:
+            return int(chat_id)
+        chat = getattr(message, "chat", None)
+        if chat is not None and getattr(chat, "id", None) is not None:
+            return int(chat.id)
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        message = getattr(query, "message", None)
+        chat_id = getattr(message, "chat_id", None)
+        if chat_id is not None:
+            return int(chat_id)
+        chat = getattr(message, "chat", None)
+        if chat is not None and getattr(chat, "id", None) is not None:
+            return int(chat.id)
+    return None
 
 
 async def _reply(update: Update, text: str) -> None:
@@ -68,6 +108,7 @@ def _make_help(allowed_ids: set[int]):
             "/quiet on|off|status – Quiet-hours override\n"
             "/mute <agent|topic> [minutes] – Temporarily mute notifications\n"
             "/unmute <agent|topic> – Remove mute\n"
+            "/cancel – Cancel a pending confirmation\n"
             "/jobs – List scheduled jobs\n"
             "/jobs run <id> – Run a job now\n"
             "Or just send a message directly."
@@ -92,7 +133,7 @@ def _make_status(allowed_ids: set[int]):
     return status_cmd
 
 
-def _make_ask(allowed_ids: set[int], router: Router):
+def _make_ask(allowed_ids: set[int], router: Router, redis: Redis):
     async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
             return
@@ -102,24 +143,54 @@ def _make_ask(allowed_ids: set[int], router: Router):
             return
         user_id = str(update.effective_user.id)
         result = await router.handle(text, user_id)
-        await _send_result(update, context, result)
+        await _send_result(update, context, result, redis)
 
     return ask_cmd
 
 
-def _make_text(allowed_ids: set[int], router: Router):
+async def _handle_pending_text(update: Update, router: Router, redis: Redis, text: str) -> bool:
+    chat_id = _chat_id(update)
+    if chat_id is None:
+        return False
+    pending = await get_pending(redis, chat_id)
+    if pending is None:
+        return False
+    action = _confirmation_action(text)
+    if action is None:
+        return False
+
+    if action == "cancel":
+        await clear_pending(redis, chat_id)
+        await _reply(update, "Cancelled.")
+        return True
+
+    try:
+        result = await router.execute_pending(pending)
+        reply_text = result.get("reply", "Done.")
+    except Exception as exc:
+        logger.warning("pending_text_execute_failed", error=str(exc))
+        reply_text = f"Failed: {exc}"
+    finally:
+        await clear_pending(redis, chat_id)
+    await _reply(update, reply_text)
+    return True
+
+
+def _make_text(allowed_ids: set[int], router: Router, redis: Redis):
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
             return
         text = update.message.text or ""
+        if await _handle_pending_text(update, router, redis, text):
+            return
         user_id = str(update.effective_user.id)
         result = await router.handle(text, user_id)
-        await _send_result(update, context, result)
+        await _send_result(update, context, result, redis)
 
     return text_handler
 
 
-def _make_voice(allowed_ids: set[int], router: Router):
+def _make_voice(allowed_ids: set[int], router: Router, redis: Redis):
     async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
             return
@@ -131,12 +202,12 @@ def _make_voice(allowed_ids: set[int], router: Router):
             return
         user_id = str(update.effective_user.id)
         result = await router.handle(text, user_id)
-        await _send_result(update, context, result)
+        await _send_result(update, context, result, redis)
 
     return voice_handler
 
 
-def _make_photo(allowed_ids: set[int], router: Router):
+def _make_photo(allowed_ids: set[int], router: Router, redis: Redis):
     async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
             return
@@ -144,7 +215,7 @@ def _make_photo(allowed_ids: set[int], router: Router):
         text = f"Look at this image: {caption}"
         user_id = str(update.effective_user.id)
         result = await router.handle(text, user_id)
-        await _send_result(update, context, result)
+        await _send_result(update, context, result, redis)
 
     return photo_handler
 
@@ -214,6 +285,23 @@ def _make_unmute(allowed_ids: set[int], policy_engine: PolicyEngine):
     return unmute_cmd
 
 
+def _make_cancel(allowed_ids: set[int], redis: Redis):
+    async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
+            return
+        chat_id = _chat_id(update)
+        if chat_id is None:
+            return
+        pending = await get_pending(redis, chat_id)
+        await clear_pending(redis, chat_id)
+        if pending is None:
+            await _reply(update, "No pending action to cancel.")
+        else:
+            await _reply(update, "Cancelled pending action.")
+
+    return cancel_cmd
+
+
 def _make_jobs(allowed_ids: set[int], scheduler: Scheduler, admin_base_url: str):
     async def jobs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
@@ -237,7 +325,9 @@ def _make_jobs(allowed_ids: set[int], scheduler: Scheduler, admin_base_url: str)
     return jobs_cmd
 
 
-def _make_callback(allowed_ids: set[int], workflow_engine: WorkflowEngine, router: Router):
+def _make_callback(
+    allowed_ids: set[int], workflow_engine: WorkflowEngine, router: Router, redis: Redis
+):
     async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if query is None or query.from_user is None:
@@ -250,31 +340,81 @@ def _make_callback(allowed_ids: set[int], workflow_engine: WorkflowEngine, route
         if len(parts) < 2:
             return
         action, workflow_id = parts[0], parts[1]
-        user_choice = {"action": action}
-        payload = await workflow_engine.resume(workflow_id, user_choice)
-        if action == "confirm":
-            agent = payload.get("agent")
-            capability = payload.get("capability")
-            inputs = payload.get("inputs", {})
-            if agent and capability:
-                try:
-                    result = await router.dispatch(agent, capability, inputs)
-                    await workflow_engine.mark_done(workflow_id, result)
-                    await query.edit_message_text(f"Done: {result}")
-                except Exception as exc:
-                    await workflow_engine.mark_failed(workflow_id, str(exc))
-                    await query.edit_message_text(f"Failed: {exc}")
-        else:
-            await workflow_engine.mark_failed(workflow_id, "Cancelled by user")
-            await query.edit_message_text("Cancelled.")
+        if action not in {"confirm", "cancel"}:
+            return
+
+        if workflow_id == "pending":
+            await _handle_pending_callback(update, query, action, router, redis)
+            return
+
+        chat_id = _chat_id(update)
+        try:
+            user_choice = {"action": action}
+            payload = await workflow_engine.resume(workflow_id, user_choice)
+            if action == "confirm":
+                agent = payload.get("agent")
+                capability = payload.get("capability")
+                inputs = payload.get("inputs", {})
+                if agent and capability:
+                    try:
+                        result = await router.dispatch(agent, capability, inputs)
+                        await workflow_engine.mark_done(workflow_id, result)
+                        await query.edit_message_text(f"Done: {result}")
+                    except Exception as exc:
+                        await workflow_engine.mark_failed(workflow_id, str(exc))
+                        await query.edit_message_text(f"Failed: {exc}")
+            else:
+                await workflow_engine.mark_failed(workflow_id, "Cancelled by user")
+                await query.edit_message_text("Cancelled.")
+        finally:
+            if chat_id is not None:
+                await clear_pending(redis, chat_id)
 
     return callback_handler
 
 
-async def _send_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict) -> None:
+async def _handle_pending_callback(
+    update: Update,
+    query: Any,
+    action: str,
+    router: Router,
+    redis: Redis,
+) -> None:
+    chat_id = _chat_id(update)
+    if chat_id is None:
+        await query.edit_message_text("No chat context for pending action.")
+        return
+    pending = await get_pending(redis, chat_id)
+    if pending is None:
+        await query.edit_message_text("No pending action found or it expired.")
+        return
+    if action == "cancel":
+        await clear_pending(redis, chat_id)
+        await query.edit_message_text("Cancelled.")
+        return
+
+    try:
+        result = await router.execute_pending(pending)
+        reply_text = result.get("reply", "Done.")
+    except Exception as exc:
+        logger.warning("pending_callback_execute_failed", error=str(exc))
+        reply_text = f"Failed: {exc}"
+    finally:
+        await clear_pending(redis, chat_id)
+    await query.edit_message_text(reply_text)
+
+
+async def _send_result(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict, redis: Redis
+) -> None:
+    if update.message is None:
+        return
     reply_text = result.get("reply", "Done.")
     confirm = result.get("confirm")
     if confirm:
+        chat_id = _chat_id(update)
+        if chat_id is not None:
+            await set_pending(redis, chat_id, {**confirm, "prompt_text": reply_text})
         workflow_id = confirm.get("workflow_id") or "pending"
         keyboard = InlineKeyboardMarkup(
             [
@@ -297,24 +437,29 @@ async def build_telegram_app(
     policy_engine: PolicyEngine,
     scheduler: Scheduler,
     admin_base_url: str,
+    redis: Redis,
 ) -> Application:
     app = Application.builder().token(token).build()
     app.bot_data["registry"] = router._registry
+    app.bot_data["redis"] = redis
 
     app.add_handler(CommandHandler("start", _make_start(allowed_ids)))
     app.add_handler(CommandHandler("help", _make_help(allowed_ids)))
     app.add_handler(CommandHandler("status", _make_status(allowed_ids)))
-    app.add_handler(CommandHandler("ask", _make_ask(allowed_ids, router)))
+    app.add_handler(CommandHandler("ask", _make_ask(allowed_ids, router, redis)))
     app.add_handler(CommandHandler("quiet", _make_quiet(allowed_ids, policy_engine)))
     app.add_handler(CommandHandler("mute", _make_mute(allowed_ids, policy_engine)))
     app.add_handler(CommandHandler("unmute", _make_unmute(allowed_ids, policy_engine)))
+    app.add_handler(CommandHandler("cancel", _make_cancel(allowed_ids, redis)))
     app.add_handler(CommandHandler("jobs", _make_jobs(allowed_ids, scheduler, admin_base_url)))
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, _make_text(allowed_ids, router))
+        MessageHandler(filters.TEXT & ~filters.COMMAND, _make_text(allowed_ids, router, redis))
     )
-    app.add_handler(MessageHandler(filters.VOICE, _make_voice(allowed_ids, router)))
-    app.add_handler(MessageHandler(filters.PHOTO, _make_photo(allowed_ids, router)))
-    app.add_handler(CallbackQueryHandler(_make_callback(allowed_ids, workflow_engine, router)))
+    app.add_handler(MessageHandler(filters.VOICE, _make_voice(allowed_ids, router, redis)))
+    app.add_handler(MessageHandler(filters.PHOTO, _make_photo(allowed_ids, router, redis)))
+    app.add_handler(
+        CallbackQueryHandler(_make_callback(allowed_ids, workflow_engine, router, redis))
+    )
 
     return app
 

@@ -323,6 +323,33 @@ async def test_humanizer_calls_llm_with_user_text_and_tool_payload():
 
 
 @pytest.mark.asyncio
+async def test_execute_pending_dispatches_and_applies_humanizer():
+    humanizer_llm = MagicMock()
+    humanizer_llm.chat = AsyncMock(return_value={"message": {"content": "Logged. Anything else?"}})
+    npu_resp = _make_npu_response("household_ops", "chores_complete", {"chore_id": 7})
+    router = _make_router(
+        npu_resp,
+        dispatch_response={"ok": True, "result": {"ok": True}},
+        llm=humanizer_llm,
+    )
+    pending = {
+        "agent": "household_ops",
+        "capability": "chores_complete",
+        "inputs": {"chore_id": 7},
+        "reason": "Mark sheets washed.",
+        "prompt_text": "I'll log that bed sheets were washed.",
+    }
+
+    result = await router.execute_pending(pending)
+
+    assert result == {"reply": "Logged. Anything else?"}
+    router._registry.dispatch.assert_awaited_once_with(  # noqa: SLF001
+        "household_ops", "chores_complete", {"chore_id": 7}
+    )
+    humanizer_llm.chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_humanizer_passes_through_already_natural_replies():
     """Capabilities like personal_assistant.chat that return
     `{"reply": "...", "already_natural": True}` should bypass humanization."""
