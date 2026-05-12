@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from home_agents_sdk.llm import OllamaClient
@@ -24,6 +25,26 @@ Reply ONLY with compact JSON matching this schema (no prose, no code fences):
 }"""
 
 MIN_SEMANTIC_SCORE = 0.55
+
+# Fast path: short conversational greetings/acks skip the LLM classifier and
+# embedding-based fallback entirely, routing straight to personal_assistant.chat.
+# Saves ~1-2s on every greeting/ack vs. a full classify + semantic search round.
+_FAST_PATH_PATTERNS = [
+    re.compile(r"^\s*(hi|hello|hey|howdy|yo|sup|hiya|hi there)\b[\s.!?]*$", re.IGNORECASE),
+    re.compile(
+        r"^\s*good\s+(morning|afternoon|evening|night)\b[\s.!?]*$", re.IGNORECASE
+    ),
+    re.compile(
+        r"^\s*(thanks|thank you|ty|thx|cheers|appreciate it)\b[\s.!?]*$", re.IGNORECASE
+    ),
+    re.compile(r"^\s*(ok|okay|cool|nice|great|awesome|got it|alright)\b[\s.!?]*$", re.IGNORECASE),
+    re.compile(r"^\s*(bye|goodbye|see ya|good night|gn)\b[\s.!?]*$", re.IGNORECASE),
+    re.compile(r"^\s*(how are you|how's it going|what's up|wassup)\b[\s.?]*$", re.IGNORECASE),
+]
+
+
+def _is_conversational_shortcut(text: str) -> bool:
+    return any(p.match(text) for p in _FAST_PATH_PATTERNS)
 
 
 def _format_capability_inventory(caps: list[dict[str, Any]]) -> str:
@@ -58,6 +79,24 @@ class Router:
         self._humanizer_model = humanizer_model or llm_fallback_model or router_model
 
     async def handle(self, text: str, user_id: str) -> dict[str, Any]:
+        # Fast path: short conversational greetings/acks go straight to
+        # personal_assistant.chat without calling the LLM classifier or the
+        # semantic-search fallback. Saves ~1-2s per greeting.
+        if _is_conversational_shortcut(text) and (
+            self._registry.get_capability("personal_assistant", "chat") is not None
+        ):
+            try:
+                result = await self._registry.dispatch(
+                    "personal_assistant", "chat", {"text": text}
+                )
+                reply_text = await self._humanize(
+                    text, "personal_assistant", "chat", result
+                )
+                return {"reply": reply_text}
+            except Exception as exc:
+                logger.warning("router_fast_path_failed", error=str(exc))
+                # Fall through to the normal path if chat dispatch fails.
+
         classification = await self._classify(text)
         agent = classification.get("agent")
         capability = classification.get("capability")

@@ -33,5 +33,13 @@ async def set_scene(scene_name: str) -> dict:
     if match is None:
         return {"ok": False, "error": f"Scene '{scene_name}' not found"}
     entity_id = match["entity_id"]
-    await client.call_service("scene", "turn_on", {"entity_id": entity_id})
-    return {"ok": True, "scene": entity_id}
+    name = match.get("attributes", {}).get("friendly_name") or entity_id
+    result = await client.call_service("scene", "turn_on", {"entity_id": entity_id})
+    affected = [{"entity_id": entity_id, "name": name}]
+    return {
+        "ok": True,
+        "scene": entity_id,
+        "result": result,
+        "affected_entities": affected,
+        "affected_names": [name],
+    }
