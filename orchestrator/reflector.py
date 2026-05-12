@@ -24,6 +24,7 @@ USER_PROFILE_TEMPLATE: dict[str, str] = {
     "allergies": "Any allergies relevant to meals, shopping, and reminders.",
     "dietary_restrictions": "Dietary restrictions, avoidances, or nutrition goals.",
     "household_members": "People in the household and how they prefer to be referenced.",
+    "household_size": "Number of people and pets living in the household.",
     "pets": "Pets, feeding routines, and care reminders.",
     "favorite_cuisines": "Favorite cuisines and default meal preferences.",
     "music_preferences": "Music genres, volume/time preferences, and contexts.",

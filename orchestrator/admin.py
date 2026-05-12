@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import time
 from typing import Any
 
 import httpx
@@ -155,6 +156,162 @@ def _knowledge_graph(request: Request) -> Any:
     return graph
 
 
+_ROUTINE_PROFILE_KEYS = ("wake_time", "sleep_time", "work_hours")
+_HOUSEHOLD_ROLES = {"adult", "child", "pet", "guest"}
+
+
+async def _json_object(request: Request) -> dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="invalid JSON body") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be an object")
+    return body
+
+
+def _profile_value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip()) and value.strip() != "(skipped)"
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    return True
+
+
+def _profile_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().casefold() in {"true", "1", "yes", "done", "complete"}
+    return bool(value)
+
+
+def _habit_confirmed(row: dict[str, Any]) -> bool:
+    return row.get("last_confirmed_at") is not None
+
+
+def _entity_count(payload: Any) -> int:
+    if isinstance(payload, list):
+        return sum(1 for item in payload if isinstance(item, dict) and item.get("entity_id"))
+    if not isinstance(payload, dict):
+        return 0
+    by_area = payload.get("by_area")
+    if isinstance(by_area, dict):
+        return sum(
+            1
+            for items in by_area.values()
+            if isinstance(items, list)
+            for item in items
+            if isinstance(item, dict) and item.get("entity_id")
+        )
+    items = payload.get("items") or payload.get("entities") or []
+    if not isinstance(items, list):
+        return 0
+    return sum(1 for item in items if isinstance(item, dict) and item.get("entity_id"))
+
+
+async def _ha_entity_count(request: Request) -> int:
+    registry = getattr(request.app.state, "registry", None)
+    if registry is None:
+        return 0
+    try:
+        result = await registry.dispatch(
+            "home_automation",
+            "list_entities",
+            {"include_unavailable": True},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("onboarding_list_entities_failed", error=str(exc))
+        return 0
+    if isinstance(result, dict) and result.get("ok") is False:
+        logger.warning("onboarding_list_entities_failed", error=result.get("error"))
+        return 0
+    payload = result.get("result") if isinstance(result, dict) and "result" in result else result
+    return _entity_count(payload)
+
+
+async def build_onboarding_state(request: Request) -> dict[str, Any]:
+    graph = _knowledge_graph(request)
+    store = _reflection_store(request)
+    things, habits, members, profile_rows, ha_total = await asyncio.gather(
+        graph.list_things(),
+        graph.list_habits(),
+        graph.list_members(include_pets=True),
+        store.list_profile(),
+        _ha_entity_count(request),
+    )
+    profile = {str(row.get("key")): row.get("value") for row in profile_rows}
+    appliance_count = sum(
+        1 for row in things if str(row.get("type") or "").startswith("appliance.")
+    )
+    discovery_complete = bool(things) and appliance_count >= 3
+    missing_profile = [
+        key for key in _ROUTINE_PROFILE_KEYS if not _profile_value_present(profile.get(key))
+    ]
+    routines_complete = not missing_profile
+    household_complete = bool(members)
+    confirmed_habits = [row for row in habits if _habit_confirmed(row)]
+    unconfirmed_habits = [row for row in habits if not _habit_confirmed(row)]
+    habits_complete = bool(confirmed_habits)
+    completed_flag = _profile_bool(profile.get("onboarding_completed"))
+
+    if completed_flag:
+        stage: int | str = "complete"
+    elif not discovery_complete:
+        stage = 1
+    elif not routines_complete:
+        stage = 2
+    elif not household_complete:
+        stage = 3
+    else:
+        stage = 4
+
+    blockers: list[str] = []
+    if stage == 1:
+        blockers.append("Identify at least three appliance things in Discovery.")
+    elif stage == 2:
+        blockers.extend(f"Missing routine profile key: {key}" for key in missing_profile)
+    elif stage == 3:
+        blockers.append("Add at least one household member.")
+    elif stage == 4 and not habits_complete:
+        if habits:
+            blockers.append("Confirm at least one inferred habit.")
+        else:
+            blockers.append("No inferred habits yet; observers will surface candidates soon.")
+
+    completed_count = sum(
+        bool(value)
+        for value in (discovery_complete, routines_complete, household_complete, habits_complete)
+    )
+    percent_complete = 1.0 if completed_flag else completed_count / 4
+    summary = {
+        "discovery_summary": {
+            "identified": len(things),
+            "appliances": appliance_count,
+            "total": ha_total,
+        },
+        "missing_profile_keys": missing_profile,
+        "members": members,
+        "unconfirmed_habits": unconfirmed_habits[:5],
+        "habit_count": len(habits),
+        "confirmed_habits": len(confirmed_habits),
+        "steps": {
+            "discovery": {"complete": discovery_complete},
+            "routines": {"complete": routines_complete},
+            "household": {"complete": household_complete},
+            "habits": {"complete": habits_complete},
+        },
+    }
+    return {
+        "stage": stage,
+        "percent_complete": percent_complete,
+        "current_blockers": blockers,
+        "summary": summary,
+    }
+
+
 def _required_discovery_str(body: dict[str, Any], key: str) -> str:
     value = str(body.get(key) or "").strip()
     if not value:
@@ -295,6 +452,115 @@ async def skip_profile(request: Request) -> dict[str, Any]:
         key=key, value="(skipped)", confidence=0.0, source="user_skipped"
     )
     return {"ok": True, "key": key}
+
+
+def _optional_int(body: dict[str, Any], key: str) -> int | None:
+    value = body.get(key)
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"{key} must be an integer") from exc
+
+
+def _required_int(body: dict[str, Any], key: str) -> int:
+    value = _optional_int(body, key)
+    if value is None:
+        raise HTTPException(status_code=400, detail=f"{key} is required")
+    return value
+
+
+def _string_list(body: dict[str, Any], key: str) -> list[str]:
+    value = body.get(key)
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, list):
+        if any(not isinstance(item, str) for item in value):
+            raise HTTPException(status_code=400, detail=f"{key} must be a list of strings")
+        return [item.strip() for item in value if item.strip()]
+    raise HTTPException(status_code=400, detail=f"{key} must be a list of strings")
+
+
+def _optional_hhmm(body: dict[str, Any], key: str) -> time | None:
+    value = body.get(key)
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail=f"{key} must be HH:MM")
+    parts = value.split(":")
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail=f"{key} must be HH:MM")
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+        return time(hour=hour, minute=minute)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{key} must be HH:MM") from exc
+
+
+@router.get("/admin/onboarding/stage")
+async def onboarding_stage(request: Request) -> dict[str, Any]:
+    return await build_onboarding_state(request)
+
+
+@router.post("/admin/onboarding/complete")
+async def complete_onboarding(request: Request) -> dict[str, Any]:
+    _knowledge_graph(request)
+    store = _reflection_store(request)
+    await store.upsert_profile(
+        key="onboarding_completed",
+        value=True,
+        confidence=1.0,
+        source="onboarding_wizard",
+    )
+    return {"ok": True, "stage": "complete"}
+
+
+@router.get("/admin/household/list")
+async def list_household(request: Request) -> dict[str, Any]:
+    graph = _knowledge_graph(request)
+    members = await graph.list_members(include_pets=True)
+    return {"items": members, "count": len(members)}
+
+
+@router.post("/admin/household/upsert")
+async def upsert_household(request: Request) -> dict[str, Any]:
+    body = await _json_object(request)
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    role = str(body.get("role") or "adult").strip().lower()
+    if role not in _HOUSEHOLD_ROLES:
+        raise HTTPException(status_code=400, detail="role must be adult|child|pet|guest")
+    attributes = body.get("attributes") or {}
+    if not isinstance(attributes, dict):
+        raise HTTPException(status_code=400, detail="attributes must be an object")
+    graph = _knowledge_graph(request)
+    member = await graph.put_member(
+        member_id=_optional_int(body, "id"),
+        name=name,
+        role=role,
+        telegram_chat_id=_optional_int(body, "telegram_chat_id"),
+        allergies=_string_list(body, "allergies"),
+        dietary_restrictions=_string_list(body, "dietary_restrictions"),
+        sleep_time=_optional_hhmm(body, "sleep_time"),
+        wake_time=_optional_hhmm(body, "wake_time"),
+        attributes=attributes,
+    )
+    if member is None:
+        raise HTTPException(status_code=503, detail="household store unavailable")
+    return {"ok": True, "member": member}
+
+
+@router.post("/admin/household/forget")
+async def forget_household(request: Request) -> dict[str, Any]:
+    body = await _json_object(request)
+    member_id = _required_int(body, "id")
+    graph = _knowledge_graph(request)
+    await graph.forget_member(member_id)
+    return {"ok": True, "id": member_id}
 
 
 @router.post("/admin/safety/explain")

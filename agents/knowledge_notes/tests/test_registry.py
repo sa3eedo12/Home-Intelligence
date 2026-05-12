@@ -28,6 +28,18 @@ class _FakeKnowledgeGraph:
         self._remember("confirm_thing", thing_id)
         return {"id": thing_id, "last_confirmed_at": "now"}
 
+    async def list_members(self, include_pets=True):
+        self._remember("list_members", include_pets=include_pets)
+        return [{"id": 1, "name": "Saeed", "role": "adult"}]
+
+    async def put_member(self, **kwargs):
+        self._remember("put_member", **kwargs)
+        return {"id": kwargs.get("member_id") or 2, **kwargs}
+
+    async def forget_member(self, member_id):
+        self._remember("forget_member", member_id)
+        return None
+
     async def list_habits(self, subject=None):
         self._remember("list_habits", subject=subject)
         return [{"id": 3, "subject": "user.coffee_brew"}]
@@ -100,6 +112,28 @@ async def test_things_capabilities_contract(fake_graph: _FakeKnowledgeGraph) -> 
     assert forgotten == {"ok": True, "deleted": True, "thing_id": 2}
     assert confirmed["thing"]["last_confirmed_at"] == "now"
     assert fake_graph.calls[0][0] == "list_things"
+
+
+@pytest.mark.asyncio
+async def test_members_capabilities_contract(fake_graph: _FakeKnowledgeGraph) -> None:
+    listed = await registry.list_members(include_pets=False)
+    put = await registry.put_member(
+        name="Saeed",
+        role="adult",
+        telegram_chat_id=123,
+        allergies=["peanuts"],
+        dietary_restrictions=["vegetarian"],
+        sleep_time="22:30",
+        wake_time="07:00",
+        attributes={"room": "primary"},
+    )
+    forgotten = await registry.forget_member(2)
+
+    assert listed == {"items": [{"id": 1, "name": "Saeed", "role": "adult"}], "count": 1}
+    assert put["ok"] is True
+    assert put["member"]["telegram_chat_id"] == 123
+    assert forgotten == {"ok": True, "member_id": 2}
+    assert fake_graph.calls[-1][0] == "forget_member"
 
 
 @pytest.mark.asyncio

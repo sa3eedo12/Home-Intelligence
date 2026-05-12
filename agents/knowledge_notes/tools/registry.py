@@ -75,6 +75,53 @@ async def confirm_thing(thing_id: int) -> dict[str, Any]:
     return {"ok": thing is not None, "thing": thing}
 
 
+@tool("members.list")
+async def list_members(include_pets: bool = True) -> dict[str, Any]:
+    store = await _store_or_error()
+    if store is None:
+        return {"items": [], "count": 0, "error": "knowledge_graph_unavailable"}
+    items = await store.list_members(include_pets=include_pets)
+    return {"items": items, "count": len(items)}
+
+
+@tool("members.put", side_effects=True)
+async def put_member(
+    name: str,
+    role: str = "adult",
+    telegram_chat_id: int | None = None,
+    allergies: list[str] | None = None,
+    dietary_restrictions: list[str] | None = None,
+    sleep_time: str | None = None,
+    wake_time: str | None = None,
+    attributes: dict[str, Any] | None = None,
+    member_id: int | None = None,
+) -> dict[str, Any]:
+    store = await _store_or_error()
+    if store is None:
+        return {"ok": False, "error": "knowledge_graph_unavailable"}
+    member = await store.put_member(
+        member_id=member_id,
+        name=name,
+        role=role,
+        telegram_chat_id=telegram_chat_id,
+        allergies=allergies,
+        dietary_restrictions=dietary_restrictions,
+        sleep_time=sleep_time,
+        wake_time=wake_time,
+        attributes=attributes,
+    )
+    return {"ok": member is not None, "member": member}
+
+
+@tool("members.forget", side_effects=True)
+async def forget_member(member_id: int) -> dict[str, Any]:
+    store = await _store_or_error()
+    if store is None:
+        return {"ok": False, "error": "knowledge_graph_unavailable"}
+    await store.forget_member(member_id)
+    return {"ok": True, "member_id": member_id}
+
+
 @tool("habits.list")
 async def list_habits(subject: str | None = None) -> dict[str, Any]:
     store = await _store_or_error()

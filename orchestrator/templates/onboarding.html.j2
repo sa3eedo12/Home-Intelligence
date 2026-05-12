@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Onboarding — Home Intelligence</title>
+  <link rel="stylesheet" href="/static/onboarding.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="back-link" href="/dashboard">← Dashboard</a>
+    <h1>Onboarding</h1>
+    <p>Bootstrap the home graph in four focused steps.</p>
+  </header>
+
+  {% set current = onboarding.stage %}
+  {% set steps = [
+    {'num': 1, 'key': 'discovery', 'title': 'Discovery', 'href': '/dashboard/discovery'},
+    {'num': 2, 'key': 'routines', 'title': 'Routines', 'href': '/dashboard/onboarding#routines'},
+    {'num': 3, 'key': 'household', 'title': 'Household', 'href': '/dashboard/onboarding#household'},
+    {'num': 4, 'key': 'habits', 'title': 'Habits', 'href': '/dashboard/about-you'}
+  ] %}
+
+  <main>
+    <section class="progress-card">
+      <div>
+        <h2>First-week setup</h2>
+        <p>{{ (onboarding.percent_complete * 100) | round(0, 'floor') }}% complete</p>
+      </div>
+      <div class="progress"><span style="width: {{ onboarding.percent_complete * 100 }}%"></span></div>
+    </section>
+
+    <section class="onboarding-layout">
+      <ol class="stepper" aria-label="Onboarding stages">
+        {% for step in steps %}
+          {% set step_state = onboarding.summary.steps.get(step.key) %}
+          {% set is_current = current == step.num %}
+          {% set is_complete = current == 'complete' or (step_state and step_state.complete) %}
+          <li data-stage="{{ step.num }}" class="step {{ 'current' if is_current else '' }} {{ 'complete' if is_complete and not is_current else '' }} {{ 'dimmed' if not is_current and not is_complete and current != 'complete' else '' }}">
+            <span class="marker">{{ '✓' if is_complete and not is_current else step.num }}</span>
+            <div>
+              <strong>{{ step.title }}</strong>
+              {% if is_current %}
+                <small>Current step</small>
+              {% elif is_complete %}
+                <a href="{{ step.href }}">edit</a>
+              {% else %}
+                <small>Locked until earlier steps are done</small>
+              {% endif %}
+            </div>
+          </li>
+        {% endfor %}
+      </ol>
+
+      <section class="stage-panel" data-current-stage="{{ current }}">
+        {% if current == 'complete' %}
+          <h2>You're onboarded 🎉</h2>
+          <p>The core home graph is seeded. The nightly reflector will keep improving it.</p>
+          <a class="btn" href="/dashboard/morning-brief">Open Morning Brief →</a>
+        {% elif current == 1 %}
+          <h2>Stage 1 — Discovery</h2>
+          <p>Adopt appliances from Home Assistant so the observers know what to watch.</p>
+          <dl>
+            <dt>Things identified</dt><dd>{{ onboarding.summary.discovery_summary.identified }}</dd>
+            <dt>Appliances identified</dt><dd>{{ onboarding.summary.discovery_summary.appliances }}</dd>
+            <dt>HA entities visible</dt><dd>{{ onboarding.summary.discovery_summary.total }}</dd>
+          </dl>
+          <div class="actions">
+            <a class="btn" href="/dashboard/discovery">Go to Discovery →</a>
+            <button type="button" id="stage1-next">Next →</button>
+          </div>
+        {% elif current == 2 %}
+          <h2 id="routines">Stage 2 — Routines</h2>
+          <p>Fill in the routine facts that are still missing.</p>
+          <div id="routine-fields" class="form-grid" data-missing-keys="{{ onboarding.summary.missing_profile_keys | join(',') }}"></div>
+          <div class="actions">
+            <button type="button" id="finish-routines">Finish stage</button>
+          </div>
+        {% elif current == 3 %}
+          <h2 id="household">Stage 3 — Household</h2>
+          <p>Add the people and pets who live here so facts and proposals can be routed.</p>
+          <form id="member-form" class="member-form">
+            <input type="hidden" name="id">
+            <label>Name<input name="name" autocomplete="name" required></label>
+            <label>Role
+              <select name="role">
+                <option value="adult">Adult</option>
+                <option value="child">Child</option>
+                <option value="pet">Pet</option>
+                <option value="guest">Guest</option>
+              </select>
+            </label>
+            <label>Telegram chat id<input name="telegram_chat_id" inputmode="numeric"></label>
+            <label>Allergies<input name="allergies" placeholder="comma-separated"></label>
+            <label>Dietary restrictions<input name="dietary_restrictions" placeholder="comma-separated"></label>
+            <label>Sleep time<input name="sleep_time" type="time"></label>
+            <label>Wake time<input name="wake_time" type="time"></label>
+            <div class="actions full-row">
+              <button type="submit">Save member</button>
+              <button type="button" class="ghost" id="clear-member-form">Clear</button>
+            </div>
+          </form>
+
+          <div class="card-grid" id="member-list">
+            {% for member in onboarding.summary.members %}
+              <article class="member-card" data-member-id="{{ member.id }}">
+                <script type="application/json" class="member-json">{{ member | tojson }}</script>
+                <header><h3>{{ member.name }}</h3><span>{{ member.role }}</span></header>
+                <p>{{ member.allergies | join(', ') if member.allergies else 'No allergies recorded' }}</p>
+                <small>{{ 'Telegram linked' if member.telegram_chat_id else 'No Telegram link' }}</small>
+                <div class="actions">
+                  <button type="button" class="edit-member">Edit</button>
+                  <button type="button" class="forget-member danger">Remove</button>
+                </div>
+              </article>
+            {% else %}
+              <p class="empty">No household members yet.</p>
+            {% endfor %}
+          </div>
+          <div class="actions"><button type="button" id="finish-household">Finish stage</button></div>
+        {% elif current == 4 %}
+          <h2>Stage 4 — Habits</h2>
+          <p>Confirm at least one inferred habit, or wait for observers to surface one.</p>
+          {% if onboarding.summary.habit_count == 0 %}
+            <p class="empty">I'll start watching and surface habits in the morning briefs.</p>
+          {% endif %}
+          <div class="card-grid">
+            {% for habit in onboarding.summary.unconfirmed_habits %}
+              <article class="habit-card" data-table="habits" data-id="{{ habit.id }}">
+                <script type="application/json" class="habit-json">{{ habit | tojson }}</script>
+                <header><h3>{{ habit.subject }}</h3><span>{{ habit.frequency or 'observed pattern' }}</span></header>
+                <pre>{{ (habit.pattern or {}) | tojson }}</pre>
+                <small>confidence {{ ((habit.confidence or 0) * 100) | round(0, 'floor') }}%</small>
+                <div class="actions">
+                  <button type="button" class="confirm-habit">Confirm</button>
+                  <button type="button" class="skip-habit danger">Skip</button>
+                  <button type="button" class="edit-habit ghost">Edit</button>
+                </div>
+              </article>
+            {% else %}
+              {% if onboarding.summary.confirmed_habits > 0 %}
+                <p class="empty">You have a confirmed habit. Finish onboarding when you're ready.</p>
+              {% endif %}
+            {% endfor %}
+          </div>
+          <div class="actions">
+            <button type="button" id="finish-onboarding" data-confirmed-habits="{{ onboarding.summary.confirmed_habits }}">Finish onboarding</button>
+          </div>
+        {% endif %}
+
+        {% if onboarding.current_blockers %}
+          <aside class="blockers">
+            <strong>Current blockers</strong>
+            <ul>{% for blocker in onboarding.current_blockers %}<li>{{ blocker }}</li>{% endfor %}</ul>
+          </aside>
+        {% endif %}
+      </section>
+    </section>
+  </main>
+
+  <dialog id="habit-edit-modal" class="modal">
+    <form method="dialog">
+      <h2>Edit habit</h2>
+      <textarea id="habit-edit-json" spellcheck="false"></textarea>
+      <p class="modal-error" id="habit-edit-error" role="alert"></p>
+      <menu>
+        <button type="button" id="cancel-habit-edit">Cancel</button>
+        <button type="button" id="save-habit-edit">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script id="onboarding-data" type="application/json">{{ onboarding | tojson }}</script>
+  <script src="/static/onboarding.js" defer></script>
+</body>
+</html>

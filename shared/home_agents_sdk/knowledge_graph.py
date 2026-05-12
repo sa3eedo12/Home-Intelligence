@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, time
 from typing import Any
 
 import asyncpg
@@ -13,16 +13,22 @@ _THING_COLUMNS = (
     "learned_at, last_confirmed_at, source"
 )
 _HABIT_COLUMNS = (
-    "id, subject, pattern, frequency, confidence, last_observed_at, source, created_at"
+    "id, subject, pattern, frequency, confidence, last_observed_at, "
+    "last_confirmed_at, source, created_at"
 )
 _PREFERENCE_COLUMNS = "key, value, confidence, source, updated_at"
 _ROUTINE_COLUMNS = "id, name, steps, schedule, last_run_at, source, created_at"
+_HOUSEHOLD_MEMBER_COLUMNS = (
+    "id, name, role, telegram_chat_id, allergies, dietary_restrictions, "
+    "sleep_time, wake_time, attributes, created_at, updated_at"
+)
 
 _SELECT_COLUMNS = {
     "things": _THING_COLUMNS,
     "habits": _HABIT_COLUMNS,
     "preferences": _PREFERENCE_COLUMNS,
     "routines": _ROUTINE_COLUMNS,
+    "household_members": _HOUSEHOLD_MEMBER_COLUMNS,
 }
 _JSON_FIELDS = {"attributes", "pattern", "value", "steps", "schedule", "payload"}
 _TIMESTAMP_FIELDS = {
@@ -67,6 +73,8 @@ def _decode_json(value: Any) -> Any:
 def _format_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, time):
+        return value.isoformat(timespec="minutes")
     if isinstance(value, dict):
         return {key: _format_value(_decode_json(val)) for key, val in value.items()}
     if isinstance(value, list):
@@ -97,6 +105,117 @@ class KnowledgeGraph:
 
     def __init__(self, pool: asyncpg.Pool | None) -> None:
         self.pool = pool
+
+    async def list_members(self, include_pets: bool = True) -> list[dict[str, Any]]:
+        if self.pool is None:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {_HOUSEHOLD_MEMBER_COLUMNS}
+                FROM household_members
+                WHERE ($1::bool OR role <> 'pet')
+                ORDER BY
+                    CASE role
+                        WHEN 'adult' THEN 0
+                        WHEN 'child' THEN 1
+                        WHEN 'pet' THEN 2
+                        WHEN 'guest' THEN 3
+                        ELSE 4
+                    END,
+                    name,
+                    id
+                """,
+                bool(include_pets),
+            )
+        return [_row_to_dict(row) for row in rows]
+
+    async def get_member(self, member_id: int) -> dict[str, Any] | None:
+        return await self._fetch_one("household_members", member_id)
+
+    async def get_member_by_chat_id(self, chat_id: int) -> dict[str, Any] | None:
+        if self.pool is None:
+            return None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT {_HOUSEHOLD_MEMBER_COLUMNS}
+                FROM household_members
+                WHERE telegram_chat_id = $1
+                LIMIT 1
+                """,
+                int(chat_id),
+            )
+        return _row_to_dict(row) if row else None
+
+    async def put_member(
+        self,
+        *,
+        name: str,
+        role: str = "adult",
+        telegram_chat_id: int | None = None,
+        allergies: list[str] | None = None,
+        dietary_restrictions: list[str] | None = None,
+        sleep_time: time | str | None = None,
+        wake_time: time | str | None = None,
+        attributes: dict[str, Any] | None = None,
+        member_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        if self.pool is None:
+            return None
+        async with self.pool.acquire() as conn:
+            if member_id is None:
+                row = await conn.fetchrow(
+                    f"""
+                    INSERT INTO household_members(
+                        name, role, telegram_chat_id, allergies, dietary_restrictions,
+                        sleep_time, wake_time, attributes
+                    )
+                    VALUES ($1, $2, $3, $4::text[], $5::text[], $6::time, $7::time, $8::jsonb)
+                    RETURNING {_HOUSEHOLD_MEMBER_COLUMNS}
+                    """,
+                    name,
+                    role,
+                    telegram_chat_id,
+                    allergies or [],
+                    dietary_restrictions or [],
+                    sleep_time,
+                    wake_time,
+                    _json_arg(attributes, {}),
+                )
+            else:
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE household_members
+                    SET name = $2,
+                        role = $3,
+                        telegram_chat_id = $4,
+                        allergies = $5::text[],
+                        dietary_restrictions = $6::text[],
+                        sleep_time = $7::time,
+                        wake_time = $8::time,
+                        attributes = $9::jsonb,
+                        updated_at = now()
+                    WHERE id = $1
+                    RETURNING {_HOUSEHOLD_MEMBER_COLUMNS}
+                    """,
+                    member_id,
+                    name,
+                    role,
+                    telegram_chat_id,
+                    allergies or [],
+                    dietary_restrictions or [],
+                    sleep_time,
+                    wake_time,
+                    _json_arg(attributes, {}),
+                )
+        return _row_to_dict(row) if row else None
+
+    async def forget_member(self, member_id: int) -> None:
+        if self.pool is None:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM household_members WHERE id = $1", int(member_id))
 
     async def list_things(self, type: str | None = None) -> list[dict[str, Any]]:
         if self.pool is None:
@@ -270,7 +389,8 @@ class KnowledgeGraph:
             row = await conn.fetchrow(
                 f"""
                 UPDATE habits
-                SET last_observed_at = now()
+                SET last_confirmed_at = now(),
+                    last_observed_at = COALESCE(last_observed_at, now())
                 WHERE id = $1
                 RETURNING {_HABIT_COLUMNS}
                 """,
