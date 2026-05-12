@@ -33,6 +33,8 @@ jobs:
             dockerfile: agents/household_ops/Dockerfile
           - image_name: entertainment
             dockerfile: agents/entertainment/Dockerfile
+          - image_name: dashboard_curator
+            dockerfile: agents/dashboard_curator/Dockerfile
 
     steps:
       - name: Check out repository

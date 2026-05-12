@@ -20,6 +20,7 @@ jobs:
           - knowledge_notes
           - household_ops
           - entertainment
+          - dashboard_curator
     steps:
       - name: Flip package visibility to public
         env:
