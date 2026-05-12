@@ -66,6 +66,7 @@ def _build_app() -> FastAPI:
         forget_routine=AsyncMock(return_value=True),
         patch_row=AsyncMock(return_value={"id": 1, "friendly_name": "Washer"}),
         evidence_for=AsyncMock(return_value=[{"id": 9, "summary": "Washer completed"}]),
+        put_thing=AsyncMock(return_value={"id": 10, "type": "appliance.washer"}),
     )
     return app
 
@@ -177,6 +178,46 @@ def test_invoke_capability_requires_agent_and_capability() -> None:
     with TestClient(app) as client:
         resp = client.post("/admin/invoke", json={"agent": "", "capability": "x"})
     assert resp.status_code == 400
+
+
+def test_discovery_adopt_puts_thing() -> None:
+    app = _build_app()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/admin/discovery/adopt",
+            json={
+                "entity_id": "sensor.washer",
+                "type": "appliance.washer",
+                "friendly_name": "Washer",
+                "photo_path": "/data/photos/things/sensor.washer.jpg",
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json()["thing"]["id"] == 10
+    app.state.knowledge_graph.put_thing.assert_awaited_once_with(
+        type="appliance.washer",
+        friendly_name="Washer",
+        attributes={},
+        ha_entity_ids=["sensor.washer"],
+        photo_path="/data/photos/things/sensor.washer.jpg",
+        confidence=1.0,
+        source="discovery_user",
+    )
+
+
+def test_discovery_ignore_puts_ignored_thing() -> None:
+    app = _build_app()
+    with TestClient(app) as client:
+        resp = client.post("/admin/discovery/ignore", json={"entity_id": "sensor.noisy"})
+    assert resp.status_code == 200
+    app.state.knowledge_graph.put_thing.assert_awaited_once_with(
+        type="ignored.entity",
+        friendly_name="sensor.noisy",
+        attributes={},
+        ha_entity_ids=["sensor.noisy"],
+        confidence=1.0,
+        source="discovery_user",
+    )
 
 
 def test_knowledge_confirm_calls_matching_method() -> None:

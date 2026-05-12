@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Discovery — Home Intelligence</title>
+  <link rel="stylesheet" href="/static/discovery.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="back-link" href="/dashboard">← Dashboard</a>
+    <h1>Discovery</h1>
+    <p>Identify Home Assistant entities and adopt them into the Things registry.</p>
+  </header>
+
+  <main>
+    <section class="summary-card">
+      <h2>Unidentified entities</h2>
+      <p>
+        Showing {{ discovery.entities|length }} unidentified of {{ discovery.total_count }} HA entities.
+        {{ discovery.identified_count }} entity ids are already adopted or ignored.
+      </p>
+    </section>
+
+    <section class="entity-grid" aria-label="Unidentified Home Assistant entities">
+      {% for entity in discovery.entities %}
+        <article class="entity-card" data-entity-id="{{ entity.entity_id }}">
+          <header>
+            <h2>{{ entity.friendly_name }}</h2>
+            <code>{{ entity.entity_id }}</code>
+          </header>
+          <dl>
+            <dt>Area</dt><dd>{{ entity.area or 'Unassigned' }}</dd>
+            <dt>State</dt><dd>{{ entity.state }}</dd>
+          </dl>
+          <label>
+            Type
+            <select class="type-select">
+              {% for type in discovery.types %}
+                <option value="{{ type }}" {{ 'selected' if type == entity.suggested_type else '' }}>
+                  {{ type }}
+                </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            Friendly name
+            <input class="friendly-name" value="{{ entity.friendly_name }}">
+          </label>
+          <label class="photo-placeholder">
+            Photo path (optional)
+            <input class="photo-path" placeholder="TODO: upload to data/photos/things/{{ entity.entity_id }}.jpg">
+          </label>
+          <p class="todo-note">
+            TODO: streaming photo upload to ${TRUENAS_APPDATA}/data/photos/things/.
+          </p>
+          <div class="actions">
+            <button type="button" class="adopt-btn">Adopt</button>
+            <button type="button" class="ignore-btn danger">Ignore</button>
+          </div>
+        </article>
+      {% else %}
+        <p class="empty">Everything visible from Home Assistant is already adopted or ignored.</p>
+      {% endfor %}
+    </section>
+  </main>
+
+  <script src="/static/discovery.js" defer></script>
+</body>
+</html>

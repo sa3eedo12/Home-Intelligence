@@ -8,8 +8,10 @@ import httpx
 import yaml
 from fastapi import APIRouter, HTTPException, Request
 from home_agents_sdk.reflection_store import ReflectionStore
+from home_agents_sdk.telemetry import get_logger
 
 router = APIRouter(tags=["admin"])
+logger = get_logger("orchestrator.admin")
 
 
 def _load_yaml(path: str) -> dict:
@@ -82,6 +84,20 @@ def _knowledge_graph(request: Request) -> Any:
     if graph is None:
         raise HTTPException(status_code=503, detail="knowledge graph unavailable")
     return graph
+
+
+def _required_discovery_str(body: dict[str, Any], key: str) -> str:
+    value = str(body.get(key) or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail=f"{key} is required")
+    return value
+
+
+def _optional_discovery_str(body: dict[str, Any], key: str) -> str | None:
+    value = body.get(key)
+    if value in (None, ""):
+        return None
+    return str(value).strip() or None
 
 
 def _knowledge_id(table: str, raw_id: Any) -> int | str:
@@ -201,6 +217,54 @@ async def knowledge_confirm(request: Request) -> dict:
     if item is None:
         raise HTTPException(status_code=404, detail="knowledge row not found")
     return {"ok": True, "table": table, "id": row_id, "item": item}
+
+
+@router.post("/admin/discovery/adopt")
+async def discovery_adopt(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    entity_id = _required_discovery_str(body, "entity_id")
+    thing_type = _required_discovery_str(body, "type")
+    friendly_name = _required_discovery_str(body, "friendly_name")
+    photo_path = _optional_discovery_str(body, "photo_path")
+    graph = _knowledge_graph(request)
+    try:
+        thing = await graph.put_thing(
+            type=thing_type,
+            friendly_name=friendly_name,
+            attributes={},
+            ha_entity_ids=[entity_id],
+            photo_path=photo_path,
+            confidence=1.0,
+            source="discovery_user",
+        )
+    except Exception as exc:
+        logger.warning("discovery_adopt_failed", entity_id=entity_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="discovery adopt failed") from exc
+    if thing is None:
+        raise HTTPException(status_code=503, detail="knowledge graph unavailable")
+    return {"ok": True, "thing": thing}
+
+
+@router.post("/admin/discovery/ignore")
+async def discovery_ignore(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    entity_id = _required_discovery_str(body, "entity_id")
+    graph = _knowledge_graph(request)
+    try:
+        thing = await graph.put_thing(
+            type="ignored.entity",
+            friendly_name=entity_id,
+            attributes={},
+            ha_entity_ids=[entity_id],
+            confidence=1.0,
+            source="discovery_user",
+        )
+    except Exception as exc:
+        logger.warning("discovery_ignore_failed", entity_id=entity_id, error=str(exc))
+        raise HTTPException(status_code=500, detail="discovery ignore failed") from exc
+    if thing is None:
+        raise HTTPException(status_code=503, detail="knowledge graph unavailable")
+    return {"ok": True, "thing": thing}
 
 
 @router.get("/admin/knowledge/evidence")
