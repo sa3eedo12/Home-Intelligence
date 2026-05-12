@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -74,23 +73,11 @@ class ReflectionStore:
             yield None
             return
         try:
-            acquired = self.pool.acquire()
-            if inspect.isawaitable(acquired):
-                acquired = await acquired
-            conn = await acquired.__aenter__()
+            async with self.pool.acquire() as conn:
+                yield conn
         except Exception as exc:
             logger.warning("reflection_store_unavailable", operation=operation, error=str(exc))
             yield None
-            return
-
-        try:
-            yield conn
-        except BaseException as exc:
-            suppress = await acquired.__aexit__(type(exc), exc, exc.__traceback__)
-            if not suppress:
-                raise
-        else:
-            await acquired.__aexit__(None, None, None)
 
     async def list_recent_events(self, window_hours: int = 24) -> list[dict[str, Any]]:
         try:

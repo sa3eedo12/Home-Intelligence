@@ -155,3 +155,53 @@ def test_invoke_silently_tolerates_redis_xadd_failure(monkeypatch, tmp_path: Pat
 def _reset_tools_between_tests():
     yield
     clear_tools()
+
+
+def test_record_event_parses_iso_string_ts(monkeypatch, tmp_path):
+    """Regression: EventLogStore.record_event used to pass an ISO string straight
+    to a timestamptz column, causing 'expected datetime, got str'. It must now
+    parse the string into a datetime first."""
+    from datetime import datetime
+    from unittest.mock import AsyncMock, MagicMock
+
+    from home_agents_sdk.event_log import EventLogStore
+
+    captured = {}
+
+    class _FakeConn:
+        async def fetchrow(self, _sql, *args):
+            captured["args"] = args
+            return {
+                "id": 1,
+                "ts": args[0] or datetime(2026, 5, 12),
+                "agent": args[1],
+                "capability": args[2],
+                "summary": args[3],
+                "payload": args[4],
+            }
+
+    cm = AsyncMock()
+    cm.__aenter__.return_value = _FakeConn()
+    cm.__aexit__.return_value = None
+    pool = MagicMock()
+    pool.acquire = MagicMock(return_value=cm)
+
+    qdrant = MagicMock()
+    qdrant.upsert = AsyncMock()
+    embedder = MagicMock()
+    embedder.embed = AsyncMock(return_value=[0.0] * 1024)
+
+    store = EventLogStore(pool=pool, qdrant=qdrant, embedder=embedder)
+    import asyncio
+
+    asyncio.get_event_loop().run_until_complete(
+        store.record_event(
+            agent="washer_observer",
+            capability="appliance.cycle_completed",
+            summary="x",
+            payload={"a": 1},
+            ts="2026-05-12T17:38:35.357555+00:00",
+        )
+    )
+    # First positional arg to fetchrow is the ts; must be a datetime now, not str.
+    assert isinstance(captured["args"][0], datetime), captured["args"][0]

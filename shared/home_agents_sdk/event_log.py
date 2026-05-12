@@ -107,9 +107,20 @@ class EventLogStore:
         capability: str,
         summary: str,
         payload: dict[str, Any] | None = None,
-        ts: str | None = None,
+        ts: str | datetime | None = None,
     ) -> dict[str, Any]:
         clean_payload = _jsonable_payload(payload)
+        ts_dt: datetime | None
+        if ts is None or ts == "":
+            ts_dt = None
+        elif isinstance(ts, datetime):
+            ts_dt = ts
+        else:
+            try:
+                ts_dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            except ValueError:
+                logger.warning("event_log_record_bad_ts", ts=str(ts))
+                ts_dt = None
         try:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
@@ -118,7 +129,7 @@ class EventLogStore:
                     VALUES (COALESCE($1::timestamptz, now()), $2, $3, $4, $5::jsonb)
                     RETURNING id, ts, agent, capability, summary, payload
                     """,
-                    ts,
+                    ts_dt,
                     agent,
                     capability,
                     summary,

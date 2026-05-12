@@ -13,7 +13,8 @@ def _pool_with(conn: MagicMock) -> MagicMock:
     cm.__aenter__.return_value = conn
     cm.__aexit__.return_value = None
     pool = MagicMock()
-    pool.acquire = AsyncMock(return_value=cm)
+    # asyncpg's pool.acquire() is synchronous — it returns a PoolAcquireContext.
+    pool.acquire = MagicMock(return_value=cm)
     return pool
 
 
