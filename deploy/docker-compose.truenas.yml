@@ -16,7 +16,10 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     env_file: .env
-    user: "568:568"
+    # No `user:` override: the upstream image runs as the built-in
+    # `redis` user (UID 999) and its entrypoint chowns /data correctly.
+    # Forcing UID 568 here breaks that and causes "Permission denied"
+    # on the appendonly dir.
     command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--requirepass", "${REDIS_PASSWORD}"]
     volumes:
       - ${TRUENAS_APPDATA}/infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
@@ -32,7 +35,8 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     env_file: .env
-    user: "568:568"
+    # No `user:` override: postgres entrypoint must run as root briefly to
+    # chown PGDATA, then drops to the `postgres` user itself.
     volumes:
       - pg-data:/var/lib/postgresql/data
       - ${TRUENAS_APPDATA}/infra/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -47,7 +51,8 @@ services:
     image: qdrant/qdrant:latest
     restart: unless-stopped
     env_file: .env
-    user: "568:568"
+    # No `user:` override: qdrant initializes /qdrant/storage on first
+    # boot and needs write access on the named volume's root.
     command: ["./qdrant", "--config-path", "/qdrant/config/config.yaml"]
     volumes:
       - qdrant-data:/qdrant/storage
@@ -105,7 +110,8 @@ services:
     image: python:3.12-alpine
     restart: unless-stopped
     env_file: .env
-    user: "568:568"
+    # Run as root inside the container (the python:alpine image expects it).
+    # This is the CPU stub; nothing privileged is exposed to the host.
     command:
       - sh
       - -lc
