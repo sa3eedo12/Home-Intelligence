@@ -9,9 +9,11 @@ from typing import Any
 import httpx
 import yaml
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 from home_agents_sdk.reflection_store import ReflectionStore
 from home_agents_sdk.telemetry import get_logger
 
+from .data_science.common import current_embedding_model, decode_json
 from .github_client import GitHubClientError
 from .safety import SafetyPolicy
 
@@ -420,6 +422,197 @@ async def reflection_status(request: Request) -> dict:
     return {"configured": True, **reflector.status}
 
 
+_DATA_SCIENCE_JOBS = {
+    "maintenance": ("maintenance", "run"),
+    "pattern_mining": ("pattern_miner", "run"),
+    "reembed": ("reembed", "run"),
+    "weekly_report": ("reports", "weekly_report"),
+    "monthly_report": ("reports", "monthly_report"),
+    "lora_training": ("lora_training", "run"),
+}
+
+
+@router.post("/admin/data-science/run/{job}")
+async def run_data_science_job(job: str, request: Request) -> dict[str, Any]:
+    runner = _data_science_runner(request, job)
+    lock = getattr(runner["owner"], "_lock", None)
+    if lock is not None and lock.locked():
+        return {"ok": True, "started": False, "job": job, "status": {"status": "already_running"}}
+    asyncio.create_task(
+        _safe_run_data_science_job(job, runner["callable"]),
+        name=f"data-science-{job}-manual",
+    )
+    return {"ok": True, "started": True, "job": job}
+
+
+async def _safe_run_data_science_job(job: str, run_callable: Any) -> None:
+    try:
+        result = run_callable()
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("data_science_manual_job_failed", job=job, error=str(exc))
+
+
+@router.get("/admin/data-science/status")
+async def data_science_status(request: Request) -> dict[str, Any]:
+    return {
+        "jobs": await _data_science_job_history(request),
+        "reports": await _recent_reports(request),
+        "embedding": await _embedding_snapshot(request),
+    }
+
+
+@router.get("/admin/reports/{kind}/{period_label}", response_class=PlainTextResponse)
+async def get_report_markdown(kind: str, period_label: str, request: Request) -> PlainTextResponse:
+    if kind not in {"weekly", "monthly"}:
+        raise HTTPException(status_code=404, detail="unknown report kind")
+    reports = getattr(request.app.state, "reports", None)
+    get_report = getattr(reports, "get_report", None)
+    row = None
+    if callable(get_report):
+        try:
+            row = await get_report(kind, period_label)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("data_science_report_store_fetch_failed", error=str(exc))
+    if row is None:
+        row = await _fetch_report_from_db(request, kind, period_label)
+    if row is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    return PlainTextResponse(str(row.get("body_markdown") or ""), media_type="text/markdown")
+
+
+def _data_science_runner(request: Request, job: str) -> dict[str, Any]:
+    if job not in _DATA_SCIENCE_JOBS:
+        raise HTTPException(status_code=404, detail=f"Unknown data science job: {job}")
+    state_attr, method_name = _DATA_SCIENCE_JOBS[job]
+    owner = getattr(request.app.state, state_attr, None)
+    if owner is None:
+        raise HTTPException(status_code=503, detail=f"{job} is not configured")
+    run_callable = getattr(owner, method_name, None)
+    if not callable(run_callable):
+        raise HTTPException(status_code=503, detail=f"{job} is not runnable")
+    return {"owner": owner, "callable": run_callable}
+
+
+async def _data_science_job_history(request: Request) -> list[dict[str, Any]]:
+    names = list(_DATA_SCIENCE_JOBS)
+    latest = {
+        name: {"name": name, "last_run_at": None, "last_status": "never", "last_summary": None}
+        for name in names
+    }
+    pool = getattr(request.app.state, "pool", None)
+    if pool is None:
+        return list(latest.values())
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (capability)
+                       capability, ts, summary, payload
+                FROM event_log
+                WHERE agent = 'data_science'
+                  AND capability = ANY($1::text[])
+                ORDER BY capability, ts DESC
+                """,
+                names,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("data_science_status_history_failed", error=str(exc))
+        return list(latest.values())
+    for row in rows:
+        data = dict(row)
+        name = str(data.get("capability") or "")
+        payload = decode_json(data.get("payload"), {})
+        if not isinstance(payload, dict):
+            payload = {}
+        latest[name] = {
+            "name": name,
+            "last_run_at": str(data.get("ts")) if data.get("ts") is not None else None,
+            "last_status": str(payload.get("status") or "ok"),
+            "last_summary": data.get("summary"),
+        }
+    return [latest[name] for name in names]
+
+
+async def _recent_reports(request: Request) -> list[dict[str, Any]]:
+    reports = getattr(request.app.state, "reports", None)
+    list_recent = getattr(reports, "list_recent_reports", None)
+    if callable(list_recent):
+        try:
+            return await list_recent(limit=10)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("data_science_reports_status_failed", error=str(exc))
+    pool = getattr(request.app.state, "pool", None)
+    if pool is None:
+        return []
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT kind, period_label, file_path, summary, generated_at
+                FROM reports
+                ORDER BY generated_at DESC
+                LIMIT 10
+                """
+            )
+        return [dict(row) for row in rows]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("data_science_reports_status_failed", error=str(exc))
+        return []
+
+
+async def _embedding_snapshot(request: Request) -> dict[str, Any]:
+    reembed = getattr(request.app.state, "reembed", None)
+    current_model = getattr(reembed, "current_model", None)
+    if current_model is None:
+        current_model = current_embedding_model(getattr(request.app.state, "embedder", None))
+    pool = getattr(request.app.state, "pool", None)
+    stale_count = 0
+    if pool is not None:
+        try:
+            async with pool.acquire() as conn:
+                stale_count = int(
+                    await conn.fetchval(
+                        """
+                        SELECT count(*)
+                        FROM event_log
+                        WHERE embedding_model IS DISTINCT FROM $1
+                        """,
+                        current_model,
+                    )
+                    or 0
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("data_science_embedding_status_failed", error=str(exc))
+    return {"current_model": current_model, "stale_event_count": stale_count}
+
+
+async def _fetch_report_from_db(
+    request: Request,
+    kind: str,
+    period_label: str,
+) -> dict[str, Any] | None:
+    pool = getattr(request.app.state, "pool", None)
+    if pool is None:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT kind, period_label, file_path, summary, body_markdown, generated_at
+                FROM reports
+                WHERE kind = $1 AND period_label = $2
+                """,
+                kind,
+                period_label,
+            )
+        return dict(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("data_science_report_fetch_failed", error=str(exc))
+        return None
+
+
 @router.post("/admin/profile/upsert")
 async def upsert_profile(request: Request) -> dict[str, Any]:
     body = await request.json()
@@ -448,9 +641,7 @@ async def skip_profile(request: Request) -> dict[str, Any]:
     if not key:
         raise HTTPException(status_code=400, detail="key is required")
     store = _reflection_store(request)
-    await store.upsert_profile(
-        key=key, value="(skipped)", confidence=0.0, source="user_skipped"
-    )
+    await store.upsert_profile(key=key, value="(skipped)", confidence=0.0, source="user_skipped")
     return {"ok": True, "key": key}
 
 

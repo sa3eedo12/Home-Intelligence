@@ -29,6 +29,7 @@ from .activity import ActivityAggregator
 from .admin import router as admin_router
 from .advisor import Advisor
 from .dashboard import router as dashboard_router
+from .data_science import LoraTrainingJob, MaintenanceJob, PatternMiner, ReembedJob, ReportGenerator
 from .event_recorder import EventRecorder
 from .github_client import GitHubClient
 from .health import probe_lemonade, probe_ollama, probe_postgres, probe_qdrant, probe_redis
@@ -226,6 +227,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     reflection_store = ReflectionStore(pool)
     knowledge_graph = KnowledgeGraph(pool=pool)
     github_client = GitHubClient(github_repo_token, github_repo)
+    event_log_store = EventLogStore(pool=pool, qdrant=qdrant, embedder=embedder)
+    reembed = ReembedJob(
+        pool=pool, qdrant=qdrant, embedder=embedder, event_log_store=event_log_store
+    )
+    pattern_miner = PatternMiner(
+        pool=pool,
+        knowledge_graph=knowledge_graph,
+        event_log_store=event_log_store,
+    )
+    reports = ReportGenerator(pool=pool, llm=llm, event_log_store=event_log_store)
+    maintenance = MaintenanceJob(pool=pool, redis=redis, event_log_store=event_log_store)
+    lora_training = LoraTrainingJob(pool=pool, llm=llm, event_log_store=event_log_store)
     router = Router(
         npu=npu,
         registry=registry,
@@ -293,6 +306,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.warning("morning_brief_sent_mark_failed", error=str(exc))
         return {"ok": True, "brief_id": brief.get("id"), "chat_id": chat_id}
 
+    async def _run_maintenance(_inputs: dict[str, Any]) -> dict[str, Any]:
+        return await maintenance.run()
+
+    async def _run_pattern_mining(_inputs: dict[str, Any]) -> dict[str, Any]:
+        return await pattern_miner.run()
+
+    async def _run_reembed(_inputs: dict[str, Any]) -> dict[str, Any]:
+        return await reembed.run()
+
+    async def _run_weekly_report(_inputs: dict[str, Any]) -> dict[str, Any]:
+        return await reports.weekly_report()
+
+    async def _run_monthly_report(_inputs: dict[str, Any]) -> dict[str, Any]:
+        return await reports.monthly_report()
+
+    async def _run_lora_training(_inputs: dict[str, Any]) -> dict[str, Any]:
+        return await lora_training.run()
+
     scheduler = Scheduler(
         registry=registry,
         redis=redis,
@@ -302,6 +333,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "reflector.run": _run_reflector,
             "advisor.run": _run_advisor,
             "morning_brief.send": _send_reflection_digest,
+            "data_science.maintenance": _run_maintenance,
+            "data_science.pattern_mining": _run_pattern_mining,
+            "data_science.reembed": _run_reembed,
+            "data_science.weekly_report": _run_weekly_report,
+            "data_science.monthly_report": _run_monthly_report,
+            "data_science.lora_training": _run_lora_training,
         },
     )
     await scheduler.start()
@@ -353,13 +390,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
                 logger.info("orchestrator_warm_model_ok", model=model)
             except Exception as exc:
-                logger.info(
-                    "orchestrator_warm_model_skipped", model=model, error=str(exc)
-                )
+                logger.info("orchestrator_warm_model_skipped", model=model, error=str(exc))
 
     warmup_task = asyncio.create_task(_warm_models(), name="orchestrator-warmup")
 
-    event_log_store = EventLogStore(pool=pool, qdrant=qdrant, embedder=embedder)
     event_recorder = EventRecorder(redis, event_log_store)
     await event_recorder.start()
 
@@ -402,6 +436,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.event_recorder = event_recorder
     app.state.observer_runner = observer_runner
     app.state.knowledge_graph = knowledge_graph
+    app.state.embedder = embedder
+    app.state.reembed = reembed
+    app.state.pattern_miner = pattern_miner
+    app.state.reports = reports
+    app.state.maintenance = maintenance
+    app.state.lora_training = lora_training
     app.state.status_provider = lambda: _build_status(app)
 
     async def _reload_from_signal() -> None:

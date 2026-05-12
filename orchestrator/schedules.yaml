@@ -8,6 +8,36 @@ jobs:
       capability: reflector.run
       inputs: {}
 
+  - id: nightly_maintenance
+    trigger: cron
+    cron: { hour: 3, minute: 30 }
+    dispatch: { agent: __orchestrator__, capability: data_science.maintenance, inputs: {} }
+
+  - id: nightly_pattern_mining
+    trigger: cron
+    cron: { hour: 3, minute: 45 }
+    dispatch: { agent: __orchestrator__, capability: data_science.pattern_mining, inputs: {} }
+
+  - id: weekly_reembed
+    trigger: cron
+    cron: { day_of_week: "sun", hour: 4, minute: 0 }
+    dispatch: { agent: __orchestrator__, capability: data_science.reembed, inputs: {} }
+
+  - id: weekly_report
+    trigger: cron
+    cron: { day_of_week: "sun", hour: 5, minute: 0 }
+    dispatch: { agent: __orchestrator__, capability: data_science.weekly_report, inputs: {} }
+
+  - id: monthly_report
+    trigger: cron
+    cron: { day: 1, hour: 5, minute: 30 }
+    dispatch: { agent: __orchestrator__, capability: data_science.monthly_report, inputs: {} }
+
+  - id: weekly_lora_training
+    trigger: cron
+    cron: { day_of_week: "sun", hour: 6, minute: 0 }
+    dispatch: { agent: __orchestrator__, capability: data_science.lora_training, inputs: {} }
+
   - id: morning_reflection_digest
     description: "Send the latest Morning Brief to Telegram"
     trigger: cron
