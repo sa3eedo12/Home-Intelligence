@@ -224,6 +224,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     humanizer_model = os.environ.get("HUMANIZER_MODEL", default_model)
     safety = SafetyPolicy(path=os.environ.get("SAFETY_POLICY_PATH", "policies/safety.yaml"))
     reflection_store = ReflectionStore(pool)
+    knowledge_graph = KnowledgeGraph(pool=pool)
     github_client = GitHubClient(github_repo_token, github_repo)
     router = Router(
         npu=npu,
@@ -318,6 +319,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         scheduler=scheduler,
         admin_base_url=admin_base_url,
         redis=redis,
+        knowledge_graph=knowledge_graph,
+        proposal_store=reflection_store,
     )
     tg_app_holder["app"] = tg_app
     await tg_app.initialize()
@@ -398,7 +401,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.event_log_store = event_log_store
     app.state.event_recorder = event_recorder
     app.state.observer_runner = observer_runner
-    app.state.knowledge_graph = KnowledgeGraph(pool=pool)
+    app.state.knowledge_graph = knowledge_graph
     app.state.status_provider = lambda: _build_status(app)
 
     async def _reload_from_signal() -> None:

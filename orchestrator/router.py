@@ -92,6 +92,8 @@ class Router:
         text: str,
         user_id: str,
         autonomous: bool = False,
+        member_id: int | None = None,
+        member_name: str | None = None,
     ) -> dict[str, Any]:
         # Fast path: short conversational greetings/acks go straight to
         # personal_assistant.chat without calling the LLM classifier or the
@@ -108,6 +110,8 @@ class Router:
                 inputs=inputs,
                 autonomous=autonomous,
                 reason="conversational shortcut",
+                member_id=member_id,
+                member_name=member_name,
             )
             if safety_response is not None:
                 return safety_response
@@ -168,6 +172,8 @@ class Router:
             inputs=inputs,
             autonomous=autonomous,
             reason=str(reason or ""),
+            member_id=member_id,
+            member_name=member_name,
         )
         if safety_response is not None:
             return safety_response
@@ -204,6 +210,8 @@ class Router:
         inputs: dict[str, Any],
         autonomous: bool,
         reason: str,
+        member_id: int | None = None,
+        member_name: str | None = None,
     ) -> dict[str, Any] | None:
         explanation = self._safety.explain(agent, capability, inputs)
         tier = str(explanation.get("tier") or "suggest")
@@ -226,6 +234,8 @@ class Router:
                 inputs=inputs,
                 reason=reason,
                 explanation=explanation,
+                member_id=member_id,
+                member_name=member_name,
             )
             return {
                 "reply": "I saved that as a suggestion for you to review before anything runs.",
@@ -249,6 +259,8 @@ class Router:
         inputs: dict[str, Any],
         reason: str,
         explanation: dict[str, Any],
+        member_id: int | None = None,
+        member_name: str | None = None,
     ) -> int:
         action = {
             "agent": agent,
@@ -259,6 +271,10 @@ class Router:
             "router_reason": reason,
             "safety": explanation,
         }
+        if member_id is not None:
+            action["member_id"] = member_id
+        if member_name:
+            action["member_name"] = member_name
         rationale = (
             "Autonomous execution is classified as suggest, so this action is waiting "
             f"for user confirmation. Action: {json.dumps(action, ensure_ascii=False, default=str)}"
@@ -273,6 +289,7 @@ class Router:
                 impact_estimate=str(explanation.get("reason") or "Requires user review."),
                 status="pending",
                 delivery_channel="inbox",
+                for_member_id=member_id,
             )
         except Exception as exc:
             logger.warning("router_add_safety_proposal_failed", error=str(exc))

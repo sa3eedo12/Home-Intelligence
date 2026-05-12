@@ -10,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 from home_agents_sdk.reflection_store import ReflectionStore
 from home_agents_sdk.telemetry import get_logger
 
+from .admin import build_onboarding_state
 from .observers.utils import APPLIANCE_SYNONYMS
 
 router = APIRouter(tags=["dashboard"])
@@ -228,6 +229,15 @@ async def discovery(request: Request) -> HTMLResponse:
         request=request,
         name="discovery.html.j2",
         context={"discovery": await _discovery_snapshot(request)},
+    )
+
+
+@router.get("/dashboard/onboarding", response_class=HTMLResponse)
+async def onboarding(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request=request,
+        name="onboarding.html.j2",
+        context={"onboarding": await build_onboarding_state(request)},
     )
 
 

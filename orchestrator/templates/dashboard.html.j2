@@ -12,6 +12,7 @@
     <a class="morning-brief-link" href="/dashboard/morning-brief">Morning Brief →</a>
     <a class="btn ghost" href="/dashboard/about-you">About You →</a>
     <a class="btn ghost" href="/dashboard/discovery">Discovery →</a>
+    <a class="btn ghost" href="/dashboard/onboarding">Onboarding →</a>
     <div class="stack-leds" id="stack-leds">
       {% for service, details in status.stack.items() %}
         <span class="led {{ 'ok' if details.ok else 'down' }}" title="{{ service }}">

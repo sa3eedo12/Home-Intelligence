@@ -16,6 +16,7 @@ PROPOSAL_KINDS = {
     "preference_inference",
     "routine_inference",
     "cleanup_action",
+    "household_inference",
 }
 ACTION_PROPOSAL_KINDS = {"suggested_action", "auto_action"}
 _ALLOWED_PROPOSAL_KINDS = PROPOSAL_KINDS | ACTION_PROPOSAL_KINDS
@@ -176,8 +177,8 @@ class ReflectionStore:
                     """
                     SELECT id, kind, title, rationale, evidence_event_ids, confidence,
                            cost_estimate, impact_estimate, status, created_at, resolved_at,
-                           delivery_channel, rejected_at, github_issue_url, github_pr_url,
-                           dispatched_at, dispatch_error
+                           delivery_channel, rejected_at, for_member_id, github_issue_url,
+                           github_pr_url, dispatched_at, dispatch_error
                     FROM proposals
                     WHERE ($1::text IS NULL OR status = $1::text)
                     ORDER BY created_at DESC
@@ -207,6 +208,7 @@ class ReflectionStore:
         impact_estimate: str | None = None,
         status: str = "pending",
         delivery_channel: str | None = None,
+        for_member_id: int | None = None,
     ) -> int:
         if kind not in _ALLOWED_PROPOSAL_KINDS:
             logger.warning("reflection_store_invalid_proposal_kind", kind=kind)
@@ -224,9 +226,9 @@ class ReflectionStore:
                     INSERT INTO proposals(
                         kind, title, rationale, evidence_event_ids, confidence,
                         cost_estimate, impact_estimate, status, delivery_channel,
-                        resolved_at
+                        for_member_id, resolved_at
                     )
-                    VALUES ($1, $2, $3, $4::int[], $5, $6, $7, $8, $9,
+                    VALUES ($1, $2, $3, $4::int[], $5, $6, $7, $8, $9, $10,
                             CASE WHEN $8 IN ('accepted', 'dismissed', 'expired', 'auto_confirmed')
                                  THEN now() ELSE NULL END)
                     RETURNING id
@@ -240,6 +242,7 @@ class ReflectionStore:
                     impact_estimate,
                     status,
                     delivery_channel,
+                    for_member_id,
                 )
             except Exception as exc:
                 logger.warning(

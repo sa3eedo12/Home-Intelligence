@@ -65,6 +65,95 @@ def _chat_id(update: Update) -> int | None:
     return None
 
 
+async def resolve_member(chat_id: int, knowledge_graph: Any | None = None) -> dict[str, Any] | None:
+    if knowledge_graph is None:
+        return None
+    get_member = getattr(knowledge_graph, "get_member_by_chat_id", None)
+    if not callable(get_member):
+        return None
+    try:
+        return await get_member(int(chat_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("telegram_member_lookup_failed", chat_id=chat_id, error=str(exc))
+        return None
+
+
+def _telegram_first_name(update: Update) -> str:
+    user = getattr(update, "effective_user", None)
+    if user is None:
+        query = getattr(update, "callback_query", None)
+        user = getattr(query, "from_user", None) if query is not None else None
+    first_name = str(getattr(user, "first_name", "") or "").strip()
+    full_name = str(getattr(user, "full_name", "") or "").strip()
+    username = str(getattr(user, "username", "") or "").strip()
+    return first_name or full_name or username or "this Telegram user"
+
+
+async def _record_unknown_chat_proposal(
+    *,
+    update: Update,
+    chat_id: int,
+    proposal_store: Any | None,
+    redis: Redis | None,
+) -> None:
+    if proposal_store is None:
+        return
+    cache_key = f"telegram:unknown_chat_proposal:{chat_id}"
+    if redis is not None:
+        try:
+            created = await redis.set(cache_key, "1", ex=7 * 24 * 3600, nx=True)
+            if not created:
+                return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("telegram_unknown_chat_cache_failed", chat_id=chat_id, error=str(exc))
+    first_name = _telegram_first_name(update)
+    title = f"I see a new chat from {first_name} — is this someone in the household?"
+    try:
+        await proposal_store.add_proposal(
+            kind="household_inference",
+            title=title,
+            rationale=(
+                f"Telegram chat_id {chat_id} is allowed but not linked to a household member."
+            ),
+            evidence_event_ids=[],
+            confidence=0.5,
+            status="pending",
+            delivery_channel="inbox",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("telegram_unknown_chat_proposal_failed", chat_id=chat_id, error=str(exc))
+
+
+async def _member_for_update(
+    update: Update,
+    knowledge_graph: Any | None,
+    proposal_store: Any | None,
+    redis: Redis | None,
+) -> dict[str, Any] | None:
+    chat_id = _chat_id(update)
+    if chat_id is None:
+        return None
+    member = await resolve_member(chat_id, knowledge_graph)
+    if member is None:
+        await _record_unknown_chat_proposal(
+            update=update,
+            chat_id=chat_id,
+            proposal_store=proposal_store,
+            redis=redis,
+        )
+    return member
+
+
+def _member_kwargs(member: dict[str, Any] | None) -> dict[str, Any]:
+    if not member:
+        return {"member_id": None, "member_name": None}
+    try:
+        member_id = int(member.get("id"))
+    except (TypeError, ValueError):
+        member_id = None
+    return {"member_id": member_id, "member_name": member.get("name")}
+
+
 async def _reply(update: Update, text: str) -> None:
     if update.message is not None:
         await update.message.reply_text(text)
@@ -133,7 +222,13 @@ def _make_status(allowed_ids: set[int]):
     return status_cmd
 
 
-def _make_ask(allowed_ids: set[int], router: Router, redis: Redis):
+def _make_ask(
+    allowed_ids: set[int],
+    router: Router,
+    redis: Redis,
+    knowledge_graph: Any | None = None,
+    proposal_store: Any | None = None,
+):
     async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
             return
@@ -142,7 +237,8 @@ def _make_ask(allowed_ids: set[int], router: Router, redis: Redis):
             await _reply(update, "Usage: /ask <your request>")
             return
         user_id = str(update.effective_user.id)
-        result = await router.handle(text, user_id)
+        member = await _member_for_update(update, knowledge_graph, proposal_store, redis)
+        result = await router.handle(text, user_id, **_member_kwargs(member))
         await _send_result(update, context, result, redis)
 
     return ask_cmd
@@ -176,7 +272,13 @@ async def _handle_pending_text(update: Update, router: Router, redis: Redis, tex
     return True
 
 
-def _make_text(allowed_ids: set[int], router: Router, redis: Redis):
+def _make_text(
+    allowed_ids: set[int],
+    router: Router,
+    redis: Redis,
+    knowledge_graph: Any | None = None,
+    proposal_store: Any | None = None,
+):
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
             return
@@ -184,13 +286,20 @@ def _make_text(allowed_ids: set[int], router: Router, redis: Redis):
         if await _handle_pending_text(update, router, redis, text):
             return
         user_id = str(update.effective_user.id)
-        result = await router.handle(text, user_id)
+        member = await _member_for_update(update, knowledge_graph, proposal_store, redis)
+        result = await router.handle(text, user_id, **_member_kwargs(member))
         await _send_result(update, context, result, redis)
 
     return text_handler
 
 
-def _make_voice(allowed_ids: set[int], router: Router, redis: Redis):
+def _make_voice(
+    allowed_ids: set[int],
+    router: Router,
+    redis: Redis,
+    knowledge_graph: Any | None = None,
+    proposal_store: Any | None = None,
+):
     async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
             return
@@ -201,20 +310,28 @@ def _make_voice(allowed_ids: set[int], router: Router, redis: Redis):
             await _reply(update, "Sorry, I couldn't transcribe that voice message.")
             return
         user_id = str(update.effective_user.id)
-        result = await router.handle(text, user_id)
+        member = await _member_for_update(update, knowledge_graph, proposal_store, redis)
+        result = await router.handle(text, user_id, **_member_kwargs(member))
         await _send_result(update, context, result, redis)
 
     return voice_handler
 
 
-def _make_photo(allowed_ids: set[int], router: Router, redis: Redis):
+def _make_photo(
+    allowed_ids: set[int],
+    router: Router,
+    redis: Redis,
+    knowledge_graph: Any | None = None,
+    proposal_store: Any | None = None,
+):
     async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
             return
         caption = update.message.caption or ""
         text = f"Look at this image: {caption}"
         user_id = str(update.effective_user.id)
-        result = await router.handle(text, user_id)
+        member = await _member_for_update(update, knowledge_graph, proposal_store, redis)
+        result = await router.handle(text, user_id, **_member_kwargs(member))
         await _send_result(update, context, result, redis)
 
     return photo_handler
@@ -438,25 +555,47 @@ async def build_telegram_app(
     scheduler: Scheduler,
     admin_base_url: str,
     redis: Redis,
+    knowledge_graph: Any | None = None,
+    proposal_store: Any | None = None,
 ) -> Application:
     app = Application.builder().token(token).build()
     app.bot_data["registry"] = router._registry
     app.bot_data["redis"] = redis
+    app.bot_data["knowledge_graph"] = knowledge_graph
+    app.bot_data["proposal_store"] = proposal_store
 
     app.add_handler(CommandHandler("start", _make_start(allowed_ids)))
     app.add_handler(CommandHandler("help", _make_help(allowed_ids)))
     app.add_handler(CommandHandler("status", _make_status(allowed_ids)))
-    app.add_handler(CommandHandler("ask", _make_ask(allowed_ids, router, redis)))
+    app.add_handler(
+        CommandHandler(
+            "ask",
+            _make_ask(allowed_ids, router, redis, knowledge_graph, proposal_store),
+        )
+    )
     app.add_handler(CommandHandler("quiet", _make_quiet(allowed_ids, policy_engine)))
     app.add_handler(CommandHandler("mute", _make_mute(allowed_ids, policy_engine)))
     app.add_handler(CommandHandler("unmute", _make_unmute(allowed_ids, policy_engine)))
     app.add_handler(CommandHandler("cancel", _make_cancel(allowed_ids, redis)))
     app.add_handler(CommandHandler("jobs", _make_jobs(allowed_ids, scheduler, admin_base_url)))
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, _make_text(allowed_ids, router, redis))
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            _make_text(allowed_ids, router, redis, knowledge_graph, proposal_store),
+        )
     )
-    app.add_handler(MessageHandler(filters.VOICE, _make_voice(allowed_ids, router, redis)))
-    app.add_handler(MessageHandler(filters.PHOTO, _make_photo(allowed_ids, router, redis)))
+    app.add_handler(
+        MessageHandler(
+            filters.VOICE,
+            _make_voice(allowed_ids, router, redis, knowledge_graph, proposal_store),
+        )
+    )
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO,
+            _make_photo(allowed_ids, router, redis, knowledge_graph, proposal_store),
+        )
+    )
     app.add_handler(
         CallbackQueryHandler(_make_callback(allowed_ids, workflow_engine, router, redis))
     )

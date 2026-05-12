@@ -66,6 +66,21 @@ capabilities:
     inputs: { thing_id: integer }
     side_effects: true
     cost: low
+  - id: members.list
+    description: List household members, optionally excluding pets.
+    inputs: { include_pets: "boolean?" }
+    side_effects: false
+    cost: low
+  - id: members.put
+    description: Add or update a household member with routing and routine metadata.
+    inputs: { name: string, role: "string?", telegram_chat_id: "integer?", allergies: "array?", dietary_restrictions: "array?", sleep_time: "string?", wake_time: "string?", attributes: "object?", member_id: "integer?" }
+    side_effects: true
+    cost: low
+  - id: members.forget
+    description: Forget a household member by id.
+    inputs: { member_id: integer }
+    side_effects: true
+    cost: low
   - id: habits.list
     description: List learned habits, optionally filtered by subject label.
     inputs: { subject: "string?" }
