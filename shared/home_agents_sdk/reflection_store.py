@@ -18,6 +18,8 @@ PROPOSAL_KINDS = {
     "routine_inference",
     "cleanup_action",
 }
+ACTION_PROPOSAL_KINDS = {"suggested_action", "auto_action"}
+_ALLOWED_PROPOSAL_KINDS = PROPOSAL_KINDS | ACTION_PROPOSAL_KINDS
 PROPOSAL_STATUSES = {"pending", "accepted", "dismissed", "expired", "auto_confirmed"}
 
 
@@ -210,7 +212,7 @@ class ReflectionStore:
         status: str = "pending",
         delivery_channel: str | None = None,
     ) -> int:
-        if kind not in PROPOSAL_KINDS:
+        if kind not in _ALLOWED_PROPOSAL_KINDS:
             logger.warning("reflection_store_invalid_proposal_kind", kind=kind)
             return 0
         if status not in PROPOSAL_STATUSES:

@@ -23,7 +23,9 @@ CREATE TABLE IF NOT EXISTS proposals (
             'habit_inference',
             'preference_inference',
             'routine_inference',
-            'cleanup_action'
+            'cleanup_action',
+            'suggested_action',
+            'auto_action'
         )
     ),
     title text NOT NULL,

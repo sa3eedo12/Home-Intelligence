@@ -20,6 +20,15 @@ jobs:
       capability: morning_brief.send
       inputs: {}
 
+  - id: advisor_loop
+    description: "Daytime suggest-only advisor"
+    trigger: interval
+    interval: { hours: 4 }
+    dispatch:
+      agent: __orchestrator__
+      capability: advisor.run
+      inputs: {}
+
   - id: morning_brief
     description: "Daily morning briefing"
     trigger: cron

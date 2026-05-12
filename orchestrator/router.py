@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
 from home_agents_sdk.llm import OllamaClient
 from home_agents_sdk.npu import NPUClient, NPUUnavailable
+from home_agents_sdk.reflection_store import ReflectionStore
 from home_agents_sdk.telemetry import get_logger
 
 from .registry import CapabilityRegistry
+from .safety import SafetyPolicy
 
 logger = get_logger("router")
 
@@ -70,6 +73,8 @@ class Router:
         llm: OllamaClient | None = None,
         llm_fallback_model: str | None = None,
         humanizer_model: str | None = None,
+        safety: SafetyPolicy | None = None,
+        proposal_store: ReflectionStore | None = None,
     ) -> None:
         self._npu = npu
         self._registry = registry
@@ -77,21 +82,38 @@ class Router:
         self._llm = llm
         self._llm_fallback_model = llm_fallback_model
         self._humanizer_model = humanizer_model or llm_fallback_model or router_model
+        self._safety = safety or SafetyPolicy(
+            os.environ.get("SAFETY_POLICY_PATH", "policies/safety.yaml")
+        )
+        self._proposal_store = proposal_store or ReflectionStore(None)
 
-    async def handle(self, text: str, user_id: str) -> dict[str, Any]:
+    async def handle(
+        self,
+        text: str,
+        user_id: str,
+        autonomous: bool = False,
+    ) -> dict[str, Any]:
         # Fast path: short conversational greetings/acks go straight to
         # personal_assistant.chat without calling the LLM classifier or the
         # semantic-search fallback. Saves ~1-2s per greeting.
         if _is_conversational_shortcut(text) and (
             self._registry.get_capability("personal_assistant", "chat") is not None
         ):
+            inputs = {"text": text}
+            safety_response = await self._safety_gate(
+                text=text,
+                user_id=user_id,
+                agent="personal_assistant",
+                capability="chat",
+                inputs=inputs,
+                autonomous=autonomous,
+                reason="conversational shortcut",
+            )
+            if safety_response is not None:
+                return safety_response
             try:
-                result = await self._registry.dispatch(
-                    "personal_assistant", "chat", {"text": text}
-                )
-                reply_text = await self._humanize(
-                    text, "personal_assistant", "chat", result
-                )
+                result = await self._registry.dispatch("personal_assistant", "chat", inputs)
+                reply_text = await self._humanize(text, "personal_assistant", "chat", result)
                 return {"reply": reply_text}
             except Exception as exc:
                 logger.warning("router_fast_path_failed", error=str(exc))
@@ -101,6 +123,8 @@ class Router:
         agent = classification.get("agent")
         capability = classification.get("capability")
         inputs = classification.get("inputs", {})
+        if not isinstance(inputs, dict):
+            inputs = {}
         needs_confirmation = classification.get("needs_confirmation", False)
         reason = classification.get("reason", "")
 
@@ -136,6 +160,18 @@ class Router:
         if agent == "personal_assistant" and capability == "chat":
             inputs = {"text": text}
 
+        safety_response = await self._safety_gate(
+            text=text,
+            user_id=user_id,
+            agent=agent,
+            capability=capability,
+            inputs=inputs,
+            autonomous=autonomous,
+            reason=str(reason or ""),
+        )
+        if safety_response is not None:
+            return safety_response
+
         if needs_confirmation:
             return {
                 "reply": f"I need your confirmation: {reason}",
@@ -157,6 +193,90 @@ class Router:
         # Humanize the result unless the agent already returned natural text.
         reply_text = await self._humanize(text, agent, capability, result)
         return {"reply": reply_text}
+
+    async def _safety_gate(
+        self,
+        *,
+        text: str,
+        user_id: str,
+        agent: str,
+        capability: str,
+        inputs: dict[str, Any],
+        autonomous: bool,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        explanation = self._safety.explain(agent, capability, inputs)
+        tier = str(explanation.get("tier") or "suggest")
+        safety_reason = str(explanation.get("reason") or "the safety policy requires review")
+
+        if tier == "never":
+            return {
+                "reply": (
+                    "I won't do that automatically. "
+                    f"{safety_reason} Please do it yourself manually."
+                )
+            }
+
+        if tier == "suggest" and autonomous:
+            proposal_id = await self._add_safety_proposal(
+                text=text,
+                user_id=user_id,
+                agent=agent,
+                capability=capability,
+                inputs=inputs,
+                reason=reason,
+                explanation=explanation,
+            )
+            return {
+                "reply": "I saved that as a suggestion for you to review before anything runs.",
+                "proposal": {
+                    "id": proposal_id,
+                    "agent": agent,
+                    "capability": capability,
+                    "tier": tier,
+                },
+            }
+
+        return None
+
+    async def _add_safety_proposal(
+        self,
+        *,
+        text: str,
+        user_id: str,
+        agent: str,
+        capability: str,
+        inputs: dict[str, Any],
+        reason: str,
+        explanation: dict[str, Any],
+    ) -> int:
+        action = {
+            "agent": agent,
+            "capability": capability,
+            "inputs": inputs,
+            "prompt": text,
+            "user_id": user_id,
+            "router_reason": reason,
+            "safety": explanation,
+        }
+        rationale = (
+            "Autonomous execution is classified as suggest, so this action is waiting "
+            f"for user confirmation. Action: {json.dumps(action, ensure_ascii=False, default=str)}"
+        )
+        try:
+            return await self._proposal_store.add_proposal(
+                kind="suggested_action",
+                title=f"Review {agent}.{capability}",
+                rationale=rationale,
+                evidence_event_ids=[],
+                confidence=0.5,
+                impact_estimate=str(explanation.get("reason") or "Requires user review."),
+                status="pending",
+                delivery_channel="inbox",
+            )
+        except Exception as exc:
+            logger.warning("router_add_safety_proposal_failed", error=str(exc))
+            return 0
 
     async def _classify(self, text: str) -> dict[str, Any]:
         capabilities = self._registry.list_capabilities()

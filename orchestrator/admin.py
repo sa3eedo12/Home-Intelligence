@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import httpx
 import yaml
 from fastapi import APIRouter, HTTPException, Request
 from home_agents_sdk.reflection_store import ReflectionStore
+
+from .safety import SafetyPolicy
 
 router = APIRouter(tags=["admin"])
 
@@ -107,6 +110,10 @@ async def reload_policies(request: Request) -> dict:
     app_state = request.app.state
     policies = _load_yaml("orchestrator/policies.yaml")
     await app_state.policy_engine.reload(policies)
+    safety = getattr(app_state, "safety", None)
+    safety_reload = getattr(safety, "reload", None)
+    if callable(safety_reload):
+        safety_reload()
     schedules_result = await app_state.scheduler.reload()
     reactive_result = await app_state.reactive.reload()
     return {
@@ -133,6 +140,22 @@ async def run_reflection(request: Request) -> dict:
         raise HTTPException(status_code=503, detail="reflection is not configured")
     result = await reflector.run_once()
     return {"ok": True, "result": result}
+
+
+@router.post("/admin/safety/explain")
+async def explain_safety(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    agent = str(body.get("agent") or "").strip()
+    capability = str(body.get("capability") or "").strip()
+    inputs = body.get("inputs") or {}
+    if not agent or not capability:
+        raise HTTPException(status_code=400, detail="agent and capability are required")
+    if not isinstance(inputs, dict):
+        raise HTTPException(status_code=400, detail="inputs must be an object")
+    safety = getattr(request.app.state, "safety", None) or SafetyPolicy(
+        os.environ.get("SAFETY_POLICY_PATH", "policies/safety.yaml")
+    )
+    return {"ok": True, **safety.explain(agent, capability, inputs)}
 
 
 @router.post("/admin/proposals/{proposal_id}/format")
