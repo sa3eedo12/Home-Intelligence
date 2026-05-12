@@ -233,11 +233,12 @@ async def discovery(request: Request) -> HTMLResponse:
 
 
 @router.get("/dashboard/onboarding", response_class=HTMLResponse)
-async def onboarding(request: Request) -> HTMLResponse:
+async def onboarding(request: Request, stage: int | None = None) -> HTMLResponse:
+    state = await build_onboarding_state(request, override_stage=stage)
     return templates.TemplateResponse(
         request=request,
         name="onboarding.html.j2",
-        context={"onboarding": await build_onboarding_state(request)},
+        context={"onboarding": state},
     )
 
 

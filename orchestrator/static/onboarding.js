@@ -1,7 +1,22 @@
 (() => {
-  const dataScript = document.getElementById('onboarding-data');
-  const state = dataScript ? JSON.parse(dataScript.textContent || '{}') : {};
-  const summary = state.summary || {};
+  function showError(message) {
+    const banner = document.getElementById('onboarding-error-banner');
+    if (banner) {
+      banner.style.display = 'block';
+      banner.textContent = `Onboarding script error: ${message}. Form actions may not work — check the browser console.`;
+    }
+    console.error('[onboarding]', message);
+  }
+
+  let state = {};
+  let summary = {};
+  try {
+    const dataScript = document.getElementById('onboarding-data');
+    state = dataScript ? JSON.parse(dataScript.textContent || '{}') : {};
+    summary = state.summary || {};
+  } catch (parseErr) {
+    showError(`failed to parse onboarding-data JSON: ${parseErr.message}`);
+  }
   const savedRoutineKeys = new Set();
   let activeHabit = null;
 
@@ -100,8 +115,9 @@
     else window.alert('Save each missing routine field first.');
   }
 
-  renderRoutineFields();
-
+  // Always attach the submit/click listeners FIRST so they survive any
+  // exception in rendering helpers below. The handlers themselves no-op
+  // when the relevant DOM nodes aren't on the page.
   document.addEventListener('submit', async (event) => {
     const form = event.target;
     if (!(form instanceof HTMLFormElement) || form.id !== 'member-form') return;
@@ -276,4 +292,12 @@
       window.alert(err.message || String(err));
     }
   });
+
+  // Render routine fields LAST so any exception from this rendering doesn't
+  // break the listeners attached above. Wrap to be extra safe.
+  try {
+    renderRoutineFields();
+  } catch (renderErr) {
+    showError(`renderRoutineFields failed: ${renderErr.message}`);
+  }
 })();

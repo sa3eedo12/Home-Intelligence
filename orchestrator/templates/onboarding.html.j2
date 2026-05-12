@@ -7,6 +7,15 @@
   <link rel="stylesheet" href="/static/onboarding.css">
 </head>
 <body>
+  <noscript>
+    <div style="background:#3a1c1c;color:#fff;padding:1rem;border-bottom:2px solid #e74c3c">
+      ⚠️ JavaScript is disabled. The onboarding wizard needs JS to work.
+    </div>
+  </noscript>
+  <div id="onboarding-error-banner"
+       style="display:none;background:#3a1c1c;color:#fff;padding:0.6rem 1rem;border-bottom:2px solid #e74c3c"
+       role="alert">
+  </div>
   <header class="topbar">
     <a class="back-link" href="/dashboard">← Dashboard</a>
     <h1>Onboarding</h1>
@@ -16,9 +25,9 @@
   {% set current = onboarding.stage %}
   {% set steps = [
     {'num': 1, 'key': 'discovery', 'title': 'Discovery', 'href': '/dashboard/discovery'},
-    {'num': 2, 'key': 'routines', 'title': 'Routines', 'href': '/dashboard/onboarding#routines'},
-    {'num': 3, 'key': 'household', 'title': 'Household', 'href': '/dashboard/onboarding#household'},
-    {'num': 4, 'key': 'habits', 'title': 'Habits', 'href': '/dashboard/about-you'}
+    {'num': 2, 'key': 'routines', 'title': 'Routines', 'href': '/dashboard/onboarding?stage=2'},
+    {'num': 3, 'key': 'household', 'title': 'Household', 'href': '/dashboard/onboarding?stage=3'},
+    {'num': 4, 'key': 'habits', 'title': 'Habits', 'href': '/dashboard/onboarding?stage=4'}
   ] %}
 
   <main>
@@ -79,7 +88,7 @@
         {% elif current == 3 %}
           <h2 id="household">Stage 3 — Household</h2>
           <p>Add the people and pets who live here so facts and proposals can be routed.</p>
-          <form id="member-form" class="member-form">
+          <form id="member-form" class="member-form" action="javascript:void(0);" novalidate>
             <input type="hidden" name="id">
             <label>Name<input name="name" autocomplete="name" required></label>
             <label>Role

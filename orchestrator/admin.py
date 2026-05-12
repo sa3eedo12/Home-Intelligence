@@ -232,7 +232,9 @@ async def _ha_entity_count(request: Request) -> int:
     return _entity_count(payload)
 
 
-async def build_onboarding_state(request: Request) -> dict[str, Any]:
+async def build_onboarding_state(
+    request: Request, *, override_stage: int | str | None = None
+) -> dict[str, Any]:
     graph = _knowledge_graph(request)
     store = _reflection_store(request)
     things, habits, members, profile_rows, ha_total = await asyncio.gather(
@@ -257,8 +259,10 @@ async def build_onboarding_state(request: Request) -> dict[str, Any]:
     habits_complete = bool(confirmed_habits)
     completed_flag = _profile_bool(profile.get("onboarding_completed"))
 
-    if completed_flag:
-        stage: int | str = "complete"
+    if override_stage in (1, 2, 3, 4):
+        stage: int | str = override_stage
+    elif completed_flag:
+        stage = "complete"
     elif not discovery_complete:
         stage = 1
     elif not routines_complete:

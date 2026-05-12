@@ -131,3 +131,80 @@ def test_onboarding_renders_stage_four_habit_cards_and_complete() -> None:
     )
     assert "You're onboarded" in complete_html
     assert 'data-stage="4" class="step  complete' in complete_html
+
+
+def test_onboarding_page_honours_stage_query_param() -> None:
+    """User clicks "edit Household" from the stepper after they've moved past
+    stage 3; the page must render the household form even though the
+    auto-detected stage is later."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.dashboard import router as dashboard_router
+
+    app = FastAPI()
+    app.include_router(dashboard_router)
+    # Mocks for the underlying SDK calls in build_onboarding_state
+    app.state.knowledge_graph = SimpleNamespace(
+        list_things=AsyncMock(
+            return_value=[
+                {"type": "appliance.washer"},
+                {"type": "appliance.vacuum"},
+                {"type": "appliance.coffee_maker"},
+            ]
+        ),
+        list_habits=AsyncMock(return_value=[{"id": 1, "subject": "x", "last_confirmed_at": "now"}]),
+        list_members=AsyncMock(return_value=[{"id": 1, "name": "Saeed", "role": "adult"}]),
+    )
+    app.state.reflection_store = SimpleNamespace(
+        list_profile=AsyncMock(
+            return_value=[
+                {"key": "wake_time", "value": "07:30"},
+                {"key": "sleep_time", "value": "23:00"},
+                {"key": "work_hours", "value": "9-5"},
+            ]
+        )
+    )
+    app.state.registry = SimpleNamespace(
+        dispatch=AsyncMock(return_value={"ok": True, "result": {"items": []}})
+    )
+
+    with TestClient(app) as client:
+        # Without the override, stage detection lands on "complete-ish".
+        # With ?stage=3, the page must render the Stage 3 (Household) UI.
+        resp = client.get("/dashboard/onboarding?stage=3")
+    assert resp.status_code == 200
+    assert "Stage 3 — Household" in resp.text
+    assert 'id="member-form"' in resp.text
+
+
+def test_onboarding_page_ignores_out_of_range_stage_query_param() -> None:
+    """Out-of-range stage values are silently ignored; auto-detect kicks in."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.dashboard import router as dashboard_router
+
+    app = FastAPI()
+    app.include_router(dashboard_router)
+    app.state.knowledge_graph = SimpleNamespace(
+        list_things=AsyncMock(return_value=[]),
+        list_habits=AsyncMock(return_value=[]),
+        list_members=AsyncMock(return_value=[]),
+    )
+    app.state.reflection_store = SimpleNamespace(list_profile=AsyncMock(return_value=[]))
+    app.state.registry = SimpleNamespace(
+        dispatch=AsyncMock(return_value={"ok": True, "result": {"items": []}})
+    )
+
+    with TestClient(app) as client:
+        # stage=999 is ignored — auto-detect lands on Stage 1 (Discovery).
+        resp = client.get("/dashboard/onboarding?stage=999")
+    assert resp.status_code == 200
+    assert "Stage 1 — Discovery" in resp.text
