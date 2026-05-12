@@ -166,7 +166,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     agent_urls = _parse_agent_urls(agent_urls_raw)
     registry = CapabilityRegistry(agent_urls=agent_urls, qdrant=qdrant, embedder=embedder)
     await registry.bootstrap()
-    router = Router(npu=npu, registry=registry, router_model=router_model)
+    default_model = os.environ.get("DEFAULT_MODEL", "qwen3:8b")
+    router = Router(
+        npu=npu,
+        registry=registry,
+        router_model=router_model,
+        llm=llm,
+        llm_fallback_model=default_model,
+    )
 
     policy_engine = PolicyEngine(_load_yaml(HERE / "policies.yaml"), redis)
     scheduler = Scheduler(

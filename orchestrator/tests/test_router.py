@@ -118,3 +118,84 @@ async def test_semantic_fallback_good_score():
     )
     result = await router.handle("show me all entities", "user1")
     assert "reply" in result
+
+
+@pytest.mark.asyncio
+async def test_router_falls_back_to_ollama_when_npu_unavailable():
+    """When the NPU client raises NPUUnavailable, the router should retry via
+    the OllamaClient with the configured fallback model and use that
+    classification."""
+    from home_agents_sdk.npu import NPUUnavailable
+
+    from orchestrator.router import Router
+
+    npu = MagicMock()
+    npu.chat = AsyncMock(side_effect=NPUUnavailable("lemonade is a stub"))
+
+    llm = MagicMock()
+    llm.chat = AsyncMock(
+        return_value={
+            "message": {
+                "content": json.dumps(
+                    {
+                        "agent": "home_automation",
+                        "capability": "list_entities",
+                        "inputs": {"domain": "light"},
+                        "needs_confirmation": False,
+                        "reason": "list lights",
+                    }
+                )
+            }
+        }
+    )
+
+    registry = MagicMock()
+    registry.agents = MagicMock(return_value=["home_automation"])
+    registry.get_capability = MagicMock(return_value=None)
+    registry.dispatch = AsyncMock(return_value={"ok": True, "result": ["light.x"]})
+
+    router = Router(
+        npu=npu,
+        registry=registry,
+        router_model="qwen3-1.7b-int4",
+        llm=llm,
+        llm_fallback_model="qwen3:8b",
+    )
+    result = await router.handle("list my lights", "user1")
+    assert "reply" in result
+    npu.chat.assert_awaited_once()
+    llm.chat.assert_awaited_once()
+    # Ollama should have been called with the fallback model name.
+    _, kwargs = llm.chat.call_args
+    assert kwargs.get("model") == "qwen3:8b"
+
+
+@pytest.mark.asyncio
+async def test_router_returns_no_capability_when_both_backends_fail():
+    """If NPU AND Ollama both fail to classify, semantic search misses, and
+    we get the friendly fallback reply."""
+    from home_agents_sdk.npu import NPUUnavailable
+
+    from orchestrator.router import Router
+
+    npu = MagicMock()
+    npu.chat = AsyncMock(side_effect=NPUUnavailable("npu down"))
+
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=RuntimeError("ollama down"))
+
+    registry = MagicMock()
+    registry.agents = MagicMock(return_value=["home_automation"])
+    registry.get_capability = MagicMock(return_value=None)
+    registry.dispatch = AsyncMock()
+    registry.semantic_search = AsyncMock(return_value=[])
+
+    router = Router(
+        npu=npu,
+        registry=registry,
+        router_model="qwen3-1.7b-int4",
+        llm=llm,
+        llm_fallback_model="qwen3:8b",
+    )
+    result = await router.handle("list my lights", "user1")
+    assert result == {"reply": "I don't have a capability for that yet."}

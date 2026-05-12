@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from home_agents_sdk.npu import NPUClient
+from home_agents_sdk.llm import OllamaClient
+from home_agents_sdk.npu import NPUClient, NPUUnavailable
 from home_agents_sdk.telemetry import get_logger
 
 from .registry import CapabilityRegistry
@@ -29,10 +30,14 @@ class Router:
         npu: NPUClient,
         registry: CapabilityRegistry,
         router_model: str,
+        llm: OllamaClient | None = None,
+        llm_fallback_model: str | None = None,
     ) -> None:
         self._npu = npu
         self._registry = registry
         self._router_model = router_model
+        self._llm = llm
+        self._llm_fallback_model = llm_fallback_model
 
     async def handle(self, text: str, user_id: str) -> dict[str, Any]:
         classification = await self._classify(text)
@@ -76,25 +81,45 @@ class Router:
         agents = self._registry.agents()
         agent_list = ", ".join(agents) if agents else "none"
         user_msg = f"Available agents: {agent_list}\n\nUser request: {text}"
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_msg},
+        ]
+
+        # Try the NPU-served router model first (small, fast, INT-quantized).
         try:
-            response = await self._npu.chat(
-                model=self._router_model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ],
-            )
+            response = await self._npu.chat(model=self._router_model, messages=messages)
             content = response["choices"][0]["message"]["content"]
             return json.loads(content)
+        except NPUUnavailable as exc:
+            logger.info("router_npu_unavailable_falling_back_to_ollama", error=str(exc))
         except Exception as exc:
-            logger.warning("router_classify_failed", error=str(exc))
-            return {
-                "agent": None,
-                "capability": None,
-                "inputs": {},
-                "needs_confirmation": False,
-                "reason": "",
-            }
+            logger.warning("router_classify_npu_failed", error=str(exc))
+
+        # Fallback to Ollama on the iGPU using the same router model name (or
+        # an explicit override). This is what lets the stack work on hosts
+        # where the NPU is unavailable (e.g. TrueNAS today, where the
+        # `lemonade` service is a CPU stub that doesn't speak chat).
+        if self._llm is None:
+            return _empty_classification()
+        ollama_model = self._llm_fallback_model or self._router_model
+        try:
+            response = await self._llm.chat(
+                messages=messages,
+                model=ollama_model,
+                response_format="json",
+            )
+            content = (response.get("message") or {}).get("content", "")
+            if not content:
+                logger.warning("router_classify_ollama_empty_content")
+                return _empty_classification()
+            return json.loads(content)
+        except json.JSONDecodeError as exc:
+            logger.warning("router_classify_ollama_bad_json", error=str(exc))
+            return _empty_classification()
+        except Exception as exc:
+            logger.warning("router_classify_ollama_failed", error=str(exc))
+            return _empty_classification()
 
     async def dispatch(self, agent: str, capability: str, inputs: dict) -> dict:
         """Public proxy to registry dispatch, used by confirmation callbacks."""
@@ -109,3 +134,13 @@ class Router:
             return None
         payload = best["payload"]
         return {"agent": payload.get("agent"), "capability": payload.get("capability")}
+
+
+def _empty_classification() -> dict[str, Any]:
+    return {
+        "agent": None,
+        "capability": None,
+        "inputs": {},
+        "needs_confirmation": False,
+        "reason": "",
+    }
