@@ -457,3 +457,64 @@ def test_reflection_status_proxies_reflector_status() -> None:
     assert body["running"] is True
     assert body["phase"] == "generate_proposals"
     assert body["elapsed_seconds"] == 17.3
+
+
+def test_profile_upsert_writes_to_reflection_store() -> None:
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.admin import router as admin_router
+
+    app = FastAPI()
+    app.include_router(admin_router)
+    app.state.reflection_store = SimpleNamespace(upsert_profile=AsyncMock())
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/admin/profile/upsert", json={"key": "wake_time", "value": "07:30"}
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["key"] == "wake_time"
+    app.state.reflection_store.upsert_profile.assert_awaited_once()
+    _, kwargs = app.state.reflection_store.upsert_profile.call_args
+    assert kwargs["key"] == "wake_time"
+    assert kwargs["value"] == "07:30"
+    assert kwargs["confidence"] == 1.0
+
+
+def test_profile_upsert_rejects_blank_value() -> None:
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.admin import router as admin_router
+
+    app = FastAPI()
+    app.include_router(admin_router)
+    app.state.reflection_store = SimpleNamespace(upsert_profile=AsyncMock())
+    with TestClient(app) as client:
+        resp = client.post("/admin/profile/upsert", json={"key": "wake_time", "value": "   "})
+    assert resp.status_code == 400
+
+
+def test_profile_skip_writes_sentinel() -> None:
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.admin import router as admin_router
+
+    app = FastAPI()
+    app.include_router(admin_router)
+    app.state.reflection_store = SimpleNamespace(upsert_profile=AsyncMock())
+    with TestClient(app) as client:
+        resp = client.post("/admin/profile/skip", json={"key": "wake_time"})
+    assert resp.status_code == 200
+    _, kwargs = app.state.reflection_store.upsert_profile.call_args
+    assert kwargs["source"] == "user_skipped"
+    assert kwargs["confidence"] == 0.0

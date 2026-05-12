@@ -35,8 +35,6 @@
           type: value(card, '.type-select'),
           friendly_name: value(card, '.friendly-name') || entityId,
         };
-        const photoPath = value(card, '.photo-path');
-        if (photoPath) payload.photo_path = photoPath;
         await postJSON('/admin/discovery/adopt', payload);
         window.location.reload();
       }

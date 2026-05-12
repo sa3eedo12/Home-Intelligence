@@ -197,6 +197,40 @@ async def reflection_status(request: Request) -> dict:
     return {"configured": True, **reflector.status}
 
 
+@router.post("/admin/profile/upsert")
+async def upsert_profile(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    key = str(body.get("key") or "").strip()
+    value = body.get("value")
+    source = str(body.get("source") or "user").strip() or "user"
+    if not key:
+        raise HTTPException(status_code=400, detail="key is required")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise HTTPException(status_code=400, detail="value is required")
+    store = _reflection_store(request)
+    await store.upsert_profile(key=key, value=value, confidence=1.0, source=source)
+    return {"ok": True, "key": key}
+
+
+@router.post("/admin/profile/skip")
+async def skip_profile(request: Request) -> dict[str, Any]:
+    """Mark a knowledge gap as skipped so the reflector deprioritises it.
+
+    Implementation: write a sentinel value with low confidence and a special
+    source. The reflector's _knowledge_gaps method considers any present key
+    as 'covered', so this stops the question from re-appearing.
+    """
+    body = await request.json()
+    key = str(body.get("key") or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="key is required")
+    store = _reflection_store(request)
+    await store.upsert_profile(
+        key=key, value="(skipped)", confidence=0.0, source="user_skipped"
+    )
+    return {"ok": True, "key": key}
+
+
 @router.post("/admin/safety/explain")
 async def explain_safety(request: Request) -> dict[str, Any]:
     body = await request.json()

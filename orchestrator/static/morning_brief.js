@@ -111,3 +111,66 @@ tickReflectionStatus();
 if (lastSeenRunning && pollHandle == null) {
   pollHandle = setInterval(tickReflectionStatus, 3000);
 }
+
+
+// === Profile question answer/skip ==========================================
+// Each "Question for you" card carries a data-profile-key attribute. Save
+// posts to /admin/profile/upsert; Skip posts to /admin/profile/skip so the
+// reflector deprioritises that gap. After either, fade the card out.
+
+async function handleQuestionForm(form, action) {
+  const card = form.closest('.question-card');
+  const key = card?.dataset.profileKey;
+  if (!key) return;
+  const input = form.querySelector('.question-answer-input');
+  const status = form.querySelector('.question-status');
+  const buttons = form.querySelectorAll('button');
+  const value = (input?.value || '').trim();
+
+  if (action === 'save' && !value) {
+    if (status) {
+      status.hidden = false;
+      status.textContent = 'Type an answer first.';
+    }
+    return;
+  }
+
+  buttons.forEach((b) => (b.disabled = true));
+  if (status) {
+    status.hidden = false;
+    status.textContent = action === 'save' ? 'Saving…' : 'Skipping…';
+  }
+
+  try {
+    const url = action === 'save' ? '/admin/profile/upsert' : '/admin/profile/skip';
+    const body = action === 'save' ? { key, value, source: 'morning_brief' } : { key };
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (status) status.textContent = action === 'save' ? '✓ Saved' : '✓ Skipped';
+    card.classList.add('question-answered');
+    setTimeout(() => card.remove(), 800);
+  } catch (error) {
+    console.error('question save/skip failed', error);
+    if (status) status.textContent = `Failed: ${error.message || error}`;
+    buttons.forEach((b) => (b.disabled = false));
+  }
+}
+
+document.addEventListener('submit', (event) => {
+  const form = event.target.closest('.question-answer-form');
+  if (!form) return;
+  event.preventDefault();
+  handleQuestionForm(form, 'save');
+});
+
+document.addEventListener('click', (event) => {
+  const skip = event.target.closest('.skip-question');
+  if (skip) {
+    event.preventDefault();
+    handleQuestionForm(skip.closest('.question-answer-form'), 'skip');
+  }
+});

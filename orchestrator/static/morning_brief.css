@@ -189,3 +189,60 @@ button:disabled {
   color: #8b949e;
   font-size: 0.75rem;
 }
+
+/* === Question cards (interactive) === */
+.question-card .question-answer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+.question-card .question-answer-input {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #f0f6fc;
+  padding: 0.45rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+.question-card .question-answer-input:focus {
+  outline: 0;
+  border-color: var(--accent, #58a6ff);
+}
+.question-card .question-actions {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+.question-card .save-answer {
+  background: var(--accent, #58a6ff);
+  color: #0d1117;
+  border: 0;
+  border-radius: 5px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.question-card .skip-question {
+  background: transparent;
+  color: #8b949e;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 5px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+.question-card .save-answer:disabled,
+.question-card .skip-question:disabled { opacity: 0.5; cursor: not-allowed; }
+.question-card .question-status {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #8b949e;
+}
+.question-card.question-answered {
+  opacity: 0;
+  transform: translateY(-8px);
+  transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+}

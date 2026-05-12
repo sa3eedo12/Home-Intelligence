@@ -57,9 +57,23 @@
         <h2>Questions for you</h2>
         <div class="card-grid">
           {% for item in body.questions_for_you or [] %}
-            <article class="mini-card">
+            {% set profile_key = (item.evidence_keys or [None])[0] %}
+            <article class="mini-card question-card"
+                     data-question-kind="{{ item.kind or '' }}"
+                     {% if profile_key %}data-profile-key="{{ profile_key }}"{% endif %}>
               <h3>{{ item.title }}</h3>
               <p>{{ item.rationale or item.kind }}</p>
+              {% if profile_key %}
+                <form class="question-answer-form" onsubmit="return false;">
+                  <input type="text" class="question-answer-input"
+                         placeholder="Your answer (e.g. 7:30am, weekdays only, peanuts, …)">
+                  <div class="question-actions">
+                    <button type="submit" class="save-answer">Save</button>
+                    <button type="button" class="skip-question">Skip</button>
+                  </div>
+                  <p class="question-status" hidden></p>
+                </form>
+              {% endif %}
             </article>
           {% else %}
             <p class="empty">No questions today.</p>
