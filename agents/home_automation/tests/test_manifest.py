@@ -33,6 +33,8 @@ def test_manifest_and_tools_consistent():
     from home_agents_sdk.tools import list_tools
 
     import tools.anomaly as _anomaly
+    import tools.appliance as _appliance
+    import tools.area as _area
     import tools.core as _core
     import tools.doorbell as _doorbell
     import tools.ha_mcp_client as _ha_mcp
@@ -43,7 +45,7 @@ def test_manifest_and_tools_consistent():
     # decorators.  This makes the test order-independent regardless of what
     # other tests imported beforehand.
     clear_tools()
-    for mod in (_core, _scenes, _doorbell, _anomaly, _suggest, _ha_mcp):
+    for mod in (_core, _scenes, _doorbell, _anomaly, _suggest, _ha_mcp, _appliance, _area):
         importlib.reload(mod)
 
     tools = list_tools()
@@ -51,6 +53,8 @@ def test_manifest_and_tools_consistent():
         "list_entities",
         "get_entity_state",
         "call_service",
+        "call_service_in_area",
+        "list_areas",
         "set_scene",
         "list_scenes",
         "doorbell.snapshot",
@@ -59,6 +63,7 @@ def test_manifest_and_tools_consistent():
         "anomaly.scan",
         "suggest_automation",
         "ha.introspect",
+        "recent_appliance_activity",
     ]
     for cap_id in expected:
         assert cap_id in tools, f"Missing @tool registration for capability: {cap_id}"

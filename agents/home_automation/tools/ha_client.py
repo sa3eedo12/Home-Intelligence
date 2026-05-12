@@ -1,10 +1,30 @@
 from __future__ import annotations
 
+import ast
+import json
 import os
+import re
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+
+_ENTITY_ID_RE = re.compile(r"^[a-z_][a-z0-9_]*\.[A-Za-z0-9_]+$")
+
+
+def _looks_like_entity_id(value: str) -> bool:
+    return bool(_ENTITY_ID_RE.match(value.strip()))
+
+
+def _parse_template_list(rendered: str) -> list[Any]:
+    text = rendered.strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = ast.literal_eval(text)
+    return parsed if isinstance(parsed, list) else []
 
 
 class HAClient:
@@ -28,6 +48,55 @@ class HAClient:
         if domain is not None:
             states = [s for s in states if s.get("entity_id", "").startswith(f"{domain}.")]
         return states
+
+    async def render_template(self, template: str) -> str:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{self._base_url}/api/template",
+                headers=self._headers,
+                json={"template": template},
+            )
+            resp.raise_for_status()
+            return resp.text
+
+    async def resolve_entity(self, name_or_id: str) -> dict | None:
+        lookup = name_or_id.strip()
+        if not lookup:
+            return None
+        if _looks_like_entity_id(lookup):
+            try:
+                return await self.get_state(lookup)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    return None
+                raise
+
+        states = await self.list_states()
+        lookup_folded = lookup.casefold()
+        for state in states:
+            attrs = state.get("attributes", {}) or {}
+            friendly_name = str(attrs.get("friendly_name") or "")
+            if friendly_name.casefold() == lookup_folded:
+                return state
+        return None
+
+    async def get_areas(self) -> list[dict]:
+        template = "{{ areas() | map(attribute='name') | list }}"
+        try:
+            rendered = await self.render_template(template)
+            areas = _parse_template_list(rendered)
+        except Exception:
+            return []
+
+        normalized: list[dict] = []
+        for area in areas:
+            if isinstance(area, dict):
+                name = area.get("name") or area.get("area_id") or area.get("id")
+                if name:
+                    normalized.append({**area, "name": str(name)})
+            elif area not in (None, ""):
+                normalized.append({"name": str(area)})
+        return normalized
 
     async def list_states_enriched(
         self, domain: str | None = None, include_unavailable: bool = True
@@ -55,17 +124,8 @@ class HAClient:
             "\"state\": \"{{ s.state }}\"{{ '}' }}{% if not loop.last %},{% endif %}{% endfor %}]"
         )
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{self._base_url}/api/template",
-                    headers=self._headers,
-                    json={"template": template},
-                )
-                resp.raise_for_status()
-                rendered = resp.text
-            import json as _json
-
-            return _json.loads(rendered)
+            rendered = await self.render_template(template)
+            return json.loads(rendered)
         except Exception:
             # Fallback: plain states list with friendly_name from attributes.
             states = await self.list_states(domain=domain)

@@ -16,10 +16,20 @@ capabilities:
     side_effects: false
     cost: low
   - id: call_service
-    description: Call a Home Assistant service such as light.turn_on or scene.turn_on. Side-effecting.
+    description: Call a Home Assistant service such as light.turn_on or scene.turn_on. Side-effecting. Returns affected entity names when entity targets are provided.
     inputs: { domain: string, service: string, data: object }
     side_effects: true
     require_confirmation: false
+    cost: low
+  - id: call_service_in_area
+    description: Resolve a Home Assistant area name (for example kitchen), find all entities in that area for the requested domain, and call the service on each matching entity.
+    inputs: { area: string, domain: string, service: string, data: "object?" }
+    side_effects: true
+    require_confirmation: false
+    cost: low
+  - id: list_areas
+    description: List Home Assistant areas from the area registry so dashboards and LLM routing can target rooms by name.
+    side_effects: false
     cost: low
   - id: set_scene
     description: Activate a Home Assistant scene by friendly name.
@@ -68,8 +78,8 @@ capabilities:
     description: >
       Report recent state and program/cycle attributes for a household appliance
       (washer, dryer, dishwasher, oven, fridge, coffee machine, etc.). Returns
-      the current state, recent state changes, and integration-specific highlights
-      like 'program', 'remaining_time', 'finish_time'. Use this when the user asks
+      the current state, recent state changes, brand-aware friendly summaries, and
+      integration-specific highlights like 'program', 'remaining_time', 'finish_time'. Use this when the user asks
       "what was the last wash cycle", "is the dishwasher done", "what's the oven set to".
     inputs: { appliance: string, hours: "integer?" }
     side_effects: false
