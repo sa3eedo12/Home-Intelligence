@@ -6,6 +6,7 @@ import os
 import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from home_agents_sdk.embeddings import Embedder
 from home_agents_sdk.event_log import EventLogStore
 from home_agents_sdk.llm import OllamaClient
 from home_agents_sdk.npu import NPUClient
+from home_agents_sdk.reflection_store import ReflectionStore
 from home_agents_sdk.telemetry import get_logger
 from qdrant_client import AsyncQdrantClient
 from redis.asyncio import Redis
@@ -27,9 +29,10 @@ from .admin import router as admin_router
 from .dashboard import router as dashboard_router
 from .event_recorder import EventRecorder
 from .health import probe_lemonade, probe_ollama, probe_postgres, probe_qdrant, probe_redis
-from .notify import run_consumer
+from .notify import run_consumer, send_morning_brief
 from .policy_engine import PolicyEngine
 from .reactive import Reactive
+from .reflector import NightlyReflector
 from .registry import CapabilityRegistry
 from .router import Router
 from .scheduler import Scheduler
@@ -55,6 +58,41 @@ def _parse_agent_urls(raw: str) -> dict[str, str]:
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def _parse_timestamp(raw: Any) -> datetime | None:
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=UTC)
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+async def _reflection_status(app: FastAPI) -> dict[str, Any]:
+    store = getattr(app.state, "reflection_store", None)
+    if store is None:
+        store = ReflectionStore(getattr(app.state, "pool", None))
+    try:
+        briefs = await store.list_briefs(limit=1)
+    except Exception as exc:
+        logger.warning("reflection_status_failed", error=str(exc))
+        briefs = []
+    if not briefs:
+        return {"last_run_at": None, "age_hours": None, "healthy": False}
+    last_run_at = briefs[0].get("generated_at")
+    ts = _parse_timestamp(last_run_at)
+    if ts is None:
+        return {"last_run_at": last_run_at, "age_hours": None, "healthy": False}
+    age_hours = (datetime.now(UTC) - ts.astimezone(UTC)).total_seconds() / 3600
+    return {
+        "last_run_at": last_run_at,
+        "age_hours": round(age_hours, 2),
+        "healthy": age_hours < 25,
+    }
 
 
 async def _build_status(app: FastAPI) -> dict[str, Any]:
@@ -90,6 +128,7 @@ async def _build_status(app: FastAPI) -> dict[str, Any]:
     alert_narrative_raw = await app.state.redis.get("dashboard:alert_narrative")
     narrative = json.loads(narrative_raw) if narrative_raw else None
     alert_narrative = json.loads(alert_narrative_raw) if alert_narrative_raw else None
+    reflection = await _reflection_status(app)
 
     return {
         "stack": {
@@ -125,6 +164,7 @@ async def _build_status(app: FastAPI) -> dict[str, Any]:
         "recent_activity": recent_activity,
         "narrative": narrative,
         "alert_narrative": alert_narrative,
+        "reflection": reflection,
     }
 
 
@@ -180,8 +220,57 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     policy_engine = PolicyEngine(_load_yaml(HERE / "policies.yaml"), redis)
+    reasoner_model = os.environ.get("REASONER_MODEL", "qwen3.6:35b-a3b")
+    reflector = NightlyReflector(
+        pool=pool,
+        redis=redis,
+        llm=llm,
+        registry=registry,
+        reasoner_model=reasoner_model,
+        fallback_model=default_model,
+    )
+    tg_app_holder: dict[str, Any] = {}
+
+    async def _run_reflector(_inputs: dict[str, Any]) -> dict[str, Any]:
+        return await reflector.run_once()
+
+    async def _send_reflection_digest(inputs: dict[str, Any]) -> dict[str, Any]:
+        tg_app_ref = tg_app_holder.get("app")
+        if tg_app_ref is None:
+            return {"ok": False, "error": "telegram_unavailable"}
+        chat_id_raw = inputs.get("chat_id") or await redis.get("config:telegram_chat_id")
+        try:
+            chat_id = int(chat_id_raw or telegram_chat_id)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "telegram_chat_id_invalid"}
+        if chat_id <= 0:
+            return {"ok": False, "error": "telegram_chat_id_missing"}
+        briefs = await reflector.store.list_briefs(limit=1)
+        if not briefs:
+            await reflector.run_once()
+            briefs = await reflector.store.list_briefs(limit=1)
+        if not briefs:
+            return {"ok": False, "error": "no_morning_brief"}
+        brief = briefs[0]
+        await send_morning_brief(tg_app_ref, brief, chat_id)
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE morning_brief SET sent_at = now() WHERE id = $1", brief["id"]
+                )
+        except Exception as exc:
+            logger.warning("morning_brief_sent_mark_failed", error=str(exc))
+        return {"ok": True, "brief_id": brief.get("id"), "chat_id": chat_id}
+
     scheduler = Scheduler(
-        registry=registry, redis=redis, schedules_path=str(HERE / "schedules.yaml")
+        registry=registry,
+        redis=redis,
+        schedules_path=str(HERE / "schedules.yaml"),
+        timezone=os.environ.get("TZ", "Asia/Dubai"),
+        internal_callbacks={
+            "reflector.run": _run_reflector,
+            "morning_brief.send": _send_reflection_digest,
+        },
     )
     await scheduler.start()
     reactive = Reactive(
@@ -199,6 +288,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         admin_base_url=admin_base_url,
         redis=redis,
     )
+    tg_app_holder["app"] = tg_app
     await tg_app.initialize()
     await tg_app.start()
     if telegram_token and telegram_token != "replace-with-token-from-botfather":
@@ -248,6 +338,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.notify_task = notify_task
     app.state.scheduler = scheduler
     app.state.policy_engine = policy_engine
+    app.state.reflector = reflector
+    app.state.reflection_store = reflector.store
     app.state.reactive = reactive
     app.state.redis = redis
     app.state.redis_url = redis_url

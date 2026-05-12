@@ -1,4 +1,25 @@
 jobs:
+  - id: nightly_reflection
+    description: "Nightly self-improvement reflection"
+    trigger: cron
+    cron: { hour: 2, minute: 30 }
+    dispatch:
+      agent: __orchestrator__
+      capability: reflector.run
+      inputs: {}
+
+  - id: morning_reflection_digest
+    description: "Send the latest Morning Brief to Telegram"
+    trigger: cron
+    cron: {}
+    time_env: MORNING_BRIEF_HOUR
+    time_default: "07:30"
+    timezone_env: MORNING_BRIEF_TZ
+    dispatch:
+      agent: __orchestrator__
+      capability: morning_brief.send
+      inputs: {}
+
   - id: morning_brief
     description: "Daily morning briefing"
     trigger: cron

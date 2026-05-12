@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 import yaml
 from fastapi import APIRouter, HTTPException, Request
+from home_agents_sdk.reflection_store import ReflectionStore
 
 router = APIRouter(tags=["admin"])
 
@@ -13,6 +14,38 @@ router = APIRouter(tags=["admin"])
 def _load_yaml(path: str) -> dict:
     with open(path, encoding="utf-8") as fh:
         return yaml.safe_load(fh) or {}
+
+
+def _reflection_store(request: Request):
+    store = getattr(request.app.state, "reflection_store", None)
+    if store is not None:
+        return store
+    return ReflectionStore(getattr(request.app.state, "pool", None))
+
+
+def _format_proposal_markdown(proposal: dict[str, Any]) -> str:
+    evidence = proposal.get("evidence_event_ids") or []
+    lines = [
+        f"# {proposal.get('title', 'Reflection proposal')}",
+        "",
+        f"- Kind: `{proposal.get('kind', 'unknown')}`",
+        f"- Status: `{proposal.get('status', 'pending')}`",
+        f"- Confidence: {float(proposal.get('confidence') or 0.0):.2f}",
+        f"- Evidence event ids: {', '.join(str(item) for item in evidence) or 'n/a'}",
+        "",
+        "## Rationale",
+        str(proposal.get("rationale") or "No rationale provided."),
+        "",
+        "## Implementation prompt",
+        "Use the Home-Intelligence repository context. Implement the proposal above as a "
+        "small, well-tested change. Cite the evidence event ids before changing code, keep "
+        "the change local-first, and do not touch unrelated agent areas.",
+    ]
+    if proposal.get("cost_estimate"):
+        lines.insert(4, f"- Cost: {proposal['cost_estimate']}")
+    if proposal.get("impact_estimate"):
+        lines.insert(5, f"- Impact: {proposal['impact_estimate']}")
+    return "\n".join(lines)
 
 
 @router.post("/admin/reload-policies")
@@ -37,6 +70,24 @@ async def run_job(job_id: str, request: Request) -> dict:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown job id: {job_id}") from exc
     return {"ok": True, "job_id": job_id, "result": result}
+
+
+@router.post("/admin/reflection/run")
+async def run_reflection(request: Request) -> dict:
+    reflector = getattr(request.app.state, "reflector", None)
+    if reflector is None:
+        raise HTTPException(status_code=503, detail="reflection is not configured")
+    result = await reflector.run_once()
+    return {"ok": True, "result": result}
+
+
+@router.post("/admin/proposals/{proposal_id}/format")
+async def format_proposal(proposal_id: int, request: Request) -> dict:
+    proposals = await _reflection_store(request).list_proposals(limit=500)
+    proposal = next((item for item in proposals if int(item.get("id") or 0) == proposal_id), None)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail=f"Unknown proposal id: {proposal_id}")
+    return {"ok": True, "proposal_id": proposal_id, "markdown": _format_proposal_markdown(proposal)}
 
 
 @router.get("/admin/policies")

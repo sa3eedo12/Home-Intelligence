@@ -31,6 +31,41 @@ def _to_payload(raw: dict[str, Any], default_chat_id: int) -> NotifyPayload:
     )
 
 
+def _brief_lines(brief: dict[str, Any]) -> list[str]:
+    body = brief.get("body_json") or {}
+    summary = str(brief.get("summary") or body.get("summary") or "Morning Brief")
+    lines = ["*🌅 Morning Brief*", "", summary]
+    sections = [
+        ("Yesterday", body.get("yesterday") or []),
+        ("Questions for you", body.get("questions_for_you") or []),
+        ("Suggestions for me", body.get("suggestions_for_me") or []),
+        ("Code wishlist", body.get("code_wishlist") or []),
+    ]
+    for title, items in sections:
+        lines.extend(["", f"*{title}*"])
+        if not items:
+            lines.append("- None")
+            continue
+        for item in items[:5]:
+            if isinstance(item, dict):
+                text = item.get("title") or item.get("summary") or item.get("rationale") or item
+            else:
+                text = item
+            lines.append(f"- {str(text)[:240]}")
+    return lines
+
+
+async def send_morning_brief(tg_app: Any, brief: dict[str, Any], chat_id: int) -> None:
+    text = "\n".join(_brief_lines(brief))
+    if len(text) > 4000:
+        text = text[:3990].rstrip() + "\n…"
+    try:
+        await tg_app.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+    except Exception as exc:
+        logger.warning("morning_brief_markdown_send_failed", error=str(exc))
+        await tg_app.bot.send_message(chat_id=chat_id, text=text)
+
+
 async def run_consumer(
     redis: Redis, policy_engine: PolicyEngine, send_fn: Callable[..., Any]
 ) -> None:

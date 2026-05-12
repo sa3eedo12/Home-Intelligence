@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +28,9 @@ class JobInfo:
     last_status: str
 
 
+InternalCallback = Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]]
+
+
 class Scheduler:
     def __init__(
         self,
@@ -33,6 +38,7 @@ class Scheduler:
         redis: Redis,
         schedules_path: str,
         timezone: str = "Asia/Dubai",
+        internal_callbacks: dict[str, InternalCallback] | None = None,
     ) -> None:
         self._registry = registry
         self._redis = redis
@@ -40,10 +46,14 @@ class Scheduler:
         self._scheduler = AsyncIOScheduler(timezone=timezone)
         self._definitions: dict[str, dict[str, Any]] = {}
         self._history: dict[str, dict[str, str]] = {}
+        self._internal_callbacks = dict(internal_callbacks or {})
 
     @property
     def apscheduler(self) -> AsyncIOScheduler:
         return self._scheduler
+
+    def register_internal_callback(self, capability: str, callback: InternalCallback) -> None:
+        self._internal_callbacks[capability] = callback
 
     async def start(self) -> None:
         await self.reload()
@@ -67,7 +77,8 @@ class Scheduler:
     def _add_job(self, job_cfg: dict[str, Any]) -> None:
         trigger_type = job_cfg.get("trigger")
         if trigger_type == "cron":
-            trigger = CronTrigger(**job_cfg.get("cron", {}), timezone=self._scheduler.timezone)
+            cron_cfg = self._resolve_cron(job_cfg)
+            trigger = CronTrigger(**cron_cfg, timezone=self._job_timezone(job_cfg))
         elif trigger_type == "interval":
             trigger = IntervalTrigger(
                 **job_cfg.get("interval", {}), timezone=self._scheduler.timezone
@@ -92,11 +103,15 @@ class Scheduler:
         try:
             dispatch = cfg.get("dispatch", {})
             inputs = self._resolve_inputs(dispatch.get("inputs", {}))
-            result = await self._registry.dispatch(
-                dispatch.get("agent", ""),
-                dispatch.get("capability", ""),
-                inputs,
-            )
+            if dispatch.get("agent") == "__orchestrator__":
+                capability = str(dispatch.get("capability") or "")
+                result = await self._dispatch_internal(capability, inputs)
+            else:
+                result = await self._registry.dispatch(
+                    dispatch.get("agent", ""),
+                    dispatch.get("capability", ""),
+                    inputs,
+                )
 
             if cfg.get("notify"):
                 payload = self._build_notify_payload(cfg, dispatch, result)
@@ -129,14 +144,54 @@ class Scheduler:
             "capability": dispatch.get("capability"),
         }
 
+    async def _dispatch_internal(self, capability: str, inputs: dict[str, Any]) -> dict[str, Any]:
+        callback = self._internal_callbacks.get(capability)
+        if callback is None:
+            raise KeyError(f"Unknown orchestrator capability: {capability}")
+        result = callback(inputs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    def _resolve_cron(self, job_cfg: dict[str, Any]) -> dict[str, Any]:
+        cron = dict(job_cfg.get("cron", {}))
+        cron.pop("timezone", None)
+        if job_cfg.get("time_env"):
+            default_time = str(job_cfg.get("time_default") or "07:30")
+            raw_time = os.environ.get(str(job_cfg["time_env"])) or default_time
+            hour, minute = self._parse_hhmm(raw_time)
+            cron["hour"] = hour
+            cron["minute"] = minute
+        return {key: self._resolve_env_value(value) for key, value in cron.items()}
+
+    def _job_timezone(self, job_cfg: dict[str, Any]) -> Any:
+        timezone_env = job_cfg.get("timezone_env")
+        if timezone_env:
+            value = os.environ.get(str(timezone_env)) or os.environ.get("TZ")
+            if value:
+                return value
+        cron_tz = job_cfg.get("cron", {}).get("timezone")
+        if isinstance(cron_tz, str) and cron_tz.startswith("${") and cron_tz.endswith("}"):
+            return os.environ.get(cron_tz[2:-1], self._scheduler.timezone)
+        return cron_tz or self._scheduler.timezone
+
+    def _parse_hhmm(self, raw: str) -> tuple[int, int]:
+        parts = raw.strip().split(":", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Expected HH:MM time, got {raw!r}")
+        hour = int(parts[0])
+        minute = int(parts[1])
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise ValueError(f"Invalid HH:MM time: {raw!r}")
+        return hour, minute
+
+    def _resolve_env_value(self, value: Any) -> Any:
+        if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+            return os.environ.get(value[2:-1], "")
+        return value
+
     def _resolve_inputs(self, inputs: dict[str, Any]) -> dict[str, Any]:
-        resolved: dict[str, Any] = {}
-        for key, value in inputs.items():
-            if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
-                resolved[key] = os.environ.get(value[2:-1], "")
-            else:
-                resolved[key] = value
-        return resolved
+        return {key: self._resolve_env_value(value) for key, value in inputs.items()}
 
     def list_jobs(self) -> list[JobInfo]:
         rows: list[JobInfo] = []
