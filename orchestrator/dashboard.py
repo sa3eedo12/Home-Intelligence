@@ -237,7 +237,9 @@ async def morning_brief(request: Request) -> HTMLResponse:
     briefs = await store.list_briefs(limit=1)
     brief = briefs[0] if briefs else None
     body = (brief or {}).get("body_json") or {}
-    proposals = body.get("proposals") or await store.list_proposals(limit=50)
+    proposals = await store.list_proposals(limit=50)
+    if not proposals:
+        proposals = body.get("proposals") or []
     reflector = getattr(request.app.state, "reflector", None)
     reflection_state = reflector.status if reflector is not None else {"running": False}
     return templates.TemplateResponse(

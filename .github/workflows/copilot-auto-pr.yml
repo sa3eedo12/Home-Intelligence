@@ -1,0 +1,91 @@
+name: Copilot auto-PR for reflection proposal
+
+on:
+  workflow_dispatch:
+    inputs:
+      proposal_id:
+        description: "Reflection proposal id"
+        required: true
+      issue_number:
+        description: "GitHub issue number to comment on"
+        required: true
+      issue_url:
+        description: "Full URL to the GitHub issue"
+        required: true
+      title:
+        description: "Proposal title"
+        required: true
+      prompt_markdown:
+        description: "Markdown prompt for Copilot CLI"
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Comment on issue that Copilot is starting
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ github.event.inputs.issue_number }},
+              body: `🤖 Copilot is starting work on this. A PR will be opened shortly if I can complete the change automatically.`
+            });
+
+      - name: Set up branch
+        id: branch
+        run: |
+          set -euo pipefail
+          BR="copilot/reflection-${{ github.event.inputs.proposal_id }}-$(date +%s)"
+          git config user.name "Copilot Auto-PR"
+          git config user.email "223556219+Copilot@users.noreply.github.com"
+          git checkout -b "$BR"
+          echo "name=$BR" >> "$GITHUB_OUTPUT"
+
+      - name: Write the prompt to a file
+        run: |
+          mkdir -p .copilot/reflection
+          cat > ".copilot/reflection/proposal-${{ github.event.inputs.proposal_id }}.md" <<'EOF_PROPOSAL_PROMPT'
+          ${{ github.event.inputs.prompt_markdown }}
+          EOF_PROPOSAL_PROMPT
+
+      # IMPORTANT: This is the integration point for the Copilot CLI action.
+      # TODO: Replace the placeholder PR step with actions/copilot-cli@vN when
+      # it becomes available so the workflow implements the proposal directly.
+      - name: Open draft PR with the proposal as the body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="${{ steps.branch.outputs.name }}"
+          # Make a tiny no-op commit so the branch differs from main and a PR can open.
+          git add .copilot/reflection
+          git commit -F - <<'EOF_COMMIT_MESSAGE'
+          chore(reflection): record proposal #${{ github.event.inputs.proposal_id }}
+
+          This is a placeholder commit. The Copilot CLI action that fully implements
+          the proposal will run on a follow-up commit; until then this PR exists so
+          the proposal has a tracking artifact.
+
+          Closes #${{ github.event.inputs.issue_number }}
+
+          Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+          EOF_COMMIT_MESSAGE
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "[Reflection #${{ github.event.inputs.proposal_id }}] ${{ github.event.inputs.title }}" \
+            --body-file ".copilot/reflection/proposal-${{ github.event.inputs.proposal_id }}.md" \
+            --base main \
+            --head "$BRANCH" \
+            --draft

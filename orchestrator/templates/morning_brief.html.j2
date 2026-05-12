@@ -124,8 +124,25 @@
               </div>
               <div class="proposal-actions">
                 <button type="button" class="copy-prompt" data-proposal-id="{{ proposal.id }}">Copy prompt</button>
-                <button type="button" disabled title="Coming in Chapter 6">Open as GitHub issue</button>
-                <button type="button" disabled title="Coming in Chapter 6">Send to Copilot CLI on NAS</button>
+                <button type="button"
+                        class="open-issue"
+                        data-proposal-id="{{ proposal.id }}"
+                        {% if proposal.github_issue_url %}disabled{% endif %}>Open as GitHub issue</button>
+                <button type="button"
+                        class="copilot-dispatch"
+                        data-proposal-id="{{ proposal.id }}"
+                        {% if proposal.delivery_channel == 'copilot_dispatch' and proposal.dispatched_at and not proposal.dispatch_error %}disabled{% endif %}>Send to Copilot CLI on NAS</button>
+                <div class="proposal-delivery" aria-live="polite">
+                  {% if proposal.github_issue_url %}
+                    <a href="{{ proposal.github_issue_url }}" target="_blank" rel="noreferrer">GitHub issue</a>
+                  {% endif %}
+                  {% if proposal.github_pr_url %}
+                    <a href="{{ proposal.github_pr_url }}" target="_blank" rel="noreferrer">GitHub PR</a>
+                  {% endif %}
+                  {% if proposal.dispatch_error %}
+                    <small class="delivery-error">Delivery failed: {{ proposal.dispatch_error }}</small>
+                  {% endif %}
+                </div>
               </div>
             </article>
           {% else %}

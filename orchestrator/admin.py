@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from home_agents_sdk.reflection_store import ReflectionStore
 from home_agents_sdk.telemetry import get_logger
 
+from .github_client import GitHubClientError
 from .safety import SafetyPolicy
 
 router = APIRouter(tags=["admin"])
@@ -52,6 +53,71 @@ def _format_proposal_markdown(proposal: dict[str, Any]) -> str:
     if proposal.get("impact_estimate"):
         lines.insert(5, f"- Impact: {proposal['impact_estimate']}")
     return "\n".join(lines)
+
+
+_GITHUB_NOT_CONFIGURED_DETAIL = (
+    "GitHub delivery is not configured. Set GITHUB_REPO_TOKEN and GITHUB_REPO."
+)
+_GITHUB_NOT_CONFIGURED_ERROR = "github not configured"
+_COPILOT_WORKFLOW = "copilot-auto-pr.yml"
+
+
+async def _find_proposal(store: Any, proposal_id: int) -> dict[str, Any]:
+    proposals = await store.list_proposals(limit=500)
+    proposal = next(
+        (item for item in proposals if int(item.get("id") or 0) == proposal_id),
+        None,
+    )
+    if proposal is None:
+        raise HTTPException(status_code=404, detail=f"Unknown proposal id: {proposal_id}")
+    return proposal
+
+
+def _github_client(request: Request) -> Any | None:
+    client = getattr(request.app.state, "github_client", None)
+    if client is None:
+        return None
+    if not bool(getattr(client, "is_configured", True)):
+        return None
+    return client
+
+
+async def _record_delivery(
+    store: Any,
+    proposal_id: int,
+    *,
+    channel: str,
+    github_issue_url: str | None = None,
+    github_pr_url: str | None = None,
+    error: str | None = None,
+) -> None:
+    record = getattr(store, "record_delivery", None)
+    if callable(record):
+        await record(
+            proposal_id,
+            channel=channel,
+            github_issue_url=github_issue_url,
+            github_pr_url=github_pr_url,
+            error=error,
+        )
+
+
+async def _raise_github_not_configured(store: Any, proposal_id: int, *, channel: str) -> None:
+    await _record_delivery(
+        store,
+        proposal_id,
+        channel=channel,
+        error=_GITHUB_NOT_CONFIGURED_ERROR,
+    )
+    raise HTTPException(status_code=503, detail=_GITHUB_NOT_CONFIGURED_DETAIL)
+
+
+def _proposal_issue_title(proposal_id: int, proposal: dict[str, Any]) -> str:
+    return f"[Reflection #{proposal_id}] {proposal.get('title') or 'Reflection proposal'}"
+
+
+def _proposal_labels(proposal: dict[str, Any]) -> list[str]:
+    return ["reflection", f"kind:{proposal.get('kind') or 'unknown'}"]
 
 
 _KNOWLEDGE_CONFIRM_METHODS = {
@@ -249,11 +315,128 @@ async def explain_safety(request: Request) -> dict[str, Any]:
 
 @router.post("/admin/proposals/{proposal_id}/format")
 async def format_proposal(proposal_id: int, request: Request) -> dict:
-    proposals = await _reflection_store(request).list_proposals(limit=500)
-    proposal = next((item for item in proposals if int(item.get("id") or 0) == proposal_id), None)
-    if proposal is None:
-        raise HTTPException(status_code=404, detail=f"Unknown proposal id: {proposal_id}")
+    proposal = await _find_proposal(_reflection_store(request), proposal_id)
     return {"ok": True, "proposal_id": proposal_id, "markdown": _format_proposal_markdown(proposal)}
+
+
+@router.post("/admin/proposals/{proposal_id}/github-issue")
+async def open_proposal_as_issue(proposal_id: int, request: Request) -> dict:
+    store = _reflection_store(request)
+    proposal = await _find_proposal(store, proposal_id)
+    if proposal.get("github_issue_url"):
+        return {
+            "ok": True,
+            "already_dispatched": True,
+            "url": proposal["github_issue_url"],
+        }
+
+    client = _github_client(request)
+    if client is None:
+        await _raise_github_not_configured(store, proposal_id, channel="github_issue")
+
+    body = _format_proposal_markdown(proposal)
+    try:
+        issue = await client.open_issue(
+            title=_proposal_issue_title(proposal_id, proposal),
+            body=body,
+            labels=_proposal_labels(proposal),
+        )
+    except GitHubClientError as exc:
+        await _record_delivery(
+            store,
+            proposal_id,
+            channel="github_issue",
+            error=str(exc),
+        )
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    url = str(issue.get("html_url") or "")
+    await _record_delivery(
+        store,
+        proposal_id,
+        channel="github_issue",
+        github_issue_url=url,
+    )
+    return {
+        "ok": True,
+        "url": url,
+        "number": issue.get("number"),
+        "already_dispatched": False,
+    }
+
+
+@router.post("/admin/proposals/{proposal_id}/copilot-dispatch")
+async def dispatch_to_copilot(proposal_id: int, request: Request) -> dict:
+    store = _reflection_store(request)
+    proposal = await _find_proposal(store, proposal_id)
+    if proposal.get("github_pr_url") or (
+        proposal.get("dispatched_at") and not proposal.get("dispatch_error")
+    ):
+        return {
+            "ok": True,
+            "already_dispatched": True,
+            "issue_url": proposal.get("github_issue_url"),
+            "pr_url": proposal.get("github_pr_url"),
+            "message": "This proposal was already dispatched.",
+        }
+
+    client = _github_client(request)
+    if client is None:
+        await _raise_github_not_configured(store, proposal_id, channel="copilot_dispatch")
+
+    body = _format_proposal_markdown(proposal)
+    try:
+        issue = await client.open_issue(
+            title=_proposal_issue_title(proposal_id, proposal),
+            body=body,
+            labels=_proposal_labels(proposal),
+        )
+    except GitHubClientError as exc:
+        await _record_delivery(
+            store,
+            proposal_id,
+            channel="copilot_dispatch",
+            error=str(exc),
+        )
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    issue_number = str(issue.get("number") or "")
+    issue_url = str(issue.get("html_url") or "")
+    inputs = {
+        "proposal_id": str(proposal_id),
+        "issue_number": issue_number,
+        "issue_url": issue_url,
+        "title": str(proposal.get("title") or "Reflection proposal"),
+        "prompt_markdown": body,
+    }
+    try:
+        await client.dispatch_workflow(
+            _COPILOT_WORKFLOW,
+            os.environ.get("GITHUB_WORKFLOW_REF", "main"),
+            inputs,
+        )
+    except GitHubClientError as exc:
+        await _record_delivery(
+            store,
+            proposal_id,
+            channel="copilot_dispatch",
+            github_issue_url=issue_url,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    await _record_delivery(
+        store,
+        proposal_id,
+        channel="copilot_dispatch",
+        github_issue_url=issue_url,
+    )
+    return {
+        "ok": True,
+        "issue_url": issue_url,
+        "already_dispatched": False,
+        "message": "Copilot will respond on that issue and open a PR if it can.",
+    }
 
 
 @router.get("/admin/policies")

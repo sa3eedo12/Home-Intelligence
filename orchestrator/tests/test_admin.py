@@ -54,9 +54,14 @@ def _build_app() -> FastAPI:
                     "status": "pending",
                     "cost_estimate": "small",
                     "impact_estimate": "fewer missed appointments",
+                    "github_issue_url": None,
+                    "github_pr_url": None,
+                    "dispatched_at": None,
+                    "dispatch_error": None,
                 }
             ]
-        )
+        ),
+        record_delivery=AsyncMock(),
     )
     app.state.activity_aggregator = SimpleNamespace(
         snapshot=lambda: {"agents": [], "window_minutes": 5, "total_events": 0},
@@ -349,6 +354,131 @@ def test_format_proposal_returns_404_for_unknown_id() -> None:
     with TestClient(app) as client:
         resp = client.post("/admin/proposals/999/format")
     assert resp.status_code == 404
+
+
+def test_open_issue_creates_and_records() -> None:
+    app = _build_app()
+    app.state.github_client = SimpleNamespace(
+        is_configured=True,
+        open_issue=AsyncMock(
+            return_value={"number": 42, "html_url": "https://github.com/o/r/issues/42"}
+        ),
+    )
+
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/7/github-issue")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "ok": True,
+        "url": "https://github.com/o/r/issues/42",
+        "number": 42,
+        "already_dispatched": False,
+    }
+    app.state.github_client.open_issue.assert_awaited_once()
+    _, kwargs = app.state.github_client.open_issue.await_args
+    assert kwargs["title"] == "[Reflection #7] Add retry tests"
+    assert "# Add retry tests" in kwargs["body"]
+    assert kwargs["labels"] == ["reflection", "kind:code_change"]
+    app.state.reflection_store.record_delivery.assert_awaited_once_with(
+        7,
+        channel="github_issue",
+        github_issue_url="https://github.com/o/r/issues/42",
+        github_pr_url=None,
+        error=None,
+    )
+
+
+def test_open_issue_returns_already_dispatched_when_url_present() -> None:
+    app = _build_app()
+    app.state.reflection_store.list_proposals.return_value[0]["github_issue_url"] = (
+        "https://github.com/o/r/issues/7"
+    )
+    app.state.github_client = SimpleNamespace(is_configured=False)
+
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/7/github-issue")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "ok": True,
+        "already_dispatched": True,
+        "url": "https://github.com/o/r/issues/7",
+    }
+    app.state.reflection_store.record_delivery.assert_not_awaited()
+
+
+def test_open_issue_503_when_unconfigured() -> None:
+    app = _build_app()
+    app.state.github_client = SimpleNamespace(is_configured=False)
+
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/7/github-issue")
+
+    assert resp.status_code == 503
+    assert "GITHUB_REPO_TOKEN" in resp.json()["detail"]
+    app.state.reflection_store.record_delivery.assert_awaited_once_with(
+        7,
+        channel="github_issue",
+        github_issue_url=None,
+        github_pr_url=None,
+        error="github not configured",
+    )
+
+
+def test_copilot_dispatch_creates_issue_and_dispatches_workflow() -> None:
+    app = _build_app()
+    app.state.github_client = SimpleNamespace(
+        is_configured=True,
+        open_issue=AsyncMock(
+            return_value={"number": 43, "html_url": "https://github.com/o/r/issues/43"}
+        ),
+        dispatch_workflow=AsyncMock(return_value={"ok": True}),
+    )
+
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/7/copilot-dispatch")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["issue_url"] == "https://github.com/o/r/issues/43"
+    assert body["already_dispatched"] is False
+    app.state.github_client.open_issue.assert_awaited_once()
+    app.state.github_client.dispatch_workflow.assert_awaited_once()
+    args = app.state.github_client.dispatch_workflow.await_args.args
+    assert args[0] == "copilot-auto-pr.yml"
+    assert args[1] == "main"
+    assert args[2]["proposal_id"] == "7"
+    assert args[2]["issue_number"] == "43"
+    assert args[2]["issue_url"] == "https://github.com/o/r/issues/43"
+    assert "# Add retry tests" in args[2]["prompt_markdown"]
+    app.state.reflection_store.record_delivery.assert_awaited_once_with(
+        7,
+        channel="copilot_dispatch",
+        github_issue_url="https://github.com/o/r/issues/43",
+        github_pr_url=None,
+        error=None,
+    )
+
+
+def test_copilot_dispatch_503_when_unconfigured() -> None:
+    app = _build_app()
+    app.state.github_client = None
+
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/7/copilot-dispatch")
+
+    assert resp.status_code == 503
+    assert "GITHUB_REPO" in resp.json()["detail"]
+    app.state.reflection_store.record_delivery.assert_awaited_once_with(
+        7,
+        channel="copilot_dispatch",
+        github_issue_url=None,
+        github_pr_url=None,
+        error="github not configured",
+    )
 
 
 def test_reflection_run_kicks_off_background_and_returns_immediately() -> None:

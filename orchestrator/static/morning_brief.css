@@ -118,6 +118,30 @@ button:disabled {
   opacity: 0.45;
 }
 
+.proposal-delivery {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.78rem;
+}
+
+.proposal-delivery a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.proposal-delivery a:hover {
+  text-decoration: underline;
+}
+
+.delivery-status,
+.delivery-help {
+  color: var(--muted);
+}
+
+.delivery-error {
+  color: var(--danger);
+}
+
 @media (max-width: 720px) {
   .proposal-card {
     grid-template-columns: 1fr;

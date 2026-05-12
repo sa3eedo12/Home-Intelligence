@@ -59,7 +59,9 @@ def test_morning_brief_page_renders_synthetic_brief() -> None:
     assert "Suggestions for me" in resp.text
     assert "Code wishlist" in resp.text
     assert "Copy prompt" in resp.text
-    assert "Coming in Chapter 6" in resp.text
+    assert "Open as GitHub issue" in resp.text
+    assert "Send to Copilot CLI on NAS" in resp.text
+    assert "Coming in Chapter 6" not in resp.text
     assert "health-banner" in resp.text
     assert "/static/morning_brief.css" in resp.text
     assert "/static/morning_brief.js" in resp.text

@@ -41,7 +41,15 @@ def _format_ts(value: Any) -> str | None:
 
 def _row_dict(row: Any) -> dict[str, Any]:
     data = dict(row)
-    for key in ("ts", "generated_at", "sent_at", "created_at", "resolved_at", "rejected_at"):
+    for key in (
+        "ts",
+        "generated_at",
+        "sent_at",
+        "created_at",
+        "resolved_at",
+        "rejected_at",
+        "dispatched_at",
+    ):
         if key in data:
             data[key] = _format_ts(data.get(key))
     for key in ("payload", "body_json", "value"):
@@ -168,7 +176,8 @@ class ReflectionStore:
                     """
                     SELECT id, kind, title, rationale, evidence_event_ids, confidence,
                            cost_estimate, impact_estimate, status, created_at, resolved_at,
-                           delivery_channel, rejected_at
+                           delivery_channel, rejected_at, github_issue_url, github_pr_url,
+                           dispatched_at, dispatch_error
                     FROM proposals
                     WHERE ($1::text IS NULL OR status = $1::text)
                     ORDER BY created_at DESC
@@ -275,6 +284,45 @@ class ReflectionStore:
                 logger.warning(
                     "reflection_store_query_failed",
                     operation="update_proposal_status",
+                    error=str(exc),
+                )
+
+    async def record_delivery(
+        self,
+        proposal_id: int,
+        *,
+        channel: str,
+        github_issue_url: str | None = None,
+        github_pr_url: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        if channel not in {"clipboard", "github_issue", "copilot_dispatch"}:
+            logger.warning("reflection_store_invalid_delivery_channel", channel=channel)
+            return
+        async with self._connection("record_delivery") as conn:
+            if conn is None:
+                return
+            try:
+                await conn.execute(
+                    """
+                    UPDATE proposals
+                    SET delivery_channel = $2,
+                        dispatched_at = now(),
+                        github_issue_url = COALESCE($3, github_issue_url),
+                        github_pr_url = COALESCE($4, github_pr_url),
+                        dispatch_error = COALESCE($5, dispatch_error)
+                    WHERE id = $1
+                    """,
+                    int(proposal_id),
+                    channel,
+                    github_issue_url,
+                    github_pr_url,
+                    error,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "reflection_store_query_failed",
+                    operation="record_delivery",
                     error=str(exc),
                 )
 
