@@ -124,6 +124,27 @@ class CapabilityRegistry:
     def get_capability(self, agent: str, capability: str) -> dict | None:
         return self._capabilities.get((agent, capability))
 
+    def list_capabilities(self) -> list[dict[str, Any]]:
+        """Return all known capabilities as flat dicts for prompt-building.
+
+        Each entry has at least `agent`, `id`, and `description` keys; other
+        manifest fields (`inputs`, `cost`, `side_effects`,
+        `require_confirmation`) are passed through when present.
+        """
+        out: list[dict[str, Any]] = []
+        for (agent, cap_id), meta in self._capabilities.items():
+            entry: dict[str, Any] = {
+                "agent": agent,
+                "id": cap_id,
+                "description": meta.get("description", ""),
+            }
+            for k in ("inputs", "cost", "side_effects", "require_confirmation"):
+                if k in meta:
+                    entry[k] = meta[k]
+            out.append(entry)
+        out.sort(key=lambda e: (e["agent"], e["id"]))
+        return out
+
     def capability_counts(self) -> dict[str, int]:
         counts = {agent: 0 for agent in self._agent_urls}
         for agent, _capability in self._capabilities:

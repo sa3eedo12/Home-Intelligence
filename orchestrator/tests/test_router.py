@@ -25,7 +25,22 @@ def _make_router(npu_response, dispatch_response=None, semantic_results=None):
 
     registry = MagicMock()
     registry.agents = MagicMock(return_value=["home_automation"])
-    registry.get_capability = MagicMock(return_value=None)
+    # Treat any (agent, capability) lookup as registered for the existing
+    # happy-path tests; specific tests below override this.
+    registry.get_capability = MagicMock(return_value={"description": "test capability"})
+    registry.list_capabilities = MagicMock(
+        return_value=[
+            {"agent": "home_automation", "id": "list_entities", "description": "list HA entities"},
+            {"agent": "home_automation", "id": "get_entity_state", "description": "get state"},
+            {"agent": "home_automation", "id": "call_service", "description": "call HA service"},
+            {"agent": "home_automation", "id": "set_scene", "description": "activate scene"},
+            {
+                "agent": "home_automation",
+                "id": "doorbell.last_visitor",
+                "description": "last doorbell visitor",
+            },
+        ]
+    )
     registry.dispatch = AsyncMock(return_value=dispatch_response or {"ok": True})
     registry.semantic_search = AsyncMock(return_value=semantic_results or [])
 
@@ -151,8 +166,14 @@ async def test_router_falls_back_to_ollama_when_npu_unavailable():
 
     registry = MagicMock()
     registry.agents = MagicMock(return_value=["home_automation"])
-    registry.get_capability = MagicMock(return_value=None)
+    registry.list_capabilities = MagicMock(
+        return_value=[
+            {"agent": "home_automation", "id": "list_entities", "description": "list entities"}
+        ]
+    )
+    registry.get_capability = MagicMock(return_value={"description": "list entities"})
     registry.dispatch = AsyncMock(return_value={"ok": True, "result": ["light.x"]})
+    registry.semantic_search = AsyncMock(return_value=[])
 
     router = Router(
         npu=npu,
@@ -186,6 +207,7 @@ async def test_router_returns_no_capability_when_both_backends_fail():
 
     registry = MagicMock()
     registry.agents = MagicMock(return_value=["home_automation"])
+    registry.list_capabilities = MagicMock(return_value=[])
     registry.get_capability = MagicMock(return_value=None)
     registry.dispatch = AsyncMock()
     registry.semantic_search = AsyncMock(return_value=[])

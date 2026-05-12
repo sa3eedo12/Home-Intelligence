@@ -12,16 +12,32 @@ from .registry import CapabilityRegistry
 logger = get_logger("router")
 
 SYSTEM_PROMPT = """You are a strict JSON router for a single-user home automation assistant.
+You MUST pick `agent` and `capability` from the EXACT list of capabilities the user message
+provides. Do NOT invent capability names. If nothing in the list fits, return null for both.
 Reply ONLY with compact JSON matching this schema (no prose, no code fences):
 {
- "agent": "<one of the available agent ids, or null>",
- "capability": "<a capability id from that agent, or null>",
+ "agent": "<exact agent id from the list, or null>",
+ "capability": "<exact capability id from the list, or null>",
  "inputs": { "<param>": <value>, ... },
  "needs_confirmation": <bool>,
  "reason": "<one short sentence>"
 }"""
 
 MIN_SEMANTIC_SCORE = 0.55
+
+
+def _format_capability_inventory(caps: list[dict[str, Any]]) -> str:
+    """Format the registry's capability list into a compact prompt section."""
+    if not caps:
+        return "(no capabilities registered)"
+    lines = []
+    for cap in caps:
+        line = f"- {cap['agent']}.{cap['id']}: {cap.get('description', '')}"
+        inputs = cap.get("inputs")
+        if inputs:
+            line += f" | inputs: {json.dumps(inputs, ensure_ascii=False)}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 class Router:
@@ -46,6 +62,16 @@ class Router:
         inputs = classification.get("inputs", {})
         needs_confirmation = classification.get("needs_confirmation", False)
         reason = classification.get("reason", "")
+
+        # Validate the LLM's pick exists. If not, fall through to semantic search.
+        if agent and capability and self._registry.get_capability(agent, capability) is None:
+            logger.info(
+                "router_classify_invalid_capability",
+                agent=agent,
+                capability=capability,
+            )
+            agent = None
+            capability = None
 
         if agent is None or capability is None:
             fallback = await self._semantic_fallback(text)
@@ -78,9 +104,15 @@ class Router:
             return {"reply": f"Error dispatching request: {exc}"}
 
     async def _classify(self, text: str) -> dict[str, Any]:
-        agents = self._registry.agents()
+        capabilities = self._registry.list_capabilities()
+        agents = sorted({cap["agent"] for cap in capabilities})
         agent_list = ", ".join(agents) if agents else "none"
-        user_msg = f"Available agents: {agent_list}\n\nUser request: {text}"
+        capability_block = _format_capability_inventory(capabilities)
+        user_msg = (
+            f"Available agents: {agent_list}\n\n"
+            f"Available capabilities (use these EXACT ids):\n{capability_block}\n\n"
+            f"User request: {text}"
+        )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_msg},
