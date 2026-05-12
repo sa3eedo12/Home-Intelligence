@@ -58,7 +58,8 @@ services:
       - qdrant-data:/qdrant/storage
       - ${TRUENAS_APPDATA}/infra/qdrant/config.yaml:/qdrant/config/config.yaml:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz"]
+      # qdrant image does not ship `curl`; use bash's /dev/tcp probe instead.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -85,10 +86,13 @@ services:
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:11434/api/version"]
+      # Recent ollama:rocm images have stripped `curl`; use the ollama
+      # binary itself which is guaranteed to be present.
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 6
+      start_period: 30s
     networks: [agents]
 
   lemonade:
@@ -134,10 +138,14 @@ services:
     volumes:
       - lemonade-models:/models
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health | grep -q ok"]
+      # Use python (guaranteed in this image) for the probe; busybox
+      # wget exists but its exit code semantics with broken pipes can
+      # confuse the healthcheck on cold start.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=2).read()==b'ok' else 1)\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 6
+      start_period: 5s
     networks: [agents]
 
   orchestrator:
