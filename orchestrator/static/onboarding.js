@@ -118,10 +118,9 @@
   // Always attach the submit/click listeners FIRST so they survive any
   // exception in rendering helpers below. The handlers themselves no-op
   // when the relevant DOM nodes aren't on the page.
-  document.addEventListener('submit', async (event) => {
-    const form = event.target;
-    if (!(form instanceof HTMLFormElement) || form.id !== 'member-form') return;
-    event.preventDefault();
+
+  async function submitMemberForm(form) {
+    if (!(form instanceof HTMLFormElement)) return;
     const button = form.querySelector('button[type="submit"]');
     try {
       if (button) button.setAttribute('disabled', 'disabled');
@@ -134,7 +133,39 @@
       window.alert(err.message || String(err));
       if (button) button.removeAttribute('disabled');
     }
+  }
+
+  // Document-delegated submit (covers the normal Enter-in-input + button-click path).
+  document.addEventListener('submit', (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || form.id !== 'member-form') return;
+    event.preventDefault();
+    submitMemberForm(form);
   });
+
+  // Belt-and-suspenders: also bind directly on the form element AND on the
+  // submit button. Some browser configurations don't bubble the submit event
+  // to document when the form has a `javascript:` action or other oddness.
+  const memberForm = document.getElementById('member-form');
+  if (memberForm instanceof HTMLFormElement) {
+    memberForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      submitMemberForm(memberForm);
+    });
+    const saveBtn = memberForm.querySelector('button[type="submit"]');
+    if (saveBtn instanceof HTMLButtonElement) {
+      saveBtn.addEventListener('click', (event) => {
+        // Don't preventDefault here — let the form's submit pipeline run so
+        // the browser still validates required fields. We just guarantee
+        // submitMemberForm gets called even if the submit event somehow
+        // doesn't reach the listeners above.
+        if (typeof memberForm.requestSubmit === 'function') {
+          event.preventDefault();
+          memberForm.requestSubmit();
+        }
+      });
+    }
+  }
 
   document.addEventListener('click', async (event) => {
     const target = event.target;
