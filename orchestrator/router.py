@@ -92,6 +92,11 @@ class Router:
         if cap_meta and cap_meta.get("require_confirmation"):
             needs_confirmation = True
 
+        # Guarantee personal_assistant.chat always receives the user text,
+        # even when the LLM classifier forgets to populate `inputs.text`.
+        if agent == "personal_assistant" and capability == "chat":
+            inputs = {"text": text}
+
         if needs_confirmation:
             return {
                 "reply": f"I need your confirmation: {reason}",

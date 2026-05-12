@@ -401,3 +401,34 @@ async def test_no_match_and_no_chat_capability_returns_friendly_message():
     router._registry.semantic_search = AsyncMock(return_value=[])  # noqa: SLF001
     result = await router.handle("play jazz", "user1")
     assert result == {"reply": "I don't have a capability for that yet."}
+
+
+@pytest.mark.asyncio
+async def test_chat_inputs_always_filled_with_user_text():
+    """Even if the LLM classifier picks chat but omits the text input, the
+    router must always pass the user's text to chat()."""
+    bad_classification = {
+        "agent": "personal_assistant",
+        "capability": "chat",
+        "inputs": {},  # LLM forgot the text
+        "needs_confirmation": False,
+        "reason": "smalltalk",
+    }
+    npu_resp = {"choices": [{"message": {"content": json.dumps(bad_classification)}}]}
+    router = _make_router(
+        npu_resp,
+        dispatch_response={
+            "ok": True,
+            "result": {"reply": "Hi!", "already_natural": True},
+        },
+    )
+    router._registry.get_capability = MagicMock(  # noqa: SLF001
+        side_effect=lambda agent, cap: (
+            {"description": "chat"} if (agent, cap) == ("personal_assistant", "chat") else None
+        )
+    )
+
+    result = await router.handle("hi there", "user1")
+    assert result == {"reply": "Hi!"}
+    args, _ = router._registry.dispatch.call_args  # noqa: SLF001
+    assert args == ("personal_assistant", "chat", {"text": "hi there"})
