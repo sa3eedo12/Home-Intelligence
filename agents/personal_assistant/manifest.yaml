@@ -52,6 +52,12 @@ capabilities:
     description: Compose tomorrow's appointments, tonight's reminders, and recent alerts.
     side_effects: false
     cost: medium
+  - id: infer
+    description: Infer one conservative episodic memory from the user's context and recent events, returning a proposed action for confirmation.
+    inputs: { context: string }
+    side_effects: false
+    cost: medium
+    llm: qwen3:8b
 subscribes:
   - events.system
   - events.home

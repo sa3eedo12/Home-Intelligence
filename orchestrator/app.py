@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from home_agents_sdk.bus import EventBus
 from home_agents_sdk.embeddings import Embedder
+from home_agents_sdk.event_log import EventLogStore
 from home_agents_sdk.llm import OllamaClient
 from home_agents_sdk.npu import NPUClient
 from home_agents_sdk.telemetry import get_logger
@@ -24,6 +25,7 @@ from redis.asyncio import Redis
 from .activity import ActivityAggregator
 from .admin import router as admin_router
 from .dashboard import router as dashboard_router
+from .event_recorder import EventRecorder
 from .health import probe_lemonade, probe_ollama, probe_postgres, probe_qdrant, probe_redis
 from .notify import run_consumer
 from .policy_engine import PolicyEngine
@@ -233,6 +235,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     warmup_task = asyncio.create_task(_warm_models(), name="orchestrator-warmup")
 
+    event_recorder = EventRecorder(
+        redis,
+        EventLogStore(pool=pool, qdrant=qdrant, embedder=embedder),
+    )
+    await event_recorder.start()
+
     app.state.pool = pool
     app.state.registry = registry
     app.state.router = router
@@ -247,6 +255,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ollama_url = ollama_url
     app.state.lemonade_url = lemonade_url
     app.state.activity_aggregator = activity_aggregator
+    app.state.event_recorder = event_recorder
     app.state.status_provider = lambda: _build_status(app)
 
     async def _reload_from_signal() -> None:
@@ -266,6 +275,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     await reactive.stop()
+    await event_recorder.stop()
     await activity_aggregator.stop()
     await scheduler.shutdown()
     notify_task.cancel()
