@@ -23,33 +23,40 @@ runs without authentication (single-user, LAN-only).
 
 - TrueNAS admin (root) shell access (Web Shell or SSH).
 - A storage pool you're happy to put app data on. The example uses `tank`.
-- A GPU pool isolated for app use (`System Settings → Advanced → GPU → Isolated GPU Devices`).
 - Public-pull access to the Home-Intelligence images on GHCR (run the
   "Make GHCR packages public" workflow once, as documented in
   [DEPLOY-MINISCLOUD.md](DEPLOY-MINISCLOUD.md)).
 
-## Step 1 — Isolate the GPU for apps
+## Step 1 — Verify GPU and NPU are visible to the host
 
-The Radeon 890M needs to be released from the host kernel before the
-Ollama ROCm container can claim `/dev/kfd` and `/dev/dri`.
+> ⚠️ **Do not isolate the GPU** in System Settings → Advanced → GPU.
+> That setting binds the GPU to `vfio-pci` for VM passthrough and would
+> stop *every* container (yours or anyone else's) from using it. Apps
+> share the GPU through Docker `devices:` + `group_add:`, not through
+> isolation.
 
-1. Open the TrueNAS UI.
-2. Go to **System Settings → Advanced**.
-3. Under **GPU Configuration → Isolated GPU PCI IDs**, select the AMD GPU.
-4. Apply, then reboot when prompted.
-5. After reboot, confirm the GPU is no longer attached to the host:
-   ```bash
-   ls /dev/kfd /dev/dri
-   ```
-   Both should exist; if `/dev/kfd` is missing, the kernel ROCm modules
-   may not be loaded — install them via `apt` inside a debug shell or
-   move to a TrueNAS build that ships them by default.
+In a Web Shell:
 
-> ℹ️ The XDNA 2 NPU (`/dev/accel/accel0`) does not require an isolation
-> step on TrueNAS; it just needs the `amdxdna` kernel module, which
-> ships with recent TrueNAS SCALE kernels. If `ls /dev/accel/accel0`
-> fails, this guide cannot enable the NPU and you should use the
-> CPU-only [MinisCloud deployment](DEPLOY-MINISCLOUD.md) instead.
+```bash
+ls /dev/kfd /dev/dri /dev/accel/accel0
+lsmod | grep -E "amdgpu|amdkfd|amdxdna"
+```
+
+You should see all three device entries and the modules loaded. If
+`/dev/accel/accel0` is missing, your TrueNAS kernel doesn't ship the
+`amdxdna` driver — see the troubleshooting section below.
+
+The Home-Intelligence stack will share these devices with any other
+Apps you have that also use the iGPU/NPU (Plex hardware transcoding,
+Jellyfin, Frigate, Immich ML, stable-diffusion, etc.). The driver
+multiplexes them; the only real constraint is **VRAM contention** —
+the iGPU's video memory is shared, so tune `OLLAMA_MAX_LOADED_MODELS`
+and `OLLAMA_KEEP_ALIVE` (see Step 3) so Ollama doesn't starve your
+other GPU-using apps.
+
+> ℹ️ If you actually want to dedicate the GPU to a VM, use TrueNAS's
+> isolation setting — but then you cannot run this stack on the host.
+> Pick one or the other.
 
 ## Step 2 — Create the dataset layout
 
@@ -105,6 +112,24 @@ or `$APPDATA/.env`). Edit at least these values:
 
 If `TRUENAS_APPDATA` is wrong, app deployment fails with a generic
 `Mount path is invalid` error.
+
+### Sharing the iGPU with other Apps
+
+If you already run other GPU-using containers (Plex, Jellyfin, Frigate,
+Immich ML, stable-diffusion, etc.), tune Ollama's footprint so it
+doesn't starve them. Add or override these in the env file:
+
+```env
+# Cap how much Ollama keeps resident on the iGPU at once:
+OLLAMA_MAX_LOADED_MODELS=1     # default in compose is 2
+OLLAMA_NUM_PARALLEL=1          # default is 2
+OLLAMA_KEEP_ALIVE=5m           # default is 30m; eject idle models sooner
+```
+
+The amdkfd driver multiplexes work across containers, so simultaneous
+use is fine — only VRAM is the bottleneck. If you have a discrete GPU
+in addition to the 890M, set `HIP_VISIBLE_DEVICES` on the `ollama`
+service to pin it to the iGPU and leave the dGPU for other Apps.
 
 ## Step 4 — Deploy via the Apps GUI
 
@@ -185,12 +210,20 @@ populate with an LLM-narrated summary.
 Run the `mkdir -p` and `cp` commands from Step 2 again, then retry.
 
 ### `ollama` container says "no GPU detected"
-- The GPU is not isolated (Step 1).
+- The host doesn't expose `/dev/kfd` or `/dev/dri/*` — check
+  `lsmod | grep amdgpu` and `dmesg | grep -i amdgpu` for module
+  load failures.
 - The host kernel doesn't load `amdgpu` / ROCm modules.
 - The `HSA_OVERRIDE_GFX_VERSION` is wrong for your silicon — for
   Radeon 890M (gfx1150) the file uses `11.5.1`; fall back to `11.0.0`
   by editing the compose file and redeploying if Ollama still can't
   see the device.
+- Numeric `group_add` GIDs in the compose file (`44`, `107`) don't
+  match your host's `video` and `render` groups. Check with
+  `getent group video render` on the host and adjust if needed.
+- You isolated the GPU for VM passthrough — that takes the GPU away
+  from all containers. Un-isolate it in
+  System Settings → Advanced → GPU.
 
 ### `lemonade` container fails to start
 - `/dev/accel/accel0` is missing — confirm with `ls /dev/accel`.
