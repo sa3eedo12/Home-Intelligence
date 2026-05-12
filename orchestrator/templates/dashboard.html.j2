@@ -2,68 +2,156 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="refresh" content="30">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Home Intelligence Dashboard</title>
   <link rel="stylesheet" href="/static/dashboard.css">
 </head>
 <body>
-  <main>
-    <h1>Home Intelligence Dashboard</h1>
-
-    <section>
-      <h2>Stack health</h2>
-      <ul>
+  <header class="topbar">
+    <h1>🏠 Home Intelligence</h1>
+    <div class="stack-leds" id="stack-leds">
       {% for service, details in status.stack.items() %}
-        <li><strong>{{ service }}</strong>: {{ "ok" if details.ok else "down" }}</li>
+        <span class="led {{ 'ok' if details.ok else 'down' }}" title="{{ service }}">
+          <span class="dot"></span>{{ service }}
+        </span>
       {% endfor %}
-      </ul>
+    </div>
+    <div class="topbar-actions">
+      <span id="connection-state" class="conn-state offline">connecting…</span>
+      <button class="btn" data-quiet="on">Quiet on</button>
+      <button class="btn" data-quiet="off">Quiet off</button>
+      <button class="btn" data-quiet="clear">Clear quiet</button>
+      <button class="btn ghost" id="reload-btn">Reload config</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="curator-card" id="curator-card">
+      <h2>📰 Curator</h2>
+      <article class="narrative" id="curator-narrative">
+        {% if status.narrative and status.narrative.narrative %}
+          <pre>{{ status.narrative.narrative }}</pre>
+          <small>updated {{ status.narrative.generated_at }}</small>
+        {% else %}
+          <em>The dashboard_curator agent will publish a summary here within a minute.</em>
+        {% endif %}
+      </article>
+      {% if status.alert_narrative and status.alert_narrative.narrative %}
+        <article class="narrative narrative-alerts" id="curator-alert-narrative">
+          <h3>⚠️ Alert briefing</h3>
+          <pre>{{ status.alert_narrative.narrative }}</pre>
+          <small>updated {{ status.alert_narrative.generated_at }}</small>
+        </article>
+      {% else %}
+        <article class="narrative narrative-alerts" id="curator-alert-narrative" hidden></article>
+      {% endif %}
     </section>
 
-    <section>
-      <h2>Agents</h2>
-      <ul>
-      {% for agent in status.agents %}
-        <li>{{ agent }}</li>
-      {% endfor %}
-      </ul>
+    <section class="agent-grid-section">
+      <h2>🤖 Agents <small>last {{ status.activity.window_minutes }} min</small></h2>
+      <div class="agent-grid" id="agent-grid">
+        {% for agent_name in status.agents %}
+          {% set live = none %}
+          {% for row in status.activity.agents %}
+            {% if row.agent == agent_name %}{% set live = row %}{% endif %}
+          {% endfor %}
+          <article class="agent-tile" data-agent="{{ agent_name }}"
+                   data-state="{{ live.state if live else 'idle' }}">
+            <header>
+              <span class="state-pill"></span>
+              <strong class="agent-name">{{ agent_name }}</strong>
+            </header>
+            <div class="current-task">
+              {% if live and live.current %}
+                {{ live.current.capability }}
+              {% else %}
+                <em>idle</em>
+              {% endif %}
+            </div>
+            <div class="metrics">
+              <span class="ok-count">ok: {{ (live.ok if live else 0) }}</span>
+              <span class="err-count">err: {{ (live.errors if live else 0) }}</span>
+              <span class="avg-ms">{{ ('%.0f' % live.avg_ms) if live else 0 }} ms</span>
+            </div>
+            <svg class="sparkline" viewBox="0 0 60 14" preserveAspectRatio="none"></svg>
+          </article>
+        {% endfor %}
+      </div>
     </section>
 
-    <section>
-      <h2>Scheduled jobs</h2>
-      <ul>
-      {% for job in status.jobs %}
-        <li>{{ job.id }} — next: {{ job.next_run_time or "n/a" }} — last: {{ job.last_status }}</li>
-      {% endfor %}
-      </ul>
-    </section>
+    <div class="two-col">
+      <section class="activity-feed">
+        <h2>📡 Activity feed</h2>
+        <ol id="activity-feed">
+          {% for event in status.recent_activity %}
+            <li class="activity-item status-{{ event.status }}" data-agent="{{ event.agent }}">
+              <span class="ts">{{ event.ts }}</span>
+              <span class="agent">{{ event.agent }}</span>
+              <span class="cap">{{ event.capability }}</span>
+              <span class="status-tag">{{ event.status }}</span>
+              {% if event.duration_ms %}<span class="dur">{{ '%.0f' % event.duration_ms }}ms</span>{% endif %}
+            </li>
+          {% endfor %}
+        </ol>
+      </section>
 
-    <section>
-      <h2>Recent notifications</h2>
-      <ul>
-      {% for item in status.recent_notifications %}
-        <li>{{ item.ts }} | {{ item.topic }} | {{ item.severity }} | {{ item.decision }}{% if item.reason %} ({{ item.reason }}){% endif %}</li>
-      {% endfor %}
-      </ul>
-    </section>
+      <section class="jobs-section">
+        <h2>⏰ Scheduled jobs</h2>
+        <ul class="jobs-list">
+          {% for job in status.jobs %}
+            <li>
+              <button class="run-btn" data-job="{{ job.id }}" title="Run now">▶</button>
+              <strong>{{ job.id }}</strong>
+              <span class="job-meta">next {{ job.next_run_time or 'n/a' }}</span>
+              <span class="job-status">{{ job.last_status }}</span>
+            </li>
+          {% endfor %}
+        </ul>
+      </section>
+    </div>
 
-    <section>
-      <h2>Active overrides</h2>
-      <ul>
-      {% for mute in status.active_mutes %}
-        <li>{{ mute.key }} ({{ mute.ttl_seconds }}s)</li>
-      {% endfor %}
-      <li>quiet override: {{ status.quiet_override }}</li>
-      </ul>
-    </section>
+    <div class="two-col">
+      <section class="notifications-section">
+        <h2>🔔 Recent notifications</h2>
+        <ul class="notifications-list">
+          {% for item in status.recent_notifications[:15] %}
+            <li class="severity-{{ item.severity }}">
+              <span class="ts">{{ item.ts }}</span>
+              <span class="topic">{{ item.topic or '—' }}</span>
+              <span class="severity">{{ item.severity }}</span>
+              <span class="decision">{{ item.decision }}</span>
+              {% if item.text %}<span class="text">{{ item.text }}</span>{% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      </section>
 
-    <section>
-      <h2>Models</h2>
-      <ul>
-        <li>NPU models: {{ status.models.npu|join(', ') }}</li>
-        <li>iGPU models: {{ status.models.igpu|join(', ') }}</li>
-      </ul>
-    </section>
+      <section class="overrides-section">
+        <h2>🎛️ Active overrides</h2>
+        <ul class="mutes-list">
+          {% for mute in status.active_mutes %}
+            <li>
+              <strong>{{ mute.key }}</strong>
+              <span class="ttl">{{ mute.ttl_seconds }}s</span>
+              <button class="unmute-btn" data-key="{{ mute.key }}">unmute</button>
+            </li>
+          {% endfor %}
+          {% if not status.active_mutes %}
+            <li class="empty"><em>no active mutes</em></li>
+          {% endif %}
+        </ul>
+        <p class="quiet-state">
+          quiet override: <strong>{{ status.quiet_override or 'auto' }}</strong>
+        </p>
+        <details class="models">
+          <summary>Models</summary>
+          <p>NPU: {{ status.models.npu|join(', ') or '—' }}</p>
+          <p>iGPU: {{ status.models.igpu|join(', ') or '—' }}</p>
+        </details>
+      </section>
+    </div>
   </main>
+
+  <script src="/static/dashboard.js" defer></script>
 </body>
 </html>

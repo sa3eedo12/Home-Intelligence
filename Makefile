@@ -39,13 +39,16 @@ test-orchestrator: ## Run orchestrator tests
 test-home-automation: ## Run home_automation agent tests
 >cd agents/home_automation && pytest
 
+test-dashboard-curator: ## Run dashboard_curator agent tests
+>cd agents/dashboard_curator && pytest
+
 fmt: ## Format SDK code
 >ruff format shared
 
 lint: ## Lint all Python code
 >ruff check shared orchestrator agents
 
-test: test-sdk test-orchestrator test-home-automation ## Run all tests
+test: test-sdk test-orchestrator test-home-automation test-dashboard-curator ## Run all tests
 
 help: ## List available targets
 >@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ {printf "%-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST)

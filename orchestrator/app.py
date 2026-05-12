@@ -21,6 +21,7 @@ from home_agents_sdk.telemetry import get_logger
 from qdrant_client import AsyncQdrantClient
 from redis.asyncio import Redis
 
+from .activity import ActivityAggregator
 from .admin import router as admin_router
 from .dashboard import router as dashboard_router
 from .health import probe_lemonade, probe_ollama, probe_postgres, probe_qdrant, probe_redis
@@ -30,6 +31,7 @@ from .reactive import Reactive
 from .registry import CapabilityRegistry
 from .router import Router
 from .scheduler import Scheduler
+from .sse import router as sse_router
 from .telegram_bot import build_telegram_app, send
 from .workflow import WorkflowEngine
 
@@ -79,6 +81,14 @@ async def _build_status(app: FastAPI) -> dict[str, Any]:
         last_outbound.append(payload)
 
     quiet_override = await app.state.redis.get("policy:override:quiet")
+    activity_snapshot = app.state.activity_aggregator.snapshot()
+    recent_activity = app.state.activity_aggregator.recent_events(limit=30)
+
+    narrative_raw = await app.state.redis.get("dashboard:narrative")
+    alert_narrative_raw = await app.state.redis.get("dashboard:alert_narrative")
+    narrative = json.loads(narrative_raw) if narrative_raw else None
+    alert_narrative = json.loads(alert_narrative_raw) if alert_narrative_raw else None
+
     return {
         "stack": {
             "ollama": results[0],
@@ -109,6 +119,10 @@ async def _build_status(app: FastAPI) -> dict[str, Any]:
             "igpu": results[0].get("models", []),
             "npu": results[1].get("models", []),
         },
+        "activity": activity_snapshot,
+        "recent_activity": recent_activity,
+        "narrative": narrative,
+        "alert_narrative": alert_narrative,
     }
 
 
@@ -185,6 +199,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         run_consumer(redis=redis, policy_engine=policy_engine, send_fn=_send_fn)
     )
 
+    activity_aggregator = ActivityAggregator(redis)
+    await activity_aggregator.start()
+
     app.state.pool = pool
     app.state.registry = registry
     app.state.router = router
@@ -198,6 +215,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.qdrant_url = qdrant_url
     app.state.ollama_url = ollama_url
     app.state.lemonade_url = lemonade_url
+    app.state.activity_aggregator = activity_aggregator
     app.state.status_provider = lambda: _build_status(app)
 
     async def _reload_from_signal() -> None:
@@ -217,6 +235,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     await reactive.stop()
+    await activity_aggregator.stop()
     await scheduler.shutdown()
     notify_task.cancel()
     try:
@@ -233,6 +252,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="orchestrator", lifespan=lifespan)
 app.include_router(admin_router)
 app.include_router(dashboard_router)
+app.include_router(sse_router)
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
 

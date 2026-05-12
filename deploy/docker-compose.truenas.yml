@@ -1,11 +1,25 @@
+# =============================================================================
+# Home-Intelligence stack for TrueNAS SCALE (Fangtooth 25.04+) Custom Apps
+# =============================================================================
+# - Single self-contained compose file (no overlays).
+# - Inline ROCm + NPU device passthrough; the GPU must be isolated in
+#   System Settings -> Advanced -> GPU before the apps user can claim it.
+# - Runs as the TrueNAS apps user (UID 568, GID 568) and joins host
+#   `video` and `render` groups via numeric GIDs (44 + 107 are the
+#   conventional numeric IDs on TrueNAS SCALE; adjust if your host differs).
+# - All bind-mount sources are rooted at ${TRUENAS_APPDATA}; create the
+#   dataset and chown -R 568:568 it before deployment.
+# =============================================================================
+
 services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
     env_file: .env
+    user: "568:568"
     command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--requirepass", "${REDIS_PASSWORD}"]
     volumes:
-      - ${HOME_INTEL_DIR}/infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ${TRUENAS_APPDATA}/infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
       - redis-data:/data
     healthcheck:
       test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep PONG"]
@@ -18,9 +32,10 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     env_file: .env
+    user: "568:568"
     volumes:
       - pg-data:/var/lib/postgresql/data
-      - ${HOME_INTEL_DIR}/infra/postgres/init:/docker-entrypoint-initdb.d:ro
+      - ${TRUENAS_APPDATA}/infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 10s
@@ -32,10 +47,11 @@ services:
     image: qdrant/qdrant:latest
     restart: unless-stopped
     env_file: .env
+    user: "568:568"
     command: ["./qdrant", "--config-path", "/qdrant/config/config.yaml"]
     volumes:
       - qdrant-data:/qdrant/storage
-      - ${HOME_INTEL_DIR}/infra/qdrant/config.yaml:/qdrant/config/config.yaml:ro
+      - ${TRUENAS_APPDATA}/infra/qdrant/config.yaml:/qdrant/config/config.yaml:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz"]
       interval: 10s
@@ -44,9 +60,23 @@ services:
     networks: [agents]
 
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:rocm
     restart: unless-stopped
     env_file: .env
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - "44"   # video (default GID on most Debian-based hosts)
+      - "107"  # render (default GID on most Debian-based hosts)
+    environment:
+      # Radeon 890M (gfx1150). Fallback if needed: 11.0.0
+      HSA_OVERRIDE_GFX_VERSION: "11.5.1"
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_NUM_PARALLEL: "2"
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_NO_ANALYTICS: "1"
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:
@@ -57,30 +87,21 @@ services:
     networks: [agents]
 
   lemonade:
-    image: python:3.12-alpine
+    # AMD Lemonade (XDNA 2 NPU). Confirm the tag against current AMD docs.
+    image: amd/lemonade-server:latest
     restart: unless-stopped
     env_file: .env
-    command:
-      - sh
-      - -lc
-      - |
-        python - <<'PY'
-        from http.server import BaseHTTPRequestHandler, HTTPServer
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                if self.path == '/health':
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'ok')
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-            def log_message(self, format, *args):
-                pass
-        HTTPServer(('0.0.0.0', 8000), Handler).serve_forever()
-        PY
+    devices:
+      - /dev/accel/accel0
+    group_add:
+      - "107"  # render
     volumes:
-      - lemonade-models:/models
+      - ${TRUENAS_APPDATA}/infra/lemonade/models:/models:ro
+      - ${TRUENAS_APPDATA}/infra/lemonade/server.yaml:/etc/lemonade/server.yaml:ro
+    environment:
+      LEMONADE_MODELS_DIR: /models
+      LEMONADE_HOST: 0.0.0.0
+      LEMONADE_PORT: "8000"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health"]
       interval: 10s
@@ -91,6 +112,11 @@ services:
   orchestrator:
     image: ghcr.io/sa3eedo12/home-intelligence/orchestrator:latest
     env_file: .env
+    user: "568:568"
+    ports:
+      # Dashboard exposed on the LAN. TrueNAS users can change the host port
+      # in the Apps GUI if 8080 conflicts.
+      - "8080:8000"
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -116,6 +142,7 @@ services:
   home_automation:
     image: ghcr.io/sa3eedo12/home-intelligence/home_automation:latest
     env_file: .env
+    user: "568:568"
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -132,6 +159,7 @@ services:
   personal_assistant:
     image: ghcr.io/sa3eedo12/home-intelligence/personal_assistant:latest
     env_file: .env
+    user: "568:568"
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -149,10 +177,12 @@ services:
     image: ghcr.io/sa3eedo12/home-intelligence/system_health:latest
     env_file: .env
     pid: "host"
+    # Apps user cannot access /var/run/docker.sock on TrueNAS; rely on
+    # /proc + /sys for host metrics. Container introspection degrades to
+    # "docker socket unavailable" gracefully (see agents/system_health/tools/core.py).
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
-      # Docker-socket-based introspection is disabled on containerd hosts.
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -169,13 +199,15 @@ services:
   storage_backup:
     image: ghcr.io/sa3eedo12/home-intelligence/storage_backup:latest
     env_file: .env
+    # No user override: this agent needs to read TrueNAS pool datasets
+    # mounted under /mnt, which are owned by various dataset users.
+    # Run as root inside the container (TrueNAS apps user can still run
+    # privileged container processes via the apps engine).
     environment:
-      # This GUI-only path mounts only the repo-managed data folders, so narrow scan roots to match.
-      STORAGE_SCAN_ROOTS: /data/media,/data/notes
+      STORAGE_SCAN_ROOTS: /mnt
     volumes:
-      - ${HOME_INTEL_DIR}/data/media:/data/media:ro
-      - ${HOME_INTEL_DIR}/data/notes:/data/notes:ro
-      - ${HOME_INTEL_DIR}/infra/storage_backup/backup_targets.yaml:/etc/storage_backup/backup_targets.yaml:ro
+      - /mnt:/mnt:ro
+      - ${TRUENAS_APPDATA}/infra/storage_backup/backup_targets.yaml:/etc/storage_backup/backup_targets.yaml:ro
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -192,8 +224,9 @@ services:
   knowledge_notes:
     image: ghcr.io/sa3eedo12/home-intelligence/knowledge_notes:latest
     env_file: .env
+    user: "568:568"
     volumes:
-      - ${HOME_INTEL_DIR}/data/notes:/data/notes
+      - ${TRUENAS_APPDATA}/data/notes:/data/notes
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -210,6 +243,7 @@ services:
   household_ops:
     image: ghcr.io/sa3eedo12/home-intelligence/household_ops:latest
     env_file: .env
+    user: "568:568"
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -226,8 +260,9 @@ services:
   entertainment:
     image: ghcr.io/sa3eedo12/home-intelligence/entertainment:latest
     env_file: .env
+    user: "568:568"
     volumes:
-      - ${HOME_INTEL_DIR}/data/media:/data/media
+      - ${TRUENAS_APPDATA}/data/media:/data/media
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -244,6 +279,7 @@ services:
   dashboard_curator:
     image: ghcr.io/sa3eedo12/home-intelligence/dashboard_curator:latest
     env_file: .env
+    user: "568:568"
     depends_on:
       redis: { condition: service_healthy }
       ollama: { condition: service_healthy }
@@ -264,4 +300,3 @@ volumes:
   pg-data:
   qdrant-data:
   ollama-data:
-  lemonade-models:

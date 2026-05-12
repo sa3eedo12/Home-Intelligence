@@ -51,6 +51,10 @@ services:
     ports:
       - "8107:8000"
 
+  dashboard_curator:
+    ports:
+      - "8108:8000"
+
   sdk-dev:
     image: python:3.12-slim
     working_dir: /workspace/shared

@@ -47,6 +47,10 @@ Telegram / HA  ---> |  Orchestrator (PR 2)  |
 
 For appliance-style Compose GUIs that run on top of `nerdctl` / `containerd`, use the image-only deployment path in [docs/DEPLOY-MINISCLOUD.md](docs/DEPLOY-MINISCLOUD.md). This path pulls prebuilt GHCR images and does not apply the NPU overlay.
 
+## Deploy on TrueNAS SCALE (Fangtooth 25.04+)
+
+For TrueNAS SCALE installations with the Docker-based Apps engine, follow [docs/DEPLOY-TRUENAS.md](docs/DEPLOY-TRUENAS.md). That path uses GHCR images, exposes the live dashboard on port `8080`, and includes ROCm + NPU device passthrough (the GPU must be isolated in TrueNAS first).
+
 ## 5) Setup
 
 ```bash
@@ -99,6 +103,9 @@ curl http://localhost:6333/healthz
 - Knowledge & Notes: "Search my notes for the air-fryer manual"
 - Household Operations: "What's on the shopping list?"
 - Entertainment: "Recommend a movie for tonight"
+- Dashboard Curator: produces LLM-narrated summaries of recent agent
+  activity that appear at the top of the live dashboard
+  (`GET /dashboard`); not invoked directly by users.
 
 ## 10) Daily life (proactive flows)
 
@@ -116,4 +123,6 @@ curl http://localhost:6333/healthz
 - `/mute <agent|topic> [minutes]` and `/unmute <agent|topic>` — runtime suppression
 - `/jobs` and `/jobs run <id>` — inspect and run scheduler jobs
 - `GET /status` — machine-readable health + jobs + policy state
-- `GET /dashboard` — read-only HTML dashboard (auto-refresh every 30s)
+- `GET /dashboard` — live HTML dashboard (auto-streams via SSE; quiet-hours, mute, run-job, and reload-config buttons; agent activity grid; LLM-narrated curator summary)
+- `GET /dashboard/stream` — SSE feed of activity, curator updates, and heartbeats (consumed by the dashboard)
+- `POST /admin/quiet/{on|off|clear}`, `POST /admin/mute`, `POST /admin/unmute`, `POST /admin/invoke`, `POST /admin/run-job/{id}`, `POST /admin/reload-policies` — read-write actions exposed to LAN clients (no auth; LAN-only)

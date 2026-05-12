@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+from typing import Any
+
+import httpx
 import yaml
 from fastapi import APIRouter, HTTPException, Request
 
@@ -38,3 +42,85 @@ async def run_job(job_id: str, request: Request) -> dict:
 @router.get("/admin/policies")
 async def get_policies(request: Request) -> dict:
     return request.app.state.policy_engine.policies
+
+
+# === Dashboard button endpoints ============================================
+# These power the read-write actions exposed by the live dashboard. The
+# dashboard JS POSTs to them via fetch(); the resulting state changes are
+# observed by the user through the SSE stream within a second or two.
+
+
+@router.post("/admin/quiet/{state}")
+async def set_quiet(state: str, request: Request) -> dict:
+    if state not in {"on", "off", "clear"}:
+        raise HTTPException(status_code=400, detail="state must be on|off|clear")
+    policy_engine = request.app.state.policy_engine
+    if state == "clear":
+        await policy_engine.clear_quiet_override()
+        return {"ok": True, "quiet": None}
+    # Override TTL: 8h for `on`, 12h for `off` so the user can sleep through it.
+    ttl_seconds = 8 * 3600 if state == "on" else 12 * 3600
+    await policy_engine.set_quiet_override(state, ttl_seconds)
+    return {"ok": True, "quiet": state, "ttl_seconds": ttl_seconds}
+
+
+@router.post("/admin/mute")
+async def mute(request: Request) -> dict:
+    body = await request.json()
+    key = str(body.get("key", "")).strip()
+    minutes_raw = body.get("minutes")
+    minutes = int(minutes_raw) if minutes_raw is not None else 30
+    if not key:
+        raise HTTPException(status_code=400, detail="key is required")
+    if minutes <= 0 or minutes > 24 * 60:
+        raise HTTPException(status_code=400, detail="minutes must be 1..1440")
+    redis = request.app.state.redis
+    await redis.set(f"policy:mute:{key}", "1", ex=minutes * 60)
+    return {"ok": True, "key": key, "minutes": minutes}
+
+
+@router.post("/admin/unmute")
+async def unmute(request: Request) -> dict:
+    body = await request.json()
+    key = str(body.get("key", "")).strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="key is required")
+    redis = request.app.state.redis
+    deleted = await redis.delete(f"policy:mute:{key}")
+    return {"ok": True, "key": key, "deleted": int(deleted)}
+
+
+@router.post("/admin/invoke")
+async def invoke_capability(request: Request) -> dict:
+    body = await request.json()
+    agent = str(body.get("agent", "")).strip()
+    capability = str(body.get("capability", "")).strip()
+    payload = body.get("payload") or {}
+    if not agent or not capability:
+        raise HTTPException(status_code=400, detail="agent and capability are required")
+    registry = request.app.state.registry
+    try:
+        result = await registry.dispatch(agent, capability, payload)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"agent error: {exc}") from exc
+    return {"ok": True, "agent": agent, "capability": capability, "result": result}
+
+
+@router.post("/admin/replay")
+async def replay_event(request: Request) -> dict:
+    body = await request.json()
+    stream = str(body.get("stream", "")).strip()
+    payload = body.get("payload")
+    if not stream or payload is None:
+        raise HTTPException(status_code=400, detail="stream and payload are required")
+    redis = request.app.state.redis
+    msg_id = await redis.xadd(stream, {"payload": json.dumps(payload, default=str)})
+    return {"ok": True, "stream": stream, "id": str(msg_id)}
+
+
+@router.get("/admin/activity/snapshot")
+async def activity_snapshot(request: Request) -> dict[str, Any]:
+    aggregator = request.app.state.activity_aggregator
+    snapshot = aggregator.snapshot()
+    snapshot["recent"] = aggregator.recent_events(limit=50)
+    return snapshot

@@ -69,3 +69,21 @@ jobs:
       capability: pantry_low_stock
       inputs: {}
     notify: { severity: notice, topic: household.pantry_low }
+
+  - id: dashboard_summarize_activity
+    description: "Refresh the dashboard activity narrative"
+    trigger: interval
+    interval: { seconds: 60 }
+    dispatch:
+      agent: dashboard_curator
+      capability: summarize_activity
+      inputs: { window_minutes: 15 }
+
+  - id: dashboard_summarize_alerts
+    description: "Refresh the dashboard alert briefing"
+    trigger: interval
+    interval: { minutes: 5 }
+    dispatch:
+      agent: dashboard_curator
+      capability: summarize_alerts
+      inputs: { window_minutes: 60 }
