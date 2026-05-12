@@ -7,7 +7,7 @@ from home_agents_sdk.agent_base import build_app
 from home_agents_sdk.bus import EventBus
 from home_agents_sdk.telemetry import get_logger
 
-from tools import chat, core  # noqa: F401
+from tools import chat, core, infer  # noqa: F401
 
 logger = get_logger("personal_assistant")
 app = build_app("personal_assistant", manifest_path="manifest.yaml")

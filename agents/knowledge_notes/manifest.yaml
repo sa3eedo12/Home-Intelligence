@@ -31,6 +31,21 @@ capabilities:
     description: Remove chunks for a given path.
     side_effects: true
     cost: low
+  - id: record_event
+    description: Record an episodic event in Postgres and semantic memory.
+    inputs: { agent: string, capability: string, summary: string, payload: "object?", ts: "string?" }
+    side_effects: true
+    cost: low
+  - id: recall_recent
+    description: Recall recent episodic events from the last N minutes, optionally filtered by agent.
+    inputs: { window_minutes: "integer?", agent: "string?" }
+    side_effects: false
+    cost: low
+  - id: search_events
+    description: Semantic search over episodic event memories.
+    inputs: { query: string, top_k: "integer?" }
+    side_effects: false
+    cost: low
 subscribes:
   - memory.updates
 publishes:
