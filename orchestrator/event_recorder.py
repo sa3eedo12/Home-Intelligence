@@ -56,6 +56,9 @@ class EventRecorder:
     async def handle_payload(self, payload: dict[str, Any]) -> bool:
         if payload.get("status") != "ok":
             return False
+        extra = payload.get("extra")
+        if isinstance(extra, dict) and extra.get("event_log_recorded"):
+            return False
         agent = str(payload.get("agent") or "unknown")
         capability = str(payload.get("capability") or "unknown")
         result = await self._store.record_event(

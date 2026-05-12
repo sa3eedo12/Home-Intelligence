@@ -31,6 +31,12 @@ from .dashboard import router as dashboard_router
 from .event_recorder import EventRecorder
 from .health import probe_lemonade, probe_ollama, probe_postgres, probe_qdrant, probe_redis
 from .notify import run_consumer, send_morning_brief
+from .observers import ObserverRunner
+from .observers.coffee_observer import build as build_coffee
+from .observers.presence_observer import build as build_presence
+from .observers.sleep_observer import build as build_sleep
+from .observers.vacuum_observer import build as build_vacuum
+from .observers.washer_observer import build as build_washer
 from .policy_engine import PolicyEngine
 from .reactive import Reactive
 from .reflector import NightlyReflector
@@ -326,11 +332,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     warmup_task = asyncio.create_task(_warm_models(), name="orchestrator-warmup")
 
-    event_recorder = EventRecorder(
-        redis,
-        EventLogStore(pool=pool, qdrant=qdrant, embedder=embedder),
-    )
+    event_log_store = EventLogStore(pool=pool, qdrant=qdrant, embedder=embedder)
+    event_recorder = EventRecorder(redis, event_log_store)
     await event_recorder.start()
+
+    # Observer events are surfaced through events.activity; the dashboard activity feed
+    # provides the observer tile/surface instead of adding static dashboard tiles.
+    observer_runner = ObserverRunner(
+        bus=bus,
+        event_log_store=event_log_store,
+        registry=registry,
+        observers=[
+            build_washer(),
+            build_vacuum(),
+            build_presence(),
+            build_sleep(),
+            build_coffee(),
+        ],
+    )
+    await observer_runner.start()
 
     app.state.pool = pool
     app.state.registry = registry
@@ -348,7 +368,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ollama_url = ollama_url
     app.state.lemonade_url = lemonade_url
     app.state.activity_aggregator = activity_aggregator
+    app.state.event_log_store = event_log_store
     app.state.event_recorder = event_recorder
+    app.state.observer_runner = observer_runner
     app.state.knowledge_graph = KnowledgeGraph(pool=pool)
     app.state.status_provider = lambda: _build_status(app)
 
@@ -368,6 +390,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("orchestrator_started")
     yield
 
+    await observer_runner.stop()
     await reactive.stop()
     await event_recorder.stop()
     await activity_aggregator.stop()
