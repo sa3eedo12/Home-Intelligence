@@ -552,7 +552,14 @@ async def _handle_cycle_callback(
         return
     inner = result.get("result") if isinstance(result, dict) else None
     if isinstance(inner, dict) and inner.get("ok"):
-        await query.edit_message_text(f"✅ Saved: {label}")
+        # Surface the learning message from confirm_cycle_load if present.
+        # Falls back to the bland "Saved: <label>" if the agent didn't
+        # produce one (older container versions).
+        learning = inner.get("learning")
+        if learning:
+            await query.edit_message_text(str(learning))
+        else:
+            await query.edit_message_text(f"✅ Saved: {label}")
     else:
         err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
         await query.edit_message_text(f"Couldn't save: {err}")
