@@ -61,6 +61,20 @@ triggers:
       severity: notice
       keyboard_field: keyboard
 
+  - id: presence_return_home
+    stream: events.observed
+    match:
+      kind: presence.changed
+    dispatch:
+      agent: personal_assistant
+      capability: infer_presence_return
+      inputs_from: payload.payload
+    notify_from_result:
+      text_field: summary
+      topic: presence.return
+      severity: notice
+      keyboard_field: keyboard
+
   - id: cleaning_completed
     stream: events.observed
     match:
