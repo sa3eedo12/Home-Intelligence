@@ -73,6 +73,20 @@ capabilities:
     side_effects: false
     cost: medium
     llm: qwen3:8b
+  - id: infer_presence_return
+    description: |
+      Guess where someone is returning from when the presence observer sees
+      them arrive home, then provide Telegram quick replies for confirmation.
+    side_effects: true
+    cost: low
+  - id: confirm_presence_return
+    description: Persist the user's confirmed return context.
+    side_effects: true
+    cost: low
+  - id: recent_presence_returns
+    description: List recent presence return-context guesses and confirmations.
+    side_effects: false
+    cost: low
 subscribes:
   - events.system
   - events.home

@@ -475,6 +475,10 @@ def _make_callback(
             await _handle_sleep_callback(update, query, parts, router)
             return
 
+        if action == "presence":
+            await _handle_presence_callback(update, query, parts, router)
+            return
+
         if action not in {"confirm", "cancel"}:
             return
 
@@ -628,6 +632,44 @@ async def _handle_sleep_callback(
     inner = result.get("result") if isinstance(result, dict) else None
     if isinstance(inner, dict) and inner.get("ok"):
         await query.edit_message_text(f"✅ Saved: {quality}")
+    else:
+        err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
+        await query.edit_message_text(f"Couldn't save: {err}")
+
+
+async def _handle_presence_callback(
+    update: Update,
+    query: Any,
+    parts: list[str],
+    router: Router,
+) -> None:
+    """Handle ``presence:<presence_return_id>:<context>`` Telegram callbacks."""
+    if len(parts) < 3:
+        await query.edit_message_text("Presence confirmation expired or invalid.")
+        return
+    try:
+        presence_return_id = int(parts[1])
+    except ValueError:
+        await query.edit_message_text("Presence confirmation has a bad id.")
+        return
+    context = parts[2]
+    chat_id = _chat_id(update)
+    if context == "_skip":
+        await query.edit_message_text("👌 Skipped.")
+        return
+    try:
+        result = await router.dispatch(
+            "personal_assistant",
+            "confirm_presence_return",
+            {"presence_return_id": presence_return_id, "context": context, "chat_id": chat_id},
+        )
+    except Exception as exc:
+        logger.warning("presence_confirm_dispatch_failed", error=str(exc))
+        await query.edit_message_text("Couldn't save right now. Please try again.")
+        return
+    inner = result.get("result") if isinstance(result, dict) else None
+    if isinstance(inner, dict) and inner.get("ok"):
+        await query.edit_message_text(f"✅ Saved: {context}")
     else:
         err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
         await query.edit_message_text(f"Couldn't save: {err}")

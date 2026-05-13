@@ -403,6 +403,64 @@ async def test_sleep_likely_awake_dispatches_summary_and_carries_keyboard(
 
 
 @pytest.mark.asyncio
+async def test_presence_changed_home_dispatches_return_inference_and_keyboard(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]  # noqa: ASYNC240
+    triggers_path = repo_root / "reactive_triggers.yaml"
+    triggers_text = triggers_path.read_text(encoding="utf-8")  # noqa: ASYNC240
+
+    redis = FakeRedis(decode_responses=True)
+    registry = MagicMock()
+    fake_keyboard = [[{"text": "✅ work", "callback": "presence:9:work"}]]
+    registry.dispatch = AsyncMock(
+        return_value={
+            "ok": True,
+            "result": {
+                "ok": True,
+                "summary": "👋 Welcome home, Saeed. Coming back from work?",
+                "context": "work",
+                "presence_return_id": 9,
+                "keyboard": fake_keyboard,
+            },
+        }
+    )
+    reactive = Reactive(registry=registry, redis=redis, triggers_path=str(triggers_path))
+
+    import yaml as _yaml
+
+    triggers = _yaml.safe_load(triggers_text)["triggers"]
+    trigger = next(t for t in triggers if t["id"] == "presence_return_home")
+
+    envelope = {
+        "agent": "observer.presence",
+        "kind": "presence.changed",
+        "summary": "Saeed is now home",
+        "payload": {
+            "entity_id": "device_tracker.saeed_phone",
+            "person": "Saeed",
+            "state": "home",
+            "since": "2026-05-13T17:30:00+04:00",
+        },
+        "ts": "2026-05-13T13:30:00+00:00",
+    }
+    await reactive.handle_event(trigger, envelope)
+
+    registry.dispatch.assert_awaited_once()
+    args = registry.dispatch.call_args.args
+    assert args[0] == "personal_assistant"
+    assert args[1] == "infer_presence_return"
+    assert args[2]["entity_id"] == "device_tracker.saeed_phone"
+    assert args[2]["state"] == "home"
+
+    rows = await redis.xrange("notify.outbound")
+    assert len(rows) == 1
+    notification = json.loads(rows[0][1]["payload"])
+    assert "Welcome home" in notification["text"]
+    assert notification["keyboard"] == fake_keyboard
+
+
+@pytest.mark.asyncio
 async def test_reactive_inputs_from_payload_uses_nested_field(tmp_path: Path) -> None:
     """Test the _build_dispatch_inputs helper with nested field selection."""
     triggers_path = tmp_path / "reactive.yaml"
