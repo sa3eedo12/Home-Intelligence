@@ -115,11 +115,6 @@ async def test_observer_events_become_user_notifications(tmp_path: Path) -> None
             "sleep.likely_asleep",
             "Bedroom signals suggest everyone is likely asleep",
         ),
-        (
-            "sleep_likely_awake",
-            "sleep.likely_awake",
-            "Bedroom signals suggest someone is awake",
-        ),
     ]
     for trigger_id, kind, summary in cases:
         assert trigger_id in by_id, f"missing reactive trigger {trigger_id}"
@@ -230,7 +225,9 @@ async def test_appliance_cycle_completed_dispatches_and_carries_keyboard(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_cleaning_completed_dispatches_inference_and_carries_keyboard(tmp_path: Path) -> None:
+async def test_cleaning_completed_dispatches_inference_and_carries_keyboard(
+    tmp_path: Path,
+) -> None:
     """The cleaning trigger should infer room coverage and forward the keyboard."""
     repo_root = Path(__file__).resolve().parents[1]  # noqa: ASYNC240
     triggers_path = repo_root / "reactive_triggers.yaml"
@@ -348,6 +345,60 @@ async def test_tv_left_on_dispatches_and_carries_keyboard(tmp_path: Path) -> Non
     assert len(rows) == 1
     notification = json.loads(rows[0][1]["payload"])
     assert "Living Room TV" in notification["text"]
+    assert notification["keyboard"] == fake_keyboard
+
+
+@pytest.mark.asyncio
+async def test_sleep_likely_awake_dispatches_summary_and_carries_keyboard(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]  # noqa: ASYNC240
+    triggers_path = repo_root / "reactive_triggers.yaml"
+    triggers_text = triggers_path.read_text(encoding="utf-8")  # noqa: ASYNC240
+
+    redis = FakeRedis(decode_responses=True)
+    registry = MagicMock()
+    fake_keyboard = [[{"text": "Decent", "callback": "sleep:12:decent"}]]
+    registry.dispatch = AsyncMock(
+        return_value={
+            "ok": True,
+            "result": {
+                "ok": True,
+                "summary": "🌙 You slept ~7h 12m, decent night. Restless or restful?",
+                "quality": "decent",
+                "sleep_summary_id": 12,
+                "keyboard": fake_keyboard,
+            },
+        }
+    )
+    reactive = Reactive(registry=registry, redis=redis, triggers_path=str(triggers_path))
+
+    import yaml as _yaml
+
+    triggers = _yaml.safe_load(triggers_text)["triggers"]
+    trigger = next(t for t in triggers if t["id"] == "sleep_likely_awake")
+    envelope = {
+        "agent": "observer.sleep",
+        "kind": "sleep.likely_awake",
+        "summary": "Bedroom signals suggest someone is awake",
+        "payload": {
+            "detected_at": "2026-05-13T07:12:00+00:00",
+            "signals": {"bedroom_lights_off": False, "tv_off": True},
+        },
+        "ts": "2026-05-13T07:12:05+00:00",
+    }
+    await reactive.handle_event(trigger, envelope)
+
+    registry.dispatch.assert_awaited_once()
+    args = registry.dispatch.call_args.args
+    assert args[0] == "personal_assistant"
+    assert args[1] == "infer_sleep_summary"
+    assert args[2]["detected_at"] == "2026-05-13T07:12:00+00:00"
+
+    rows = await redis.xrange("notify.outbound")
+    assert len(rows) == 1
+    notification = json.loads(rows[0][1]["payload"])
+    assert notification["text"].startswith("🌙 You slept")
     assert notification["keyboard"] == fake_keyboard
 
 

@@ -81,6 +81,34 @@ jobs:
       inputs: {}
     notify: { severity: info, topic: brief.evening }
 
+  - id: sleep_summary_morning
+    description: "Infer last night's sleep quality"
+    trigger: cron
+    cron: { hour: 8, minute: 0 }
+    dispatch:
+      agent: personal_assistant
+      capability: infer_sleep_summary
+      inputs: {}
+    notify:
+      severity: notice
+      topic: sleep.summary
+      text_field: summary
+      keyboard_field: keyboard
+
+  - id: late_bedtime_check
+    description: "Suggest wind-down if bedroom activity continues after usual bedtime"
+    trigger: cron
+    cron: { hour: 23, minute: 30 }
+    dispatch:
+      agent: personal_assistant
+      capability: late_bedtime_check
+      inputs: {}
+    notify:
+      severity: notice
+      topic: sleep.bedtime
+      text_field: summary
+      keyboard_field: keyboard
+
   - id: system_anomaly_check
     description: "Periodic system anomaly check"
     trigger: interval
