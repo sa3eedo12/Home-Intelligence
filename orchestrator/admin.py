@@ -976,6 +976,76 @@ async def forget_household(request: Request) -> dict[str, Any]:
     return {"ok": True, "id": member_id}
 
 
+@router.post("/admin/household/{member_id}/trackers")
+async def set_member_trackers(member_id: int, request: Request) -> dict[str, Any]:
+    """Link presence-tracking HA entity_ids to a household member.
+
+    Body: ``{"tracker_entity_ids": ["person.saeed", "device_tracker.saeeds_iphone"]}``
+
+    Stored in ``household_members.attributes.tracker_entity_ids``. The
+    presence observer reads this every 60s and ONLY emits presence.changed
+    events for linked entities (unless no member is linked, in which case
+    it falls back to the keyword-heuristic safety net).
+    """
+    body = await _json_object(request)
+    raw = body.get("tracker_entity_ids")
+    if isinstance(raw, str):
+        tracker_ids = [s.strip() for s in raw.split(",") if s.strip()]
+    elif isinstance(raw, list):
+        tracker_ids = [str(x).strip() for x in raw if str(x).strip()]
+    else:
+        raise HTTPException(
+            status_code=400, detail="tracker_entity_ids must be a list or comma-separated string"
+        )
+
+    graph = _knowledge_graph(request)
+    members = await graph.list_members(include_pets=True)
+    target = next((m for m in members if int(m.get("id") or 0) == member_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"household member {member_id} not found")
+
+    attrs = dict(target.get("attributes") or {})
+    attrs["tracker_entity_ids"] = tracker_ids
+    member = await graph.put_member(
+        member_id=member_id,
+        name=str(target.get("name") or ""),
+        role=str(target.get("role") or "adult"),
+        telegram_chat_id=target.get("telegram_chat_id"),
+        allergies=list(target.get("allergies") or []),
+        dietary_restrictions=list(target.get("dietary_restrictions") or []),
+        sleep_time=target.get("sleep_time"),
+        wake_time=target.get("wake_time"),
+        attributes=attrs,
+    )
+    return {"ok": True, "id": member_id, "tracker_entity_ids": tracker_ids, "member": member}
+
+
+@router.get("/admin/setup/auto-discover")
+async def setup_auto_discover(request: Request) -> dict[str, Any]:
+    """Survey HA, return a proposal of things to adopt + member presence links.
+
+    Read-only; nothing is written to the DB. Pair with POST /admin/setup/auto-apply
+    to commit the proposal (or a user-edited version of it).
+    """
+    from .auto_setup import discover_proposal
+
+    graph = _knowledge_graph(request)
+    return await discover_proposal(knowledge_graph=graph)
+
+
+@router.post("/admin/setup/auto-apply")
+async def setup_auto_apply(request: Request) -> dict[str, Any]:
+    """Apply an auto-discover proposal: adopt things + link presence trackers.
+
+    Idempotent: skips things already adopted, no-ops empty link lists.
+    """
+    from .auto_setup import apply_proposal
+
+    body = await _json_object(request)
+    graph = _knowledge_graph(request)
+    return await apply_proposal(proposal=body, knowledge_graph=graph)
+
+
 @router.post("/admin/safety/explain")
 async def explain_safety(request: Request) -> dict[str, Any]:
     body = await request.json()

@@ -275,16 +275,49 @@ def _summary_for(
 async def confirm_cycle_load(
     cycle_load_id: int, label: str, chat_id: int | None = None
 ) -> dict[str, Any]:
-    """Record the user's correction. Called by Telegram callback handler."""
+    """Record the user's correction. Called by Telegram callback handler.
+
+    Returns a ``learning`` field with a short conversational note about
+    the resulting pattern (e.g. "Got it — of your last 5 cycles, 4 were
+    colors. I'll lean toward colors next time."). The Telegram callback
+    handler can surface this back to the user instead of a bland "Saved".
+    """
     if not isinstance(cycle_load_id, int) or cycle_load_id <= 0:
         return {"ok": False, "error": "cycle_load_id must be a positive integer"}
     if not isinstance(label, str) or not label.strip():
         return {"ok": False, "error": "label must be a non-empty string"}
+    label_clean = label.strip().casefold()
     store = CycleLoadsStore(await _pool())
-    record = await store.confirm(cycle_load_id, confirmed_label=label.strip(), chat_id=chat_id)
+    record = await store.confirm(cycle_load_id, confirmed_label=label_clean, chat_id=chat_id)
     if record is None:
         return {"ok": False, "error": "cycle_load not found"}
-    return {"ok": True, "record": _jsonable(record)}
+
+    appliance = record.get("appliance") or "washer"
+    history = await store.confirmed_label_history(appliance=appliance, limit=10)
+    learning = _learning_message(label_clean, history, was_correction=label_clean != (
+        record.get("guessed_label") or ""
+    ).casefold())
+    return {"ok": True, "record": _jsonable(record), "learning": learning}
+
+
+def _learning_message(label: str, history: list[str], *, was_correction: bool) -> str:
+    """Return a short note about what we learned from this confirmation."""
+    same_label_count = sum(1 for h in history if h == label)
+    if was_correction:
+        if same_label_count >= 3:
+            return (
+                f"Noted — of your last {len(history)} cycles, {same_label_count} were {label}. "
+                f"I'll lean {label} next time."
+            )
+        return f"Got it. Updated to {label}; I'll factor that in next time."
+    if same_label_count >= 3:
+        return (
+            f"Saved as {label}. {same_label_count} of your last {len(history)} cycles "
+            f"were {label} — that pattern is getting strong."
+        )
+    if same_label_count >= 1:
+        return f"Saved as {label}. I've seen {same_label_count} other {label} load(s) recently."
+    return f"Saved as {label} — first time you've confirmed this load type."
 
 
 @tool("recent_cycle_loads")

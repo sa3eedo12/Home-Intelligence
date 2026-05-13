@@ -113,3 +113,46 @@ async def test_presence_explicit_allowlist_via_env(monkeypatch) -> None:
         })
     fired = {e[1]["entity_id"] for e in observer.emitted}
     assert fired == {"device_tracker.saeed_phone", "device_tracker.judes_laptop"}
+
+
+@pytest.mark.asyncio
+async def test_presence_strict_when_at_least_one_member_linked(monkeypatch) -> None:
+    """If household_members.attributes.tracker_entity_ids is set for any
+    member, the observer enters STRICT mode: only those entities fire,
+    even if other entities would have passed the keyword heuristic."""
+    monkeypatch.delenv("PRESENCE_ALLOWLIST", raising=False)
+    observer = _CapturePresence()
+    # Simulate a member-link cache populated from the DB
+    observer._member_links = {"device_tracker.saeeds_iphone": "Saeed"}
+    observer._member_links_ts = 9e18  # never expires for this test
+    base_attrs = {"friendly_name": "Some Device"}
+
+    # Linked entity: fires
+    await observer.handle({
+        "entity_id": "device_tracker.saeeds_iphone",
+        "old_state": "not_home", "state": "home", "ts": "x",
+        "attributes": base_attrs,
+    })
+    # Unlinked entity that WOULD have passed the keyword heuristic: blocked
+    await observer.handle({
+        "entity_id": "device_tracker.judes_laptop",
+        "old_state": "not_home", "state": "home", "ts": "y",
+        "attributes": base_attrs,
+    })
+    fired = [(e[1]["entity_id"], e[1]["person"]) for e in observer.emitted]
+    assert fired == [("device_tracker.saeeds_iphone", "Saeed")]
+    # Person field should come from the linked household_member.name, not friendly
+    assert observer.emitted[0][1]["household_member_linked"] is True
+
+
+@pytest.mark.asyncio
+async def test_presence_uses_member_name_not_device_name(monkeypatch) -> None:
+    observer = _CapturePresence()
+    observer._member_links = {"device_tracker.judes_laptop": "Judith"}
+    observer._member_links_ts = 9e18
+    await observer.handle({
+        "entity_id": "device_tracker.judes_laptop",
+        "old_state": "not_home", "state": "home", "ts": "z",
+        "attributes": {"friendly_name": "Judes-Laptop"},
+    })
+    assert observer.emitted[0][1]["person"] == "Judith"

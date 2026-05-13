@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
@@ -9,12 +10,12 @@ from . import Observer
 from .utils import domain_of, extract_state_change, normalized_state, remember_bounded
 
 MAX_TRACKED_ENTITIES = 256
+MEMBER_LINK_TTL_SECONDS = 60.0
 
 # Substrings that indicate an entity_id/friendly_name is NOT a person, even
-# though it lives in the device_tracker.* domain. HA pulls every WiFi-attached
-# device into device_tracker.*, including hubs, routers, doorbells, smart
-# appliances (Samsung registers its washer/dryer as device_trackers!), and
-# audio gear. The user gets noise-storm notifications without this filter.
+# though it lives in the device_tracker.* domain. Used as a SECONDARY filter
+# (only when no member-linked or env allowlist is configured) to suppress
+# the obvious noise: hubs, gateways, appliances, TVs, etc.
 NON_PERSON_KEYWORDS: tuple[str, ...] = (
     "hub",
     "gateway",
@@ -62,13 +63,63 @@ class PresenceObserver(Observer):
         super().__init__()
         self._states: OrderedDict[str, _PresenceState] = OrderedDict()
         # Optional opt-in allowlist via env var (comma-separated entity IDs).
-        # When set, ONLY these entities trigger presence.changed events.
-        # When empty, falls back to the heuristic NON_PERSON_KEYWORDS filter.
-        self._allowlist: frozenset[str] = frozenset(
+        self._env_allowlist: frozenset[str] = frozenset(
             e.strip()
             for e in os.environ.get("PRESENCE_ALLOWLIST", "").split(",")
             if e.strip()
         )
+        # Cache of household_member tracker links: entity_id → person name.
+        # Populated by the observer ON DEMAND from app.state.pool, refreshed
+        # when older than MEMBER_LINK_TTL_SECONDS. Means the user can edit
+        # the household_members.attributes.tracker_entity_ids JSON in the DB
+        # (or via the dashboard) and changes take effect within a minute,
+        # no orchestrator restart required.
+        self._member_links: dict[str, str] = {}
+        self._member_links_ts: float = 0.0
+
+    async def _refresh_member_links(self) -> None:
+        """Pull tracker_entity_ids from every household_member row.
+
+        Stored under attributes JSONB as either ``["device_tracker.x", ...]``
+        or ``{"tracker_entity_ids": ["device_tracker.x", ...]}``.
+        """
+        pool = None
+        if self.event_log_store is not None:
+            pool = getattr(self.event_log_store, "pool", None)
+        if pool is None:
+            return
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT name, attributes FROM household_members"
+                )
+        except Exception as exc:
+            self.logger.warning("presence_member_link_query_failed", error=str(exc))
+            return
+        new_links: dict[str, str] = {}
+        for row in rows:
+            attrs = row["attributes"] or {}
+            if isinstance(attrs, str):
+                try:
+                    import json as _json
+
+                    attrs = _json.loads(attrs)
+                except Exception:
+                    attrs = {}
+            tracker_ids: list[str] = []
+            raw = attrs.get("tracker_entity_ids") if isinstance(attrs, dict) else None
+            if isinstance(raw, list):
+                tracker_ids = [str(x) for x in raw if x]
+            elif isinstance(raw, str):
+                tracker_ids = [s.strip() for s in raw.split(",") if s.strip()]
+            for eid in tracker_ids:
+                new_links[eid] = row["name"]
+        self._member_links = new_links
+        self._member_links_ts = time.monotonic()
+
+    async def _ensure_member_links_fresh(self) -> None:
+        if time.monotonic() - self._member_links_ts > MEMBER_LINK_TTL_SECONDS:
+            await self._refresh_member_links()
 
     async def handle(self, payload: dict[str, Any]) -> None:
         change = extract_state_change(payload)
@@ -77,6 +128,7 @@ class PresenceObserver(Observer):
         domain = domain_of(change.entity_id)
         if domain not in {"device_tracker", "person"}:
             return
+        await self._ensure_member_links_fresh()
         if not self._is_person(change.entity_id, change.friendly_name, domain):
             return
         new_state = _presence_state(change.new_state)
@@ -92,14 +144,17 @@ class PresenceObserver(Observer):
         entry.state = new_state
         if previous is None or previous == new_state:
             return
+        # Prefer the household_member.name when the entity is linked.
+        person = self._member_links.get(change.entity_id) or change.friendly_name
         await self.emit_event(
             "presence.changed",
-            f"{change.friendly_name} is now {new_state}",
+            f"{person} is now {new_state}",
             {
-                "person": change.friendly_name,
+                "person": person,
                 "state": new_state,
                 "entity_id": change.entity_id,
                 "since": change.ts,
+                "household_member_linked": change.entity_id in self._member_links,
             },
         )
 
@@ -107,12 +162,20 @@ class PresenceObserver(Observer):
         # person.* domain entries are always considered people (HA spec).
         if domain == "person":
             return True
-        # Explicit allowlist wins.
-        if self._allowlist:
-            return entity_id in self._allowlist
-        # Heuristic: reject device_trackers whose name/entity_id contains a
-        # known non-person keyword. This kills Aqara hubs, gateways, smart
-        # appliances, TVs, speakers etc. that HA otherwise treats as people.
+        # Strongest signal: an explicit household_member link.
+        if entity_id in self._member_links:
+            return True
+        # Env allowlist next.
+        if self._env_allowlist:
+            return entity_id in self._env_allowlist
+        # If at least one member has linked at least one tracker, that means
+        # the user has explicitly told us "these are the people" — fall back
+        # to STRICT mode and only fire for those linked entities.
+        if self._member_links:
+            return False
+        # Otherwise: heuristic safety net for users who haven't linked
+        # anything. Filter out the obvious non-people keywords so we're not
+        # spamming "Aqara_Hub_E1 is now home".
         haystack = (entity_id + " " + (friendly_name or "")).casefold()
         return not any(kw in haystack for kw in NON_PERSON_KEYWORDS)
 
