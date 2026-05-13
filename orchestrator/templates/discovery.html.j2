@@ -15,18 +15,43 @@
 
   <main>
     <section class="summary-card">
-      <h2>Unidentified entities</h2>
-      <p>
+      <h2>Discovery</h2>
+      <p id="summary-line">
         Showing {{ discovery.entities|length }} unidentified of {{ discovery.total_count }} HA entities.
         {{ discovery.identified_count }} entity ids are already adopted or ignored.
       </p>
     </section>
 
-    <section class="entity-grid" aria-label="Unidentified Home Assistant entities">
+    <section class="filters">
+      <input type="search" id="search" placeholder="Search by id, name, area, or type…" autocomplete="off">
+      <div class="filter-chips">
+        <label>Group by
+          <select id="group-by">
+            <option value="type" selected>Suggested type</option>
+            <option value="area">Area</option>
+            <option value="domain">HA domain</option>
+            <option value="none">No grouping</option>
+          </select>
+        </label>
+        <button type="button" class="chip" id="bulk-adopt-area" title="Adopt every visible entity using its suggested type">
+          Adopt all visible (with suggested types)
+        </button>
+      </div>
+    </section>
+
+    <section id="entity-groups" aria-label="Unidentified Home Assistant entities">
+      {% if not discovery.entities %}
+        <p class="empty">Everything visible from Home Assistant is already adopted or ignored.</p>
+      {% endif %}
       {% for entity in discovery.entities %}
-        <article class="entity-card" data-entity-id="{{ entity.entity_id }}">
+        <article class="entity-card"
+                 data-entity-id="{{ entity.entity_id }}"
+                 data-area="{{ entity.area or 'Unassigned' }}"
+                 data-domain="{{ entity.entity_id.split('.')[0] }}"
+                 data-suggested-type="{{ entity.suggested_type }}"
+                 data-search="{{ (entity.entity_id ~ ' ' ~ entity.friendly_name ~ ' ' ~ (entity.area or '') ~ ' ' ~ entity.suggested_type)|lower }}">
           <header>
-            <h2>{{ entity.friendly_name }}</h2>
+            <h3>{{ entity.friendly_name }}</h3>
             <code>{{ entity.entity_id }}</code>
           </header>
           <dl>
@@ -48,15 +73,13 @@
             <input class="friendly-name" value="{{ entity.friendly_name }}">
           </label>
           <p class="hint">
-            Photo upload coming in a later chapter. For now, just adopt with a friendly name and type — you can attach a photo later.
+            Photo upload coming in a later chapter. For now, just adopt with a friendly name and type.
           </p>
           <div class="actions">
             <button type="button" class="adopt-btn">Adopt</button>
             <button type="button" class="ignore-btn danger">Ignore</button>
           </div>
         </article>
-      {% else %}
-        <p class="empty">Everything visible from Home Assistant is already adopted or ignored.</p>
       {% endfor %}
     </section>
   </main>
