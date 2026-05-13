@@ -175,3 +175,12 @@ jobs:
       agent: dashboard_curator
       capability: summarize_alerts
       inputs: { window_minutes: 60 }
+
+  - id: anomaly_check
+    description: "Surface 'today is different' deviations from known patterns"
+    trigger: interval
+    interval: { minutes: 30 }
+    dispatch:
+      agent: __orchestrator__
+      capability: orchestrator.anomaly_check
+      inputs: {}

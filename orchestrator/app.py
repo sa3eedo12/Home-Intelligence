@@ -376,6 +376,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async def _run_lora_training(_inputs: dict[str, Any]) -> dict[str, Any]:
         return await lora_training.run()
 
+    async def _run_anomaly_check(_inputs: dict) -> dict:
+        from .anomaly_detector import detect_anomalies, emit_anomalies
+
+        anomalies = await detect_anomalies(
+            pool=pool,
+            user_tz_name=os.environ.get("USER_TZ", "Asia/Dubai"),
+        )
+        sent = await emit_anomalies(anomalies=anomalies, redis=redis)
+        return {"ok": True, "detected": len(anomalies), "emitted": sent}
+
     scheduler = Scheduler(
         registry=registry,
         redis=redis,
@@ -391,6 +401,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "data_science.weekly_report": _run_weekly_report,
             "data_science.monthly_report": _run_monthly_report,
             "data_science.lora_training": _run_lora_training,
+            "orchestrator.anomaly_check": _run_anomaly_check,
         },
     )
     await scheduler.start()

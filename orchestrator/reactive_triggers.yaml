@@ -147,3 +147,13 @@ triggers:
       topic: auto_inference
       severity: info
       keyboard_field: keyboard
+
+  # === anomaly detection — "today is different" ===
+  - id: anomaly_detected
+    stream: events.observed
+    match:
+      kind: anomaly.detected
+    notify_from_payload:
+      text_template: "{summary}"
+      topic_template: "anomaly.{payload[anomaly_type]}"
+      severity_field: severity
