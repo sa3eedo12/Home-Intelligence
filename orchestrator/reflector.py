@@ -413,14 +413,14 @@ class NightlyReflector:
         except Exception as exc:
             logger.warning("reflection_capability_snapshot_failed", error=str(exc))
         prompt = {
-            "recent_events": evidence.get("events", [])[:80],
-            "activity_stream": evidence.get("activity", [])[:80],
-            "dismissals": evidence.get("dismissals", [])[:50],
+            "recent_events": evidence.get("events", [])[:30],
+            "activity_stream": evidence.get("activity", [])[:30],
+            "dismissals": evidence.get("dismissals", [])[:20],
             "self_audit": audit,
             "knowledge_gaps": gaps,
             "hourly_patterns": patterns,
             "health_summary": health_summary or {},
-            "capabilities": capabilities[:120],
+            "capabilities": capabilities[:60],
         }
         response = await self._chat_with_fallback(
             [
@@ -486,6 +486,16 @@ class NightlyReflector:
             return await self.llm.chat(
                 messages=messages,
                 model=fallback_model,
+                temperature=0.1,
+                response_format="json",
+            )
+
+        # If reasoner == fallback, no point retrying — short-circuit so we
+        # don't waste 2x OLLAMA_TIMEOUT_SECONDS on the SAME failing model.
+        if reasoner_model == fallback_model:
+            return await self.llm.chat(
+                messages=messages,
+                model=reasoner_model,
                 temperature=0.1,
                 response_format="json",
             )
