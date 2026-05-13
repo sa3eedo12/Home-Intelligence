@@ -302,7 +302,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     policy_engine = PolicyEngine(_load_yaml(HERE / "policies.yaml"), redis)
-    reasoner_model = os.environ.get("REASONER_MODEL", "qwen3.6:35b-a3b")
+    reasoner_model = os.environ.get("REASONER_MODEL", "qwen3:8b")
     reflector = NightlyReflector(
         pool=pool,
         redis=redis,

@@ -151,7 +151,13 @@ class NightlyReflector:
         self.redis = redis
         self.llm = llm
         self.registry = registry
-        self.reasoner_model = reasoner_model or os.environ.get("REASONER_MODEL", "qwen3.6:35b-a3b")
+        # Default to qwen3:8b: ~5GB loads in seconds, generates a JSON
+        # proposal in 30-90s. The bigger qwen3.6:35b-a3b (23GB) was the
+        # historical default but it requires >24GB RAM/VRAM and the load
+        # alone takes 60-120s, blowing past OLLAMA_TIMEOUT_SECONDS on
+        # modest hardware. Users with the headroom can opt in with
+        # REASONER_MODEL=qwen3.6:35b-a3b in their env.
+        self.reasoner_model = reasoner_model or os.environ.get("REASONER_MODEL", "qwen3:8b")
         self.fallback_model = fallback_model or os.environ.get("DEFAULT_MODEL", "qwen3:8b")
         self.store = ReflectionStore(pool)
         self.health_store: Any | None = None
