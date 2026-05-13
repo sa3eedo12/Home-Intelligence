@@ -90,9 +90,9 @@ async def test_system_severity_min_matching(tmp_path: Path) -> None:
 async def test_observer_events_become_user_notifications(tmp_path: Path) -> None:
     """The shipped reactive_triggers.yaml turns each observer event into a notification.
 
-    NOTE: ``appliance_cycle_completed`` is excluded here because it dispatches
-    to ``household_ops.infer_cycle_load`` rather than rendering from the
-    payload directly. Its own dedicated test covers the dispatch path.
+    NOTE: ``appliance_cycle_completed`` and ``cleaning_completed_inference`` are
+    excluded here because they dispatch to household_ops inference tools rather
+    than rendering from the payload directly. Dedicated tests cover those paths.
     """
     repo_root = Path(__file__).resolve().parents[1]  # noqa: ASYNC240 - sync setup
     triggers_path = repo_root / "reactive_triggers.yaml"
@@ -109,7 +109,6 @@ async def test_observer_events_become_user_notifications(tmp_path: Path) -> None
     by_id = {t["id"]: t for t in triggers}
 
     cases = [
-        ("cleaning_completed", "cleaning.completed", "Vacuum cleaning completed for Roomba"),
         ("coffee_brewed", "coffee.brewed", "Coffee brewed by Espresso"),
         (
             "sleep_likely_asleep",
@@ -227,6 +226,70 @@ async def test_appliance_cycle_completed_dispatches_and_carries_keyboard(tmp_pat
     assert len(rows) == 1
     notification = json.loads(rows[0][1]["payload"])
     assert "best guess" in notification["text"]
+    assert notification["keyboard"] == fake_keyboard
+
+
+@pytest.mark.asyncio
+async def test_cleaning_completed_dispatches_inference_and_carries_keyboard(tmp_path: Path) -> None:
+    """The cleaning trigger should infer room coverage and forward the keyboard."""
+    repo_root = Path(__file__).resolve().parents[1]  # noqa: ASYNC240
+    triggers_path = repo_root / "reactive_triggers.yaml"
+    triggers_text = triggers_path.read_text(encoding="utf-8")  # noqa: ASYNC240
+
+    redis = FakeRedis(decode_responses=True)
+    registry = MagicMock()
+    fake_keyboard = [[{"text": "Missed rooms", "callback": "clean:1:partial"}]]
+    registry.dispatch = AsyncMock(
+        return_value={
+            "ok": True,
+            "result": {
+                "ok": True,
+                "summary": (
+                    "🧹 Vacuum done in living, kitchen. Bedroom missed today — "
+                    "should I remind you to run it again?"
+                ),
+                "status": "partial",
+                "missed_rooms": ["bedroom"],
+                "cleaning_run_id": 1,
+                "keyboard": fake_keyboard,
+            },
+        }
+    )
+    reactive = Reactive(registry=registry, redis=redis, triggers_path=str(triggers_path))
+
+    import yaml as _yaml
+
+    triggers = _yaml.safe_load(triggers_text)["triggers"]
+    trigger = next(t for t in triggers if t["id"] == "cleaning_completed_inference")
+
+    envelope = {
+        "agent": "observer.vacuum",
+        "kind": "cleaning.completed",
+        "summary": "Vacuum cleaning completed for Roomba",
+        "payload": {
+            "appliance": "vacuum",
+            "entity_id": "vacuum.roomba",
+            "duration_seconds": 2700,
+            "rooms": ["living", "kitchen"],
+        },
+        "ts": "2026-05-13T19:00:00+00:00",
+    }
+    await reactive.handle_event(trigger, envelope)
+
+    registry.dispatch.assert_awaited_once()
+    args = registry.dispatch.call_args
+    assert args.args[0] == "household_ops"
+    assert args.args[1] == "infer_cleaning_run"
+    inputs = args.args[2]
+    assert inputs["appliance"] == "vacuum"
+    assert inputs["entity_id"] == "vacuum.roomba"
+    assert inputs["duration_seconds"] == 2700
+    assert inputs["rooms"] == ["living", "kitchen"]
+
+    rows = await redis.xrange("notify.outbound")
+    assert len(rows) == 1
+    notification = json.loads(rows[0][1]["payload"])
+    assert "Bedroom missed" in notification["text"]
     assert notification["keyboard"] == fake_keyboard
 
 

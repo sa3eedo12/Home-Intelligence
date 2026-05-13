@@ -70,6 +70,20 @@ capabilities:
     description: List recent confirmed/unconfirmed appliance loads.
     side_effects: false
     cost: low
+  - id: infer_cleaning_run
+    description: |
+      Infer room-level coverage for a completed vacuum run, persist the run,
+      and return a Telegram quick-reply keyboard for confirmation.
+    side_effects: true
+    cost: low
+  - id: confirm_cleaning_run
+    description: Persist the user's confirmation of a vacuum cleaning run.
+    side_effects: true
+    cost: low
+  - id: recent_cleaning_runs
+    description: List recent vacuum cleaning runs and confirmation status.
+    side_effects: false
+    cost: low
 subscribes:
   - events.home
 publishes:

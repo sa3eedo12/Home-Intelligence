@@ -7,7 +7,7 @@ from home_agents_sdk.agent_base import build_app
 from home_agents_sdk.bus import EventBus
 from home_agents_sdk.telemetry import get_logger
 
-from tools import core, cycle_loads  # noqa: F401
+from tools import cleaning_runs, core, cycle_loads  # noqa: F401
 
 logger = get_logger("household_ops")
 app = build_app("household_ops", manifest_path="manifest.yaml")

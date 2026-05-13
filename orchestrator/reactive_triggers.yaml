@@ -61,14 +61,19 @@ triggers:
       severity: notice
       keyboard_field: keyboard
 
-  - id: cleaning_completed
+  - id: cleaning_completed_inference
     stream: events.observed
     match:
       kind: cleaning.completed
-    notify_from_payload:
-      text_template: "🧹 {summary}."
-      topic_template: "cleaning.completed"
-      severity_field: severity
+    dispatch:
+      agent: household_ops
+      capability: infer_cleaning_run
+      inputs_from: payload.payload
+    notify_from_result:
+      text_field: summary
+      topic: cleaning.completed
+      severity: notice
+      keyboard_field: keyboard
 
   - id: coffee_brewed
     stream: events.observed

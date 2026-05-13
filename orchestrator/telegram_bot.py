@@ -462,6 +462,10 @@ def _make_callback(
             await _handle_cycle_callback(update, query, parts, router)
             return
 
+        if action == "clean":
+            await _handle_clean_callback(update, query, parts, router)
+            return
+
         if action not in {"confirm", "cancel"}:
             return
 
@@ -532,6 +536,48 @@ async def _handle_cycle_callback(
     inner = result.get("result") if isinstance(result, dict) else None
     if isinstance(inner, dict) and inner.get("ok"):
         await query.edit_message_text(f"✅ Saved: {label}")
+    else:
+        err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
+        await query.edit_message_text(f"Couldn't save: {err}")
+
+
+async def _handle_clean_callback(
+    update: Update,
+    query: Any,
+    parts: list[str],
+    router: Router,
+) -> None:
+    """Handle ``clean:<cleaning_run_id>:<status>`` Telegram callbacks.
+
+    Dispatches to ``household_ops.confirm_cleaning_run`` and rewrites the
+    message to reflect the final state so the buttons disappear.
+    """
+    if len(parts) < 3:
+        await query.edit_message_text("Cleaning confirmation expired or invalid.")
+        return
+    try:
+        cleaning_run_id = int(parts[1])
+    except ValueError:
+        await query.edit_message_text("Cleaning confirmation has a bad id.")
+        return
+    status = parts[2]
+    chat_id = _chat_id(update)
+    if status == "_skip":
+        await query.edit_message_text("👌 Skipped.")
+        return
+    try:
+        result = await router.dispatch(
+            "household_ops",
+            "confirm_cleaning_run",
+            {"cleaning_run_id": cleaning_run_id, "status": status, "chat_id": chat_id},
+        )
+    except Exception as exc:
+        logger.warning("cleaning_confirm_dispatch_failed", error=str(exc))
+        await query.edit_message_text(f"Couldn't save: {exc}")
+        return
+    inner = result.get("result") if isinstance(result, dict) else None
+    if isinstance(inner, dict) and inner.get("ok"):
+        await query.edit_message_text(f"✅ Saved: {status}")
     else:
         err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
         await query.edit_message_text(f"Couldn't save: {err}")
