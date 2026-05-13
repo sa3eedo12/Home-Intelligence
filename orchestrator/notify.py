@@ -35,24 +35,95 @@ def _brief_lines(brief: dict[str, Any]) -> list[str]:
     body = brief.get("body_json") or {}
     summary = str(brief.get("summary") or body.get("summary") or "Morning Brief")
     lines = ["*🌅 Morning Brief*", "", summary]
+
+    # Inferences captured in the last 24h (washer/vacuum/sleep/presence/tv).
+    # Brief enrichment: only surface confirmed labels — the unconfirmed
+    # ones are already in 'questions_for_you' below.
+    learned = _learned_yesterday(brief)
+    if learned:
+        lines.extend(["", "*🧠 What I learned about you*"])
+        for line in learned[:8]:
+            lines.append(f"- {line}")
+
+    # Anomalies the night detected (vacuum overdue, etc.)
+    anomalies = _anomalies_24h(brief)
+    if anomalies:
+        lines.extend(["", "*🔔 What I noticed*"])
+        for line in anomalies[:5]:
+            lines.append(f"- {line}")
+
     sections = [
-        ("Yesterday", body.get("yesterday") or []),
         ("Questions for you", body.get("questions_for_you") or []),
         ("Suggestions for me", body.get("suggestions_for_me") or []),
-        ("Code wishlist", body.get("code_wishlist") or []),
     ]
     for title, items in sections:
-        lines.extend(["", f"*{title}*"])
         if not items:
-            lines.append("- None")
             continue
+        lines.extend(["", f"*{title}*"])
         for item in items[:5]:
             if isinstance(item, dict):
                 text = item.get("title") or item.get("summary") or item.get("rationale") or item
             else:
                 text = item
             lines.append(f"- {str(text)[:240]}")
+    lines.extend(["", "_Tap a notification to confirm or correct any guess._"])
     return lines
+
+
+def _learned_yesterday(brief: dict[str, Any]) -> list[str]:
+    """Mine the brief body for interesting things that happened. Today this
+    pulls from 'evidence.events' (filtered by the reflector) plus any inline
+    inference summaries the brief carried."""
+    body = brief.get("body_json") or {}
+    events = (body.get("evidence") or {}).get("events") or []
+    out: list[str] = []
+    seen_kinds: dict[str, int] = {}
+    for ev in events:
+        cap = str(ev.get("capability") or "")
+        # Surface user-meaningful events only
+        keep = (
+            cap.endswith(".cycle_completed")
+            or cap == "cleaning.completed"
+            or cap == "coffee.brewed"
+            or cap == "presence.changed"
+            or cap == "sleep.likely_asleep"
+            or cap == "sleep.likely_awake"
+            or cap == "entertainment.left_on"
+        )
+        if not keep:
+            continue
+        seen_kinds[cap] = seen_kinds.get(cap, 0) + 1
+    for cap, count in sorted(seen_kinds.items(), key=lambda kv: -kv[1]):
+        if cap.endswith(".cycle_completed"):
+            out.append(f"Washer cycle ran {count}× yesterday")
+        elif cap == "cleaning.completed":
+            out.append(f"Vacuum cleaned {count}× yesterday")
+        elif cap == "coffee.brewed":
+            out.append(f"Coffee brewed {count}× yesterday")
+        elif cap == "sleep.likely_asleep":
+            out.append("You went to sleep at your usual time")
+        elif cap == "sleep.likely_awake":
+            out.append("You woke up at your usual time")
+        elif cap == "entertainment.left_on":
+            out.append(f"TV was left on for a stretch {count}×")
+        elif cap == "presence.changed":
+            # Too noisy to show one line per — surface only if many
+            if count >= 3:
+                out.append(f"{count} 'home/away' events recorded")
+    return out
+
+
+def _anomalies_24h(brief: dict[str, Any]) -> list[str]:
+    body = brief.get("body_json") or {}
+    events = (body.get("evidence") or {}).get("events") or []
+    out: list[str] = []
+    for ev in events:
+        if str(ev.get("capability") or "") == "anomaly.detected":
+            payload = ev.get("payload") or {}
+            kind = str(payload.get("anomaly_type") or "anomaly")
+            summary = str(ev.get("summary") or kind)
+            out.append(summary)
+    return out
 
 
 async def send_morning_brief(tg_app: Any, brief: dict[str, Any], chat_id: int) -> None:
