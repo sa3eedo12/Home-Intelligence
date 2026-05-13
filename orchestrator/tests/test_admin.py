@@ -83,6 +83,25 @@ def _build_app() -> FastAPI:
     return app
 
 
+class _Acquire:
+    def __init__(self, conn) -> None:
+        self.conn = conn
+
+    async def __aenter__(self):
+        return self.conn
+
+    async def __aexit__(self, *_exc) -> None:
+        return None
+
+
+class _FakePool:
+    def __init__(self, conn) -> None:
+        self.conn = conn
+
+    def acquire(self):
+        return _Acquire(self.conn)
+
+
 def test_reload_policies_returns_counts(monkeypatch) -> None:
     app = _build_app()
     monkeypatch.setattr(
@@ -302,6 +321,72 @@ def test_activity_snapshot_returns_aggregator_data() -> None:
     body = resp.json()
     assert "agents" in body
     assert "recent" in body
+
+
+def test_get_policies_returns_loaded_policy_config() -> None:
+    app = _build_app()
+    with TestClient(app) as client:
+        resp = client.get("/admin/policies")
+    assert resp.status_code == 200
+    assert resp.json() == {"quiet_hours": {}}
+
+
+def test_ha_bridge_status_includes_last_hour_count() -> None:
+    app = _build_app()
+    app.state.redis.xrange = AsyncMock(return_value=[("1-0", {}), ("2-0", {})])
+    app.state.ha_event_bridge = SimpleNamespace(
+        _stream="events.home",
+        status=SimpleNamespace(
+            snapshot=lambda: {
+                "enabled": True,
+                "connected": False,
+                "events_forwarded": 25,
+                "events_skipped": 1,
+                "reconnect_attempts": 3,
+                "last_error": "boom",
+                "recent_history": [],
+            }
+        ),
+    )
+
+    with TestClient(app) as client:
+        resp = client.get("/admin/ha-bridge/status")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["events_forwarded_last_hour"] == 2
+    assert body["reconnect_attempts"] == 3
+    assert app.state.redis.xrange.await_args.kwargs["count"] == 10_000
+
+
+def test_observations_recent_returns_observer_events() -> None:
+    app = _build_app()
+
+    class Conn:
+        async def fetch(self, query, limit):
+            assert "agent LIKE 'observer.%'" in query
+            assert limit == 10
+            return [
+                {
+                    "id": 1,
+                    "ts": "2026-05-13T19:04:00+00:00",
+                    "agent": "observer.washer",
+                    "capability": "appliance.cycle_completed",
+                    "summary": "Washer finished",
+                    "payload": '{"entity_id":"sensor.washer"}',
+                }
+            ]
+
+    app.state.pool = _FakePool(Conn())
+
+    with TestClient(app) as client:
+        resp = client.get("/admin/observations/recent")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 1
+    assert body["items"][0]["agent"] == "observer.washer"
+    assert body["items"][0]["payload"]["entity_id"] == "sensor.washer"
 
 
 def test_run_reflection_invokes_reflector() -> None:

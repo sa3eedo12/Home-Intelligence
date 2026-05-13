@@ -7,9 +7,23 @@
   const connState = document.getElementById('connection-state');
   const currentTime = document.getElementById('current-time');
   const lastUpdated = document.getElementById('last-updated');
+  const haBridgeBadge = document.getElementById('ha-bridge-badge');
+  const haBridgeEventsHour = document.getElementById('ha-bridge-events-hour');
+  const haBridgeLastEvent = document.getElementById('ha-bridge-last-event');
+  const haBridgeReconnects = document.getElementById('ha-bridge-reconnects');
+  const haBridgeProblem = document.getElementById('ha-bridge-problem');
+  const observationsList = document.getElementById('observations-list');
+  const observationsCount = document.getElementById('observations-count');
+  const policiesDetails = document.getElementById('active-policies');
+  const policiesJson = document.getElementById('policies-json');
+  const policiesStatus = document.getElementById('policies-status');
+  const safetyContext = document.getElementById('safety-explain-context');
+  const safetyResult = document.getElementById('safety-explain-result');
+  const safetyRule = document.getElementById('safety-explain-rule');
   const SPARK_BUCKETS = 5;
   const FEED_MAX = 80;
   const sparkData = new Map();
+  let policiesLoaded = false;
 
   function updateClock() {
     if (!currentTime) return;
@@ -17,9 +31,22 @@
   }
 
   function refreshActivityTimes() {
-    document.querySelectorAll('.activity-item .ts[data-ts]').forEach((node) => {
+    document.querySelectorAll('.activity-item .ts[data-ts], .observation-item .ts[data-ts]').forEach((node) => {
       node.textContent = window.formatTimeAgo(node.dataset.ts);
     });
+  }
+
+  function formatCount(value) {
+    const number = Number(value || 0);
+    if (!Number.isFinite(number)) return '—';
+    return Math.round(number).toLocaleString();
+  }
+
+  function setBadge(node, label, kind) {
+    if (!node) return;
+    node.classList.remove('badge-success', 'badge-danger', 'badge-warning', 'badge-info', 'badge-muted');
+    node.classList.add(`badge-${kind}`);
+    node.textContent = label;
   }
 
   function setConn(state, label) {
@@ -80,8 +107,8 @@
     const okEl = tile.querySelector('.ok-count');
     const errEl = tile.querySelector('.err-count');
     const avgEl = tile.querySelector('.avg-ms');
-    if (okEl) okEl.textContent = `ok: ${row.ok}`;
-    if (errEl) errEl.textContent = `err: ${row.errors}`;
+    if (okEl) okEl.textContent = `ok: ${row.ok || 0}`;
+    if (errEl) errEl.textContent = `err: ${row.errors || 0}`;
     if (avgEl) avgEl.textContent = fmtMs(row.avg_ms);
     sparkData.set(row.agent, row.sparkline || new Array(SPARK_BUCKETS).fill(0));
     renderSparkline(tile.querySelector('.sparkline'), sparkData.get(row.agent));
@@ -128,6 +155,25 @@
     while (feed.children.length > FEED_MAX) feed.removeChild(feed.lastChild);
   }
 
+  function renderEmptyActivity() {
+    if (!feed) return;
+    const li = document.createElement('li');
+    li.className = 'empty-state compact activity-empty';
+    li.innerHTML = '<div class="empty-state-icon">📡</div><h3>No activity yet</h3><p>Live events will appear here as agents run.</p>';
+    feed.appendChild(li);
+  }
+
+  function replaceActivityFeed(events) {
+    if (!feed) return;
+    feed.replaceChildren();
+    if (!events.length) {
+      renderEmptyActivity();
+      return;
+    }
+    events.slice().reverse().forEach(prependFeedItem);
+    refreshActivityTimes();
+  }
+
   function applyCurator(event) {
     const target = event.key === 'dashboard:alert_narrative' ? curatorAlerts : curator;
     if (!target) return;
@@ -146,6 +192,136 @@
       target.querySelector('small').textContent = `updated ${record.generated_at || ''}`;
     }
     if (lastUpdated && record.generated_at) lastUpdated.textContent = record.generated_at;
+  }
+
+  function renderHaBridge(status) {
+    const enabled = status.enabled !== false;
+    const connected = Boolean(status.connected);
+    const ok = status.ok !== false && enabled && connected;
+    if (!enabled) setBadge(haBridgeBadge, 'disabled', 'muted');
+    else if (ok) setBadge(haBridgeBadge, 'connected', 'success');
+    else setBadge(haBridgeBadge, 'down', 'danger');
+
+    const lastHour = status.events_forwarded_last_hour;
+    haBridgeEventsHour.textContent = Number.isFinite(Number(lastHour)) ? formatCount(lastHour) : '—';
+    haBridgeLastEvent.textContent = status.last_event_at ? window.formatTimeAgo(status.last_event_at) : '—';
+    haBridgeReconnects.textContent = formatCount(status.reconnect_attempts || 0);
+
+    const problem = status.error || status.last_error || (!connected && enabled ? 'Bridge is not connected.' : '');
+    if (problem) {
+      const total = Number.isFinite(Number(status.events_forwarded)) ? ` · total forwarded ${formatCount(status.events_forwarded)}` : '';
+      haBridgeProblem.hidden = false;
+      haBridgeProblem.textContent = `Reconnect attempts ${formatCount(status.reconnect_attempts || 0)} · Last error: ${problem}${total}`;
+    } else {
+      haBridgeProblem.hidden = true;
+      haBridgeProblem.textContent = '';
+    }
+  }
+
+  async function refreshHaBridge() {
+    if (!haBridgeBadge) return;
+    try {
+      renderHaBridge(await apiGet('/admin/ha-bridge/status', { toastErrors: false }));
+    } catch (error) {
+      setBadge(haBridgeBadge, 'unavailable', 'danger');
+      if (haBridgeProblem) {
+        haBridgeProblem.hidden = false;
+        haBridgeProblem.textContent = error.message || String(error);
+      }
+    }
+  }
+
+  function renderObservations(payload) {
+    if (!observationsList) return;
+    const items = payload.items || [];
+    setBadge(observationsCount, `${items.length} shown`, items.length ? 'info' : 'muted');
+    observationsList.replaceChildren();
+    if (!items.length) {
+      const li = document.createElement('li');
+      li.className = 'empty-state compact observations-empty';
+      li.innerHTML = '<div class="empty-state-icon">👀</div><h3>No observations yet</h3><p>Appliance, coffee, sleep, and cleaning observations will appear here.</p>';
+      observationsList.appendChild(li);
+      return;
+    }
+    items.forEach((item) => {
+      const li = document.createElement('li');
+      li.className = 'observation-item';
+      li.innerHTML = '<span class="ts"></span><div><strong></strong><small></small></div><span class="badge badge-muted"></span>';
+      const ts = li.querySelector('.ts');
+      ts.dataset.ts = item.ts || '';
+      ts.textContent = item.ts ? window.formatTimeAgo(item.ts) : '—';
+      li.querySelector('strong').textContent = item.summary || item.capability || 'Observation';
+      li.querySelector('small').textContent = item.capability || 'observer event';
+      li.querySelector('.badge').textContent = (item.agent || 'observer').replace('observer.', '');
+      observationsList.appendChild(li);
+    });
+  }
+
+  async function refreshObservations(showToast = false) {
+    if (!observationsList) return;
+    try {
+      renderObservations(await apiGet('/admin/observations/recent?limit=10', { toastErrors: false }));
+      if (showToast) Toast.show('Observations refreshed', 'success');
+    } catch (error) {
+      setBadge(observationsCount, 'error', 'danger');
+      if (showToast) Toast.show(error.message || String(error), 'danger');
+    }
+  }
+
+  async function refreshActivitySnapshot(showToast = false) {
+    try {
+      const snapshot = await apiGet('/admin/activity/snapshot', { toastErrors: false });
+      (snapshot.agents || []).forEach(applyTileSnapshot);
+      if (Array.isArray(snapshot.recent)) replaceActivityFeed(snapshot.recent);
+      if (showToast) Toast.show('Activity snapshot refreshed', 'success');
+    } catch (error) {
+      if (showToast) Toast.show(error.message || String(error), 'danger');
+    }
+  }
+
+  async function loadPolicies(force = false) {
+    if (!policiesJson || (!force && policiesLoaded)) return;
+    setBadge(policiesStatus, 'loading', 'warning');
+    try {
+      const policies = await apiGet('/admin/policies', { toastErrors: false });
+      policiesJson.textContent = JSON.stringify(policies, null, 2);
+      policiesLoaded = true;
+      setBadge(policiesStatus, 'loaded', 'success');
+    } catch (error) {
+      policiesJson.textContent = error.message || String(error);
+      setBadge(policiesStatus, 'error', 'danger');
+    }
+  }
+
+  async function explainSafety(button) {
+    const key = button.dataset.suppressionKey || 'suppressed';
+    const body = {
+      agent: button.dataset.agent || 'home_automation',
+      capability: button.dataset.capability || 'call_service',
+      inputs: {
+        domain: button.dataset.domain || 'lock',
+        suppression_key: key,
+      },
+    };
+    if (safetyContext) safetyContext.textContent = `Suppression row: ${key}`;
+    if (safetyResult) safetyResult.textContent = 'Checking safety policy…';
+    if (safetyRule) {
+      safetyRule.hidden = true;
+      safetyRule.textContent = '';
+    }
+    Modal.open('safety-explain-modal');
+    try {
+      const explanation = await apiPost('/admin/safety/explain', body, { toastErrors: false });
+      if (safetyResult) {
+        safetyResult.textContent = `${explanation.reason || 'No reason returned.'} Tier: ${explanation.tier || 'unknown'}.`;
+      }
+      if (safetyRule && explanation.matched_rule) {
+        safetyRule.hidden = false;
+        safetyRule.textContent = JSON.stringify(explanation.matched_rule, null, 2);
+      }
+    } catch (error) {
+      if (safetyResult) safetyResult.textContent = error.message || String(error);
+    }
   }
 
   function connect() {
@@ -177,12 +353,28 @@
     }
   });
 
+  policiesDetails?.addEventListener('toggle', () => {
+    if (policiesDetails.open) loadPolicies();
+  });
+
   document.addEventListener('click', async (ev) => {
     const target = ev.target.closest('button');
     if (!(target instanceof HTMLElement)) return;
     const quiet = target.dataset.quiet;
     if (quiet) {
       await apiPost(`/admin/quiet/${quiet}`, undefined).then(() => Toast.show(`Quiet ${quiet}`, 'success')).catch(() => {});
+      return;
+    }
+    if (target.id === 'activity-refresh-btn') {
+      await refreshActivitySnapshot(true);
+      return;
+    }
+    if (target.id === 'observations-refresh-btn') {
+      await refreshObservations(true);
+      return;
+    }
+    if (target.classList.contains('safety-explain-link')) {
+      await explainSafety(target);
       return;
     }
     if (target.classList.contains('run-btn') && target.dataset.job) {
@@ -197,7 +389,10 @@
       return;
     }
     if (target.id === 'reload-btn') {
-      await apiPost('/admin/reload-policies', undefined).then(() => Toast.show('Configuration reloaded', 'success')).catch(() => {});
+      await apiPost('/admin/reload-policies', undefined).then(() => {
+        Toast.show('Configuration reloaded', 'success');
+        if (policiesDetails?.open) loadPolicies(true);
+      }).catch(() => {});
     }
   });
 
@@ -206,5 +401,9 @@
   document.querySelectorAll('.agent-tile:not(.skeleton-card)').forEach((tile) => renderSparkline(tile.querySelector('.sparkline'), new Array(SPARK_BUCKETS).fill(0)));
   setInterval(updateClock, 15000);
   setInterval(refreshActivityTimes, 30000);
+  refreshHaBridge();
+  refreshObservations();
+  setInterval(refreshHaBridge, 60000);
+  setInterval(refreshObservations, 60000);
   connect();
 })();

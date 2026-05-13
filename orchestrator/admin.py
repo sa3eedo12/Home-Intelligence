@@ -5,7 +5,7 @@ import json
 import os
 import re
 import secrets
-from datetime import time
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
 import httpx
@@ -46,6 +46,50 @@ def _health_store(request: Request) -> HealthStore:
     if store is not None:
         return store
     return HealthStore(getattr(request.app.state, "pool", None))
+
+
+def _event_log_pool(request: Request) -> Any | None:
+    pool = getattr(request.app.state, "pool", None)
+    if pool is not None:
+        return pool
+    store = getattr(request.app.state, "event_log_store", None)
+    return getattr(store, "pool", None)
+
+
+def _format_timestamp(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _event_log_row(row: Any) -> dict[str, Any]:
+    data = dict(row)
+    payload = decode_json(data.get("payload"), {})
+    if not isinstance(payload, dict):
+        payload = {"value": payload}
+    return {
+        "id": data.get("id"),
+        "ts": _format_timestamp(data.get("ts")),
+        "agent": data.get("agent"),
+        "capability": data.get("capability"),
+        "summary": data.get("summary"),
+        "payload": payload,
+    }
+
+
+async def _stream_count_since(redis: Any, stream: str, since: datetime) -> int | None:
+    xrange = getattr(redis, "xrange", None)
+    if not callable(xrange):
+        return None
+    since_ms = int(since.timestamp() * 1000)
+    try:
+        rows = await xrange(stream, min=f"{since_ms}-0", max="+", count=10_000)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("redis_stream_count_failed", stream=stream, error=str(exc))
+        return None
+    return len(rows or [])
 
 
 def _validate_healthkit_token(request: Request) -> None:
@@ -326,8 +370,16 @@ async def healthkit_sync(request: Request) -> dict[str, Any]:
 async def healthkit_recent(request: Request) -> dict[str, Any]:
     metric = _query_metric(request)
     hours = _query_int(request, "hours", default=24, low=1, high=24 * 365) or 24
-    rows = await _health_store(request).list_recent(metric=metric, hours=hours)
-    return {"ok": True, "metric": metric, "hours": hours, "items": rows, "count": len(rows)}
+    limit = _query_int(request, "limit", default=20, low=1, high=500) or 20
+    rows = (await _health_store(request).list_recent(metric=metric, hours=hours))[:limit]
+    return {
+        "ok": True,
+        "metric": metric,
+        "hours": hours,
+        "limit": limit,
+        "items": rows,
+        "count": len(rows),
+    }
 
 
 @router.get("/admin/healthkit/aggregate")
@@ -1264,5 +1316,44 @@ async def ha_bridge_status(request: Request) -> dict[str, Any]:
             "ok": False,
             "error": "ha_event_bridge not started",
             "enabled": False,
+            "events_forwarded_last_hour": None,
         }
-    return {"ok": True, **bridge.status.snapshot()}
+    status = {"ok": True, **bridge.status.snapshot()}
+    stream = str(getattr(bridge, "_stream", "events.home") or "events.home")
+    status["events_forwarded_last_hour"] = await _stream_count_since(
+        getattr(request.app.state, "redis", None),
+        stream,
+        datetime.now(UTC) - timedelta(hours=1),
+    )
+    return status
+
+
+@router.get("/admin/observations/recent")
+async def observations_recent(request: Request) -> dict[str, Any]:
+    limit = _query_int(request, "limit", default=10, low=1, high=50) or 10
+    pool = _event_log_pool(request)
+    if pool is None:
+        return {"ok": True, "items": [], "count": 0, "limit": limit}
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, ts, agent, capability, summary, payload
+                FROM event_log
+                WHERE agent LIKE 'observer.%'
+                ORDER BY ts DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("observations_recent_failed", error=str(exc))
+        return {
+            "ok": False,
+            "items": [],
+            "count": 0,
+            "limit": limit,
+            "error": "event_log_unavailable",
+        }
+    items = [_event_log_row(row) for row in rows]
+    return {"ok": True, "items": items, "count": len(items), "limit": limit}

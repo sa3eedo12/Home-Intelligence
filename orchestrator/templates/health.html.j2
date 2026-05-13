@@ -1,10 +1,12 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Apple Health · Home Intelligence</title>
+  <link rel="stylesheet" href="/static/_design.css">
   <link rel="stylesheet" href="/static/health.css">
+  <script src="/static/_app.js" defer></script>
   <script src="/static/health.js" defer></script>
 </head>
 <body>
@@ -12,6 +14,7 @@
     <a href="/dashboard" class="back-link">← Dashboard</a>
     <h1> Apple Health</h1>
     <p>Local HealthKit signals for the nightly reflector.</p>
+    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
   </header>
 
   {% macro minutes_label(value) -%}
@@ -84,6 +87,40 @@
       </article>
     </section>
 
+    <section class="interactive-grid" aria-label="HealthKit live data">
+      <article class="health-live-card aggregate-card">
+        <div class="section-header"><div><h2>7-day aggregates</h2><p>Loaded from /admin/healthkit/aggregate</p></div><span class="badge badge-muted" id="health-aggregate-status">loading</span></div>
+        <div class="aggregate-grid" id="health-aggregate-grid">
+          <div class="aggregate-tile skeleton-card" aria-hidden="true"><span class="skeleton skeleton-line"></span><span class="skeleton skeleton-line"></span></div>
+          <div class="aggregate-tile skeleton-card" aria-hidden="true"><span class="skeleton skeleton-line"></span><span class="skeleton skeleton-line"></span></div>
+          <div class="aggregate-tile skeleton-card" aria-hidden="true"><span class="skeleton skeleton-line"></span><span class="skeleton skeleton-line"></span></div>
+        </div>
+      </article>
+
+      <article class="health-live-card webhook-card">
+        <div class="section-header"><div><h2>Test webhook</h2><p>Send a tiny synthetic Health Auto Export payload.</p></div></div>
+        <label class="label">X-Health-Token
+          <input class="input" id="healthkit-token" type="password" autocomplete="off" placeholder="Paste your webhook token">
+          <span class="hint">Token is only used for this request and is not stored or rendered server-side.</span>
+        </label>
+        <div class="webhook-actions"><button class="btn btn-primary" type="button" id="healthkit-test-btn">Test webhook</button><span id="healthkit-test-status" class="webhook-status"></span></div>
+        <pre><code>curl -X POST http://&lt;truenas-ip&gt;:8080/admin/healthkit/sync \
+  -H 'Content-Type: application/json' \
+  -H 'X-Health-Token: &lt;your token&gt;' \
+  -d '{"data":{"metrics":[]}}'</code></pre>
+      </article>
+    </section>
+
+    <section class="health-live-card recent-metrics-card">
+      <div class="section-header"><div><h2>Recent raw metrics</h2><p>Most recent 20 HealthKit rows from /admin/healthkit/recent</p></div><span class="badge badge-muted" id="health-recent-count">loading</span></div>
+      <div class="table-wrap">
+        <table class="recent-metrics-table">
+          <thead><tr><th>Metric</th><th>Value</th><th>Unit</th><th>Started</th><th>Source</th></tr></thead>
+          <tbody id="health-recent-body"><tr><td colspan="5">Loading HealthKit data…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="chart-grid" aria-label="30 day health trends">
       {% for metric, title in [('steps', 'Steps'), ('sleep_asleep', 'Sleep duration'), ('weight', 'Weight'), ('resting_heart_rate', 'Resting heart rate')] %}
         <article class="chart-card">
@@ -113,5 +150,6 @@
   </main>
 
   <script type="application/json" id="health-data">{{ health | tojson }}</script>
+  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
 </body>
 </html>

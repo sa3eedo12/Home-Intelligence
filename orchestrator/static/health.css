@@ -37,6 +37,7 @@ body {
 
 .health-topbar h1 { margin: 0; }
 .health-topbar p { margin: 0; color: var(--muted); }
+.health-topbar .topbar-theme { margin-left: auto; }
 .back-link, .setup-link { color: var(--accent); text-decoration: none; }
 .back-link:hover, .setup-link:hover { text-decoration: underline; }
 
@@ -49,6 +50,7 @@ body {
 
 .status-card,
 .health-tile,
+.health-live-card,
 .chart-card,
 .setup-card {
   border: 1px solid var(--line);
@@ -83,7 +85,8 @@ body {
   gap: 1rem;
 }
 
-.health-tile { padding: 1.1rem; min-height: 180px; }
+.health-tile, .health-live-card { padding: 1.1rem; }
+.health-tile { min-height: 180px; }
 .health-tile p { color: var(--muted); margin: 0.4rem 0; }
 .health-tile h2 { font-size: clamp(1.6rem, 3vw, 2.5rem); }
 .health-tile small { color: var(--muted); }
@@ -127,6 +130,28 @@ body {
 .sparkline path, .health-chart path { fill: none; stroke: var(--accent); stroke-width: 2; }
 .sparkline circle { fill: var(--accent); }
 
+.interactive-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(20rem, 0.9fr);
+  gap: 1rem;
+}
+
+.health-live-card .section-header { margin-bottom: 1rem; }
+.aggregate-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; }
+.aggregate-tile { display: grid; gap: 0.35rem; padding: 0.9rem; border: 1px solid var(--line); border-radius: 16px; background: var(--panel-soft); }
+.aggregate-tile strong { font-size: 1.6rem; }
+.aggregate-tile span, .aggregate-tile small, .webhook-status { color: var(--muted); }
+.webhook-card { display: grid; gap: 1rem; }
+.webhook-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; }
+.webhook-status.success { color: var(--accent-2); }
+.webhook-status.error { color: var(--danger); }
+.table-wrap { overflow-x: auto; }
+.recent-metrics-table { width: 100%; border-collapse: collapse; }
+.recent-metrics-table th, .recent-metrics-table td { padding: 0.75rem; border-bottom: 1px solid var(--line); text-align: left; }
+.recent-metrics-table th { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; }
+.recent-metrics-table td { color: var(--text); }
+.recent-metrics-table td.empty-cell { color: var(--muted); text-align: center; }
+
 .chart-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -161,5 +186,6 @@ pre code { padding: 0; border: 0; background: transparent; }
 
 @media (max-width: 860px) {
   .health-topbar, .status-card { align-items: flex-start; flex-direction: column; }
-  .tile-grid, .chart-grid { grid-template-columns: 1fr; }
+  .health-topbar .topbar-theme { margin-left: 0; }
+  .tile-grid, .chart-grid, .interactive-grid, .aggregate-grid { grid-template-columns: 1fr; }
 }

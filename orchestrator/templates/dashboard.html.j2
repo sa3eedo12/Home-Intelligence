@@ -17,6 +17,7 @@
   {% set jobs = status.jobs|default([], true) %}
   {% set recent_notifications = status.recent_notifications|default([], true) %}
   {% set active_mutes = status.active_mutes|default([], true) %}
+  {% set suppression_counts = status.suppression_counts|default({}, true) %}
   {% set models = status.models|default({'npu': [], 'igpu': []}, true) %}
   {% set people_home = status.people_home|default([], true) %}
 
@@ -104,6 +105,22 @@
             {% endfor %}
           </div>
         </article>
+
+        <article class="card ha-bridge-card" id="ha-bridge-card" aria-live="polite">
+          <div class="section-header compact-header">
+            <div><h2>HA bridge</h2><p>Home Assistant WebSocket feed</p></div>
+            <span id="ha-bridge-badge" class="badge badge-muted">loading</span>
+          </div>
+          <div class="bridge-metric">
+            <strong id="ha-bridge-events-hour">—</strong>
+            <span>events forwarded last hour</span>
+          </div>
+          <dl class="bridge-details">
+            <div><dt>Last event</dt><dd id="ha-bridge-last-event">—</dd></div>
+            <div><dt>Reconnect attempts</dt><dd id="ha-bridge-reconnects">—</dd></div>
+          </dl>
+          <p class="bridge-problem" id="ha-bridge-problem" hidden></p>
+        </article>
       </section>
 
       <section class="card agent-grid-section">
@@ -112,7 +129,10 @@
             <h2>Live agents</h2>
             <p>Last {{ activity.window_minutes }} min · {{ activity.total_events|default(0) }} events</p>
           </div>
-          <span class="badge badge-muted">SSE live</span>
+          <div class="section-header-actions">
+            <button class="btn btn-secondary btn-sm" type="button" id="activity-refresh-btn">Refresh</button>
+            <span class="badge badge-muted">SSE live</span>
+          </div>
         </div>
         <div class="agent-grid" id="agent-grid" aria-live="polite">
           {% for agent_name in agents %}
@@ -168,23 +188,38 @@
           </ol>
         </section>
 
-        <section class="card jobs-section">
-          <div class="section-header">
-            <div><h2>Scheduled jobs</h2><p>Manual run controls</p></div>
-          </div>
-          <ul class="jobs-list">
-            {% for job in jobs %}
-              <li>
-                <button class="run-btn btn btn-secondary btn-icon btn-sm" data-job="{{ job.id }}" title="Run now" aria-label="Run {{ job.id }} now">▶</button>
-                <strong>{{ job.id }}</strong>
-                <span class="job-meta">next {{ job.next_run_time or 'n/a' }}</span>
-                <span class="job-status badge badge-muted">{{ job.last_status }}</span>
-              </li>
-            {% else %}
-              <li class="empty-state compact"><div class="empty-state-icon">⏰</div><h3>No jobs registered</h3><p>Scheduler jobs will show up here.</p></li>
-            {% endfor %}
-          </ul>
-        </section>
+        <div class="side-stack">
+          <section class="card jobs-section">
+            <div class="section-header">
+              <div><h2>Scheduled jobs</h2><p>Manual run controls</p></div>
+            </div>
+            <ul class="jobs-list">
+              {% for job in jobs %}
+                <li>
+                  <button class="run-btn btn btn-secondary btn-icon btn-sm" data-job="{{ job.id }}" title="Run now" aria-label="Run {{ job.id }} now">▶</button>
+                  <strong>{{ job.id }}</strong>
+                  <span class="job-meta">next {{ job.next_run_time or 'n/a' }}</span>
+                  <span class="job-status badge badge-muted">{{ job.last_status }}</span>
+                </li>
+              {% else %}
+                <li class="empty-state compact"><div class="empty-state-icon">⏰</div><h3>No jobs registered</h3><p>Scheduler jobs will show up here.</p></li>
+              {% endfor %}
+            </ul>
+          </section>
+
+          <section class="card observations-section">
+            <div class="section-header">
+              <div><h2>Recent observations</h2><p>Observer-derived events from appliances, coffee, sleep, and cleaning</p></div>
+              <div class="section-header-actions">
+                <button class="btn btn-secondary btn-sm" type="button" id="observations-refresh-btn">Refresh</button>
+                <span class="badge badge-muted" id="observations-count">loading</span>
+              </div>
+            </div>
+            <ul class="observation-list" id="observations-list" aria-live="polite">
+              <li class="empty-state compact observations-empty"><div class="empty-state-icon">👀</div><h3>Loading observations</h3><p>Checking the event log for observer events.</p></li>
+            </ul>
+          </section>
+        </div>
       </section>
 
       <section class="card inbox-section">
@@ -222,6 +257,24 @@
               <li class="empty-state compact"><div class="empty-state-icon">🎛️</div><h3>No active mutes</h3><p>Everything is following policy defaults.</p></li>
             {% endfor %}
           </ul>
+          <div class="suppression-block">
+            <h3>Suppression counts</h3>
+            <ul class="suppression-list" id="suppression-list">
+              {% set suppression_ns = namespace(has_rows=false) %}
+              {% for key, count in suppression_counts.items() %}
+                {% if key.startswith('suppressed') and count %}
+                  {% set suppression_ns.has_rows = true %}
+                  <li class="suppression-row" data-suppression-key="{{ key }}">
+                    <div><strong>{{ key }}</strong><span>{{ count }} blocked or muted event{{ '' if count == 1 else 's' }}</span></div>
+                    <button class="linklike safety-explain-link" type="button" data-suppression-key="{{ key }}" data-agent="home_automation" data-capability="call_service" data-domain="lock">Why was this blocked?</button>
+                  </li>
+                {% endif %}
+              {% endfor %}
+              {% if not suppression_ns.has_rows %}
+                <li class="empty-state compact"><div class="empty-state-icon">🛡️</div><h3>No suppressions</h3><p>No policy suppressions have been counted yet.</p></li>
+              {% endif %}
+            </ul>
+          </div>
           <p class="quiet-state">quiet override: <strong>{{ status.quiet_override or 'auto' }}</strong></p>
         </section>
 
@@ -233,8 +286,29 @@
           </dl>
         </section>
       </section>
+
+      <section class="card policies-section">
+        <details id="active-policies">
+          <summary>
+            <span><strong>Active policies</strong><small>Loaded YAML config from the orchestrator</small></span>
+            <span class="badge badge-muted" id="policies-status">open to load</span>
+          </summary>
+          <pre id="policies-json" class="policy-json">Open this section to fetch /admin/policies.</pre>
+        </details>
+      </section>
     </main>
   </div>
+
+  <dialog id="safety-explain-modal" class="modal safety-modal">
+    <form method="dialog">
+      <div class="section-header">
+        <div><h2>Why was this blocked?</h2><p id="safety-explain-context">Safety policy explanation</p></div>
+      </div>
+      <div id="safety-explain-result" class="safety-result">Choose a suppression row to inspect the matching safety rule.</div>
+      <pre id="safety-explain-rule" class="safety-rule" hidden></pre>
+      <menu><button class="btn btn-primary" value="close">Close</button></menu>
+    </form>
+  </dialog>
 
   <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
 </body>
