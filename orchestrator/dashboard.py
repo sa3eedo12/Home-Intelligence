@@ -25,7 +25,21 @@ DISCOVERY_TYPES = [
     "appliance.dishwasher",
     "appliance.oven",
     "appliance.coffee_maker",
+    "appliance.fridge",
+    "appliance.microwave",
+    "appliance.air_purifier",
+    "appliance.water_heater",
+    "device.tv",
+    "device.monitor",
+    "device.speaker",
+    "device.computer",
+    "device.printer",
+    "device.router",
+    "device.phone",
+    "device.tablet",
+    "device.game_console",
     "vehicle.car",
+    "vehicle.bike",
     "person.member",
     "room",
     "pet.dog",
@@ -277,12 +291,34 @@ def _suggest_entity_type(entity: dict[str, Any]) -> str:
     for appliance, thing_type in appliance_types.items():
         if any(needle.casefold() in haystack for needle in APPLIANCE_SYNONYMS.get(appliance, [])):
             return thing_type
+    # Display devices: heuristics on entity_id + friendly_name keywords.
+    display_keywords = {
+        "device.tv": ("tv", "television", "lg_tv", "samsung_tv", "android_tv", "appletv", "roku"),
+        "device.monitor": ("monitor", "display", "screen"),
+        "device.speaker": ("speaker", "sonos", "homepod", "echo", "soundbar"),
+        "device.computer": ("desktop", "laptop", "macbook", "imac", "pc", "workstation"),
+        "device.game_console": ("playstation", "ps4", "ps5", "xbox", "nintendo", "switch_console"),
+        "device.router": ("router", "gateway", "access_point"),
+        "device.printer": ("printer",),
+        "device.phone": ("iphone", "phone", "pixel", "galaxy"),
+        "device.tablet": ("ipad", "tablet"),
+        "appliance.fridge": ("fridge", "refrigerator", "freezer"),
+        "appliance.microwave": ("microwave",),
+        "appliance.air_purifier": ("air_purifier", "purifier"),
+        "appliance.water_heater": ("water_heater", "boiler"),
+    }
+    for thing_type, keywords in display_keywords.items():
+        if any(keyword in haystack for keyword in keywords):
+            return thing_type
     domain = entity_id.split(".", 1)[0]
     if domain == "light":
         return "light"
     if domain in {"sensor", "binary_sensor"}:
         return "sensor"
     if domain == "media_player":
+        # Distinguish TV-shaped media_players from speakers based on the name.
+        if any(kw in haystack for kw in ("tv", "television", "appletv", "roku", "android_tv")):
+            return "device.tv"
         return "media_player"
     if domain == "person":
         return "person.member"

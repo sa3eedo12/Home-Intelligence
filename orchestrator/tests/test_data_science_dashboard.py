@@ -65,3 +65,40 @@ def test_data_science_dashboard_renders_synthetic_data() -> None:
     assert "Run maintenance now" in resp.text
     assert 'data-job="reembed"' in resp.text
     assert "7 event_log rows" in resp.text
+
+
+def test_suggest_entity_type_classifies_tvs_and_monitors() -> None:
+    from orchestrator.dashboard import _suggest_entity_type
+
+    cases = [
+        (
+            {"entity_id": "media_player.living_room_tv", "friendly_name": "Living Room TV"},
+            "device.tv",
+        ),
+        (
+            {"entity_id": "media_player.appletv_bedroom", "friendly_name": "Apple TV Bedroom"},
+            "device.tv",
+        ),
+        (
+            {"entity_id": "switch.dell_monitor", "friendly_name": "Dell Monitor"},
+            "device.monitor",
+        ),
+        (
+            {"entity_id": "media_player.sonos_kitchen", "friendly_name": "Kitchen Sonos"},
+            "device.speaker",
+        ),
+        (
+            {"entity_id": "switch.playstation_5", "friendly_name": "PS5"},
+            "device.game_console",
+        ),
+        (
+            {"entity_id": "sensor.fridge_temp", "friendly_name": "Fridge Temperature"},
+            "appliance.fridge",
+        ),
+        (
+            {"entity_id": "media_player.unknown", "friendly_name": "Bookshelf"},
+            "media_player",
+        ),
+    ]
+    for entity, expected in cases:
+        assert _suggest_entity_type(entity) == expected, entity
