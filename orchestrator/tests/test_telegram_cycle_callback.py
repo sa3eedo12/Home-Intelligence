@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from orchestrator.telegram_bot import _handle_cycle_callback, _to_inline_keyboard
+from orchestrator.telegram_bot import (
+    _handle_cycle_callback,
+    _handle_tv_callback,
+    _to_inline_keyboard,
+)
 
 
 def test_to_inline_keyboard_converts_list_of_dicts() -> None:
@@ -115,3 +119,43 @@ async def test_cycle_callback_surfaces_dispatch_failure() -> None:
 
     msg = query.edit_message_text.call_args.args[0]
     assert "cycle_load not found" in msg
+
+
+@pytest.mark.asyncio
+async def test_tv_callback_dispatches_confirm_action() -> None:
+    query = MagicMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.effective_chat = MagicMock()
+    update.effective_chat.id = 12345
+    router = MagicMock()
+    router.dispatch = AsyncMock(
+        return_value={"ok": True, "result": {"ok": True, "turn_off": {"ok": True}}}
+    )
+
+    await _handle_tv_callback(update, query, ["tv", "42", "turn_off"], router)
+
+    router.dispatch.assert_awaited_once()
+    args = router.dispatch.call_args.args
+    assert args[0] == "entertainment"
+    assert args[1] == "confirm_tv_action"
+    assert args[2] == {"tv_left_on_id": 42, "action": "turn_off", "chat_id": 12345}
+    query.edit_message_text.assert_awaited_once_with("✅ Turning it off now.")
+
+
+@pytest.mark.asyncio
+async def test_tv_callback_handles_skip_and_bad_id() -> None:
+    query = MagicMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.effective_chat = MagicMock()
+    update.effective_chat.id = 1
+    router = MagicMock()
+    router.dispatch = AsyncMock(return_value={"ok": True, "result": {"ok": True}})
+
+    await _handle_tv_callback(update, query, ["tv", "42", "skip"], router)
+    query.edit_message_text.assert_awaited_with("👌 Skipped.")
+
+    query.edit_message_text.reset_mock()
+    await _handle_tv_callback(update, query, ["tv", "bad", "skip"], router)
+    query.edit_message_text.assert_awaited_once_with("TV action has a bad id.")

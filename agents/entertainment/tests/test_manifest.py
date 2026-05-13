@@ -13,9 +13,11 @@ def test_manifest_and_tools_consistent() -> None:
         sys.path.insert(0, str(agent_dir))
 
     import tools.core as _core
+    import tools.tv_inference as _tv_inference
 
     clear_tools()
     importlib.reload(_core)
+    importlib.reload(_tv_inference)
     expected = {
         "recommend",
         "library_index",
@@ -23,5 +25,8 @@ def test_manifest_and_tools_consistent() -> None:
         "mark_watched",
         "recently_watched",
         "discover",
+        "suggest_tv_action",
+        "confirm_tv_action",
+        "recent_tv_left_on",
     }
     assert expected.issubset(set(list_tools()))

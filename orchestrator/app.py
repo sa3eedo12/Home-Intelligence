@@ -40,6 +40,7 @@ from .observers import ObserverRunner
 from .observers.coffee_observer import build as build_coffee
 from .observers.presence_observer import build as build_presence
 from .observers.sleep_observer import build as build_sleep
+from .observers.tv_observer import build as build_tv
 from .observers.vacuum_observer import build as build_vacuum
 from .observers.washer_observer import build as build_washer
 from .policy_engine import PolicyEngine
@@ -454,6 +455,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             build_presence(),
             build_sleep(),
             build_coffee(),
+            build_tv(),
         ],
     )
     await observer_runner.start()
