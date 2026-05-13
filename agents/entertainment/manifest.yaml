@@ -30,6 +30,18 @@ capabilities:
     side_effects: false
     cost: medium
     llm: qwen3:8b
+  - id: suggest_tv_action
+    description: Persist a TV/monitor left-on detection and offer Telegram quick actions.
+    side_effects: true
+    cost: low
+  - id: confirm_tv_action
+    description: Confirm a TV/monitor left-on action such as turn off, snooze, bedtime auto-off, or skip.
+    side_effects: true
+    cost: low
+  - id: recent_tv_left_on
+    description: List recent TV/monitor left-on detections and confirmations.
+    side_effects: false
+    cost: low
 subscribes:
   - events.home
 # No publishes: media recommendations and watch history are pull-based today.

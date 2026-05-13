@@ -462,6 +462,10 @@ def _make_callback(
             await _handle_cycle_callback(update, query, parts, router)
             return
 
+        if action == "tv":
+            await _handle_tv_callback(update, query, parts, router)
+            return
+
         if action not in {"confirm", "cancel"}:
             return
 
@@ -535,6 +539,56 @@ async def _handle_cycle_callback(
     else:
         err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
         await query.edit_message_text(f"Couldn't save: {err}")
+
+
+async def _handle_tv_callback(
+    update: Update,
+    query: Any,
+    parts: list[str],
+    router: Router,
+) -> None:
+    """Handle ``tv:<tv_left_on_id>:<action>`` Telegram callbacks."""
+    if len(parts) < 3:
+        await query.edit_message_text("TV action expired or invalid.")
+        return
+    try:
+        tv_left_on_id = int(parts[1])
+    except ValueError:
+        await query.edit_message_text("TV action has a bad id.")
+        return
+    action = parts[2]
+    chat_id = _chat_id(update)
+    try:
+        result = await router.dispatch(
+            "entertainment",
+            "confirm_tv_action",
+            {"tv_left_on_id": tv_left_on_id, "action": action, "chat_id": chat_id},
+        )
+    except Exception as exc:
+        logger.warning("tv_confirm_dispatch_failed", error=str(exc))
+        await query.edit_message_text(f"Couldn't save TV action: {exc}")
+        return
+    inner = result.get("result") if isinstance(result, dict) else None
+    if isinstance(inner, dict) and inner.get("ok"):
+        await query.edit_message_text(_tv_action_reply(action, inner))
+    else:
+        err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
+        await query.edit_message_text(f"Couldn't save TV action: {err}")
+
+
+def _tv_action_reply(action: str, result: dict[str, Any]) -> str:
+    if action == "turn_off":
+        turn_off = result.get("turn_off")
+        if isinstance(turn_off, dict) and turn_off.get("ok") is False:
+            return f"Saved, but couldn't turn it off: {turn_off.get('error', 'unknown error')}"
+        return "✅ Turning it off now."
+    if action == "snooze":
+        return "😴 Snoozed for 30 min."
+    if action == "always_off_at_bedtime":
+        return "✅ Bedtime auto-off preference saved."
+    if action in {"skip", "_skip"}:
+        return "👌 Skipped."
+    return f"✅ Saved: {action}"
 
 
 async def _handle_pending_callback(

@@ -7,7 +7,7 @@ from home_agents_sdk.agent_base import build_app
 from home_agents_sdk.bus import EventBus
 from home_agents_sdk.telemetry import get_logger
 
-from tools import core  # noqa: F401
+from tools import core, tv_inference  # noqa: F401
 
 logger = get_logger("entertainment")
 app = build_app("entertainment", manifest_path="manifest.yaml")

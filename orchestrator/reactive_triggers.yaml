@@ -40,7 +40,7 @@ triggers:
       topic_template: "system.{metric}"
       severity_field: severity
 
-  # Observer-derived events. Observers (washer, vacuum, sleep, presence, coffee)
+  # Observer-derived events. Observers (washer, vacuum, sleep, presence, coffee, tv)
   # publish summarized events into events.observed. Without these reactive
   # triggers, those events never become user-facing notifications.
   - id: appliance_cycle_completed
@@ -58,6 +58,20 @@ triggers:
     notify_from_result:
       text_field: summary
       topic: appliance.cycle_completed
+      severity: notice
+      keyboard_field: keyboard
+
+  - id: tv_left_on
+    stream: events.observed
+    match:
+      kind: entertainment.left_on
+    dispatch:
+      agent: entertainment
+      capability: suggest_tv_action
+      inputs_from: payload.payload
+    notify_from_result:
+      text_field: summary
+      topic: entertainment.left_on
       severity: notice
       keyboard_field: keyboard
 

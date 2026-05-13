@@ -231,6 +231,64 @@ async def test_appliance_cycle_completed_dispatches_and_carries_keyboard(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_tv_left_on_dispatches_and_carries_keyboard(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]  # noqa: ASYNC240
+    triggers_path = repo_root / "reactive_triggers.yaml"
+    triggers_text = triggers_path.read_text(encoding="utf-8")  # noqa: ASYNC240
+
+    redis = FakeRedis(decode_responses=True)
+    registry = MagicMock()
+    fake_keyboard = [[{"text": "Turn off now", "callback": "tv:1:turn_off"}]]
+    registry.dispatch = AsyncMock(
+        return_value={
+            "ok": True,
+            "result": {
+                "ok": True,
+                "summary": "📺 Living Room TV has been on for 6.5h.",
+                "suggested_action": "turn_off",
+                "tv_left_on_id": 1,
+                "keyboard": fake_keyboard,
+            },
+        }
+    )
+    reactive = Reactive(registry=registry, redis=redis, triggers_path=str(triggers_path))
+
+    import yaml as _yaml
+
+    triggers = _yaml.safe_load(triggers_text)["triggers"]
+    trigger = next(t for t in triggers if t["id"] == "tv_left_on")
+
+    envelope = {
+        "agent": "observer.tv",
+        "kind": "entertainment.left_on",
+        "summary": "Living Room TV has been on for 6.5h",
+        "payload": {
+            "entity_id": "media_player.living_room_tv",
+            "friendly_name": "Living Room TV",
+            "on_since": "2026-01-01T10:00:00+00:00",
+            "on_hours": 6.5,
+            "reason": "nobody_home",
+        },
+        "ts": "2026-01-01T16:30:00+00:00",
+    }
+    await reactive.handle_event(trigger, envelope)
+
+    registry.dispatch.assert_awaited_once()
+    args = registry.dispatch.call_args.args
+    assert args[0] == "entertainment"
+    assert args[1] == "suggest_tv_action"
+    inputs = args[2]
+    assert inputs["entity_id"] == "media_player.living_room_tv"
+    assert inputs["reason"] == "nobody_home"
+
+    rows = await redis.xrange("notify.outbound")
+    assert len(rows) == 1
+    notification = json.loads(rows[0][1]["payload"])
+    assert "Living Room TV" in notification["text"]
+    assert notification["keyboard"] == fake_keyboard
+
+
+@pytest.mark.asyncio
 async def test_reactive_inputs_from_payload_uses_nested_field(tmp_path: Path) -> None:
     """Test the _build_dispatch_inputs helper with nested field selection."""
     triggers_path = tmp_path / "reactive.yaml"
