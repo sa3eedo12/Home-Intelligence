@@ -28,6 +28,14 @@ The forwarded payload mirrors HA's event shape so existing observers'
         "origin": "ha_event_bridge"
     }
 
+On the FIRST successful connection (process startup), the bridge also
+fetches HA's REST history for the previous ``HA_BRIDGE_REPLAY_HOURS``
+hours and replays each state transition through ``events.home`` *before*
+the live subscription starts. This lets observers retroactively detect a
+cycle that completed while the orchestrator was down — e.g. "you washed
+clothes 20 minutes ago" still produces the appliance.cycle_completed
+notification.
+
 Reconnects with exponential backoff on disconnect or auth failure. Tracks
 status on ``self.status`` so an admin endpoint can surface health.
 """
@@ -38,9 +46,10 @@ import contextlib
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+import httpx
 from home_agents_sdk.telemetry import get_logger
 
 EVENTS_HOME = "events.home"
@@ -48,6 +57,8 @@ EVENTS_HOME_MAXLEN = 50_000
 DEFAULT_BACKOFF_SCHEDULE = (1.0, 2.0, 5.0, 10.0, 30.0)
 DEFAULT_PING_INTERVAL = 30.0
 WEBSOCKET_OPEN_TIMEOUT = 10.0
+DEFAULT_REPLAY_HOURS = 6
+REPLAY_HTTP_TIMEOUT = 30.0
 
 logger = get_logger("orchestrator.ha_event_bridge")
 
@@ -83,6 +94,9 @@ class HaBridgeStatus:
     events_forwarded: int = 0
     events_skipped: int = 0
     reconnect_attempts: int = 0
+    history_replayed: bool = False
+    history_replay_count: int = 0
+    history_replay_error: str | None = None
     history: list[str] = field(default_factory=list)
 
     def snapshot(self) -> dict[str, Any]:
@@ -96,6 +110,9 @@ class HaBridgeStatus:
             "events_forwarded": self.events_forwarded,
             "events_skipped": self.events_skipped,
             "reconnect_attempts": self.reconnect_attempts,
+            "history_replayed": self.history_replayed,
+            "history_replay_count": self.history_replay_count,
+            "history_replay_error": self.history_replay_error,
             "recent_history": list(self.history[-10:]),
         }
 
@@ -127,6 +144,8 @@ class HaEventBridge:
         maxlen: int = EVENTS_HOME_MAXLEN,
         backoff_schedule: tuple[float, ...] = DEFAULT_BACKOFF_SCHEDULE,
         ws_connector: WebSocketConnector | None = None,
+        replay_hours: int = DEFAULT_REPLAY_HOURS,
+        history_fetcher: Any | None = None,
     ) -> None:
         self._redis = redis
         self._ha_url = (ha_url or "").strip()
@@ -135,6 +154,9 @@ class HaEventBridge:
         self._maxlen = maxlen
         self._backoff = backoff_schedule
         self._ws_connector = ws_connector
+        self._replay_hours = max(0, int(replay_hours))
+        self._history_fetcher = history_fetcher
+        self._first_session = True
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self.status = HaBridgeStatus(
@@ -201,7 +223,99 @@ class HaEventBridge:
             self.status.last_error = None
             self.status.note("connected + subscribed state_changed")
             logger.info("ha_bridge_connected")
+            if self._first_session and self._replay_hours > 0:
+                await self._replay_history()
+                self._first_session = False
             await self._consume(ws)
+
+    async def _replay_history(self) -> None:
+        """On first connect, hydrate observers with the last N hours of HA state.
+
+        Synthesizes ``state_changed`` events from HA's ``/api/history/period``
+        REST response. Failures here are logged and swallowed — replay is best
+        effort and must never block the live subscription path.
+        """
+        since = datetime.now(UTC) - timedelta(hours=self._replay_hours)
+        self.status.note(f"history_replay_started since={since.isoformat()}")
+        logger.info("ha_bridge_history_replay_started", since=since.isoformat())
+        try:
+            histories = await self._fetch_history(since)
+        except Exception as exc:
+            msg = f"{type(exc).__name__}: {exc}"
+            self.status.history_replay_error = msg
+            self.status.note(f"history_replay_failed: {msg}")
+            logger.warning("ha_bridge_history_replay_failed", error=msg)
+            return
+
+        replayed = 0
+        for entity_history in histories:
+            entries = [s for s in entity_history if isinstance(s, dict)]
+            if len(entries) < 2:
+                continue
+            entries.sort(key=lambda s: str(s.get("last_changed") or s.get("last_updated") or ""))
+            for prev, curr in zip(entries, entries[1:], strict=False):
+                if prev.get("state") == curr.get("state"):
+                    continue
+                replayed += await self._forward_replayed_pair(prev, curr)
+        self.status.history_replayed = True
+        self.status.history_replay_count = replayed
+        self.status.note(f"history_replay_done count={replayed}")
+        logger.info("ha_bridge_history_replay_done", count=replayed)
+
+    async def _fetch_history(self, since: datetime) -> list[list[dict[str, Any]]]:
+        if self._history_fetcher is not None:
+            return await self._history_fetcher(since)
+        url = self._ha_url.rstrip("/") + "/api/history/period/" + since.isoformat()
+        async with httpx.AsyncClient(timeout=REPLAY_HTTP_TIMEOUT) as client:
+            resp = await client.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self._ha_token}",
+                    "Content-Type": "application/json",
+                },
+                params={"minimal_response": "false", "significant_changes_only": "false"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, list)]
+
+    async def _forward_replayed_pair(
+        self, prev: dict[str, Any], curr: dict[str, Any]
+    ) -> int:
+        entity_id = str(curr.get("entity_id") or prev.get("entity_id") or "").strip()
+        if not entity_id:
+            return 0
+        time_fired = str(
+            curr.get("last_changed") or curr.get("last_updated") or datetime.now(UTC).isoformat()
+        )
+        payload = {
+            "type": "state_changed",
+            "entity_id": entity_id,
+            "data": {
+                "entity_id": entity_id,
+                "old_state": prev,
+                "new_state": curr,
+            },
+            "time_fired": time_fired,
+            "origin": "ha_event_bridge_replay",
+        }
+        try:
+            await self._redis.xadd(
+                self._stream,
+                {"payload": json.dumps(payload, default=str)},
+                maxlen=self._maxlen,
+                approximate=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "ha_bridge_replay_xadd_failed",
+                error=str(exc),
+                entity=entity_id,
+            )
+            return 0
+        return 1
 
     async def _authenticate(self, ws: _WebSocketLike) -> None:
         msg = await self._recv_json(ws)
@@ -303,8 +417,14 @@ def _default_ws_connector(url: str):  # pragma: no cover - thin wrapper around w
 
 def build_from_env(redis: _RedisLike) -> HaEventBridge:
     """Construct a bridge using ``HA_URL`` / ``HA_TOKEN`` environment variables."""
+    replay_hours_raw = os.environ.get("HA_BRIDGE_REPLAY_HOURS", str(DEFAULT_REPLAY_HOURS))
+    try:
+        replay_hours = int(replay_hours_raw)
+    except ValueError:
+        replay_hours = DEFAULT_REPLAY_HOURS
     return HaEventBridge(
         redis=redis,
         ha_url=os.environ.get("HA_URL"),
         ha_token=os.environ.get("HA_TOKEN"),
+        replay_hours=replay_hours,
     )

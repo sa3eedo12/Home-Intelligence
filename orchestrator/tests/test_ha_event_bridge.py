@@ -134,6 +134,7 @@ async def test_full_session_authenticates_subscribes_and_forwards() -> None:
         ha_url="http://ha.local:8123",
         ha_token="secret",
         ws_connector=_ws_connector(ws),
+        replay_hours=0,
     )
     await bridge.start()
     for _ in range(20):
@@ -181,6 +182,7 @@ async def test_skips_non_state_changed_and_missing_entity() -> None:
         ha_url="http://ha.local:8123",
         ha_token="t",
         ws_connector=_ws_connector(ws),
+        replay_hours=0,
     )
     await bridge.start()
     for _ in range(20):
@@ -207,6 +209,7 @@ async def test_auth_invalid_records_error_and_reconnects(monkeypatch) -> None:
         ha_token="bad",
         backoff_schedule=(0.05,),
         ws_connector=_ws_connector(ws),
+        replay_hours=0,
     )
     await bridge.start()
     await asyncio.sleep(0.15)
@@ -228,6 +231,7 @@ async def test_xadd_failure_does_not_crash_session() -> None:
         ha_url="http://ha.local:8123",
         ha_token="t",
         ws_connector=_ws_connector(ws),
+        replay_hours=0,
     )
     await bridge.start()
     for _ in range(40):
@@ -255,9 +259,139 @@ async def test_invalid_json_frame_recovers_via_reconnect() -> None:
         ha_token="t",
         backoff_schedule=(0.05,),
         ws_connector=_ws_connector(ws_bad),
+        replay_hours=0,
     )
     await bridge.start()
     await asyncio.sleep(0.2)
     await bridge.stop()
     assert "invalid JSON" in (bridge.status.last_error or "")
     assert bridge.status.reconnect_attempts >= 1
+
+
+def _state(state: str, *, ts: str, friendly: str = "Washer") -> dict:
+    return {
+        "entity_id": "sensor.washing_machine",
+        "state": state,
+        "last_changed": ts,
+        "last_updated": ts,
+        "attributes": {"friendly_name": friendly},
+    }
+
+
+async def test_history_replay_runs_only_on_first_session() -> None:
+    redis = FakeRedis()
+    ws = FakeWs(_auth_handshake_frames())  # no live events; just connect
+    history_calls: list[Any] = []
+
+    async def fake_history(since):
+        history_calls.append(since)
+        return [
+            [
+                _state("idle", ts="2026-05-13T18:00:00+00:00"),
+                _state("running", ts="2026-05-13T18:30:00+00:00"),
+                _state("running", ts="2026-05-13T18:31:00+00:00"),  # duplicate state — skipped
+                _state("done", ts="2026-05-13T19:00:00+00:00"),
+                _state("idle", ts="2026-05-13T19:01:00+00:00"),
+            ]
+        ]
+
+    bridge = HaEventBridge(
+        redis=redis,
+        ha_url="http://ha.local:8123",
+        ha_token="t",
+        backoff_schedule=(0.02,),
+        ws_connector=_ws_connector(ws),
+        replay_hours=6,
+        history_fetcher=fake_history,
+    )
+    await bridge.start()
+    for _ in range(40):
+        if bridge.status.history_replayed:
+            break
+        await asyncio.sleep(0.01)
+    await bridge.stop()
+
+    assert len(history_calls) == 1, "history should be fetched exactly once"
+    assert bridge.status.history_replayed is True
+    # 5 entries → 4 pairs, 1 duplicate-state pair skipped → 3 forwarded transitions
+    assert bridge.status.history_replay_count == 3
+    assert len(redis.calls) == 3
+
+    forwarded = [json.loads(c[1]["payload"]) for c in redis.calls]
+    transitions = [
+        (p["data"]["old_state"]["state"], p["data"]["new_state"]["state"]) for p in forwarded
+    ]
+    assert transitions == [("idle", "running"), ("running", "done"), ("done", "idle")]
+    for p in forwarded:
+        assert p["origin"] == "ha_event_bridge_replay"
+        assert p["entity_id"] == "sensor.washing_machine"
+
+
+async def test_history_replay_disabled_when_replay_hours_zero() -> None:
+    redis = FakeRedis()
+    ws = FakeWs(_auth_handshake_frames())
+    fetched = False
+
+    async def fake_history(since):
+        nonlocal fetched
+        fetched = True
+        return []
+
+    bridge = HaEventBridge(
+        redis=redis,
+        ha_url="http://ha.local:8123",
+        ha_token="t",
+        backoff_schedule=(0.02,),
+        ws_connector=_ws_connector(ws),
+        replay_hours=0,
+        history_fetcher=fake_history,
+    )
+    await bridge.start()
+    await asyncio.sleep(0.05)
+    await bridge.stop()
+    assert fetched is False
+    assert bridge.status.history_replayed is False
+
+
+async def test_history_replay_failure_is_logged_but_does_not_break_session() -> None:
+    redis = FakeRedis()
+    ws = FakeWs(_auth_handshake_frames() + [_state_changed_frame("light.kitchen")])
+
+    async def fake_history(since):
+        raise RuntimeError("HA returned 500")
+
+    bridge = HaEventBridge(
+        redis=redis,
+        ha_url="http://ha.local:8123",
+        ha_token="t",
+        backoff_schedule=(0.02,),
+        ws_connector=_ws_connector(ws),
+        replay_hours=6,
+        history_fetcher=fake_history,
+    )
+    await bridge.start()
+    for _ in range(40):
+        if redis.calls:
+            break
+        await asyncio.sleep(0.01)
+    await bridge.stop()
+    assert bridge.status.history_replay_error
+    assert "HA returned 500" in bridge.status.history_replay_error
+    assert len(redis.calls) == 1, "live event should still flow even when replay errored"
+    assert json.loads(redis.calls[0][1]["payload"])["entity_id"] == "light.kitchen"
+
+
+def test_build_from_env_reads_replay_hours(monkeypatch) -> None:
+    monkeypatch.setenv("HA_URL", "http://ha.local:8123")
+    monkeypatch.setenv("HA_TOKEN", "abc")
+    monkeypatch.setenv("HA_BRIDGE_REPLAY_HOURS", "24")
+    bridge = build_from_env(redis=FakeRedis())
+    assert bridge._replay_hours == 24
+
+
+def test_build_from_env_invalid_replay_hours_falls_back(monkeypatch) -> None:
+    monkeypatch.setenv("HA_URL", "http://ha.local:8123")
+    monkeypatch.setenv("HA_TOKEN", "abc")
+    monkeypatch.setenv("HA_BRIDGE_REPLAY_HOURS", "not-a-number")
+    bridge = build_from_env(redis=FakeRedis())
+    assert bridge._replay_hours == 6
