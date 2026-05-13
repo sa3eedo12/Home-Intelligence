@@ -101,7 +101,13 @@ class CapabilityRegistry:
         url = self._agent_urls.get(agent)
         if url is None:
             return {"ok": False, "error": f"Unknown agent: {agent}"}
-        async with httpx.AsyncClient(timeout=30) as client:
+        # Some capabilities chain through Ollama (e.g. dashboard_curator.summarize_*)
+        # and routinely take 25-50s on modest hardware. Old 30s timeout caused
+        # silent ReadTimeouts whose str() is empty, masking the failure in the
+        # scheduler's logs. 90s is the right ceiling: long enough for an
+        # 8B-parameter model summary, short enough that a truly hung agent
+        # surfaces as a real timeout.
+        async with httpx.AsyncClient(timeout=90) as client:
             resp = await client.post(
                 f"{url.rstrip('/')}/invoke",
                 json={"capability": capability, "payload": inputs},

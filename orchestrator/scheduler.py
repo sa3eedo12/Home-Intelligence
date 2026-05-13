@@ -121,9 +121,18 @@ class Scheduler:
             self._history[job_id]["last_status"] = "ok"
             return {"ok": True, "result": result}
         except Exception as exc:
-            logger.warning("scheduled_job_failed", job_id=job_id, error=str(exc))
-            self._history[job_id]["last_status"] = f"error: {exc}"
-            return {"ok": False, "error": str(exc)}
+            # Always log type+repr so empty-str exceptions (e.g. httpx.ReadTimeout
+            # constructed without a message) don't silently disappear from the log.
+            error_repr = f"{type(exc).__name__}: {exc!s}".strip().rstrip(":")
+            logger.warning(
+                "scheduled_job_failed",
+                job_id=job_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                error_repr=error_repr,
+            )
+            self._history[job_id]["last_status"] = f"error: {error_repr}"
+            return {"ok": False, "error": error_repr}
 
     def _build_notify_payload(
         self,

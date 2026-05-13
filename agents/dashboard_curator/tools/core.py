@@ -35,6 +35,17 @@ def _default_model() -> str:
     return os.getenv("DEFAULT_MODEL", "qwen3:8b")
 
 
+def _narrative_model() -> str:
+    """Model used for the chatty per-minute narrative summaries.
+
+    Defaults to the small qwen3:0.6b model (already warmed by the orchestrator)
+    so the 60-second scheduled cycle doesn't pile up behind 30s LLM calls and
+    blow the dispatch timeout. Override via DASHBOARD_NARRATIVE_MODEL for
+    higher fidelity at the cost of latency.
+    """
+    return os.getenv("DASHBOARD_NARRATIVE_MODEL", "qwen3:0.6b")
+
+
 def _ms_since(iso_ts: str) -> float:
     try:
         ts = datetime.fromisoformat(iso_ts)
@@ -160,7 +171,7 @@ async def _llm_narrative(window_minutes: int, agg: dict[str, Any]) -> str | None
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            model=_default_model(),
+            model=_narrative_model(),
             temperature=0.3,
         )
     except Exception as exc:
@@ -236,7 +247,7 @@ async def summarize_alerts(window_minutes: int = 60) -> dict[str, Any]:
                             "content": json.dumps(relevant[:20], ensure_ascii=False),
                         },
                     ],
-                    model=_default_model(),
+                    model=_narrative_model(),
                     temperature=0.2,
                 )
                 content = (resp.get("message") or {}).get("content")
