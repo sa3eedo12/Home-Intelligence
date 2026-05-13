@@ -236,12 +236,14 @@ async def _detect_bedtime_overrun(
     if member is None or member["sleep_time"] is None:
         return None
     typical_sleep = member["sleep_time"]
-    # If we're between midnight and ~5am local, the user's "typical bedtime"
-    # was YESTERDAY's date. Anchor typical_local to yesterday in that case.
-    typical_date = local.date()
-    if local.hour < 12:
-        typical_date = typical_date - timedelta(days=1)
-    typical_local = datetime.combine(typical_date, typical_sleep, tzinfo=local.tzinfo)
+    # Anchor typical_local to "the most recent bedtime that has already
+    # passed". Today's bedtime if it's already happened, otherwise
+    # yesterday's bedtime.
+    typical_today = datetime.combine(local.date(), typical_sleep, tzinfo=local.tzinfo)
+    if local >= typical_today:
+        typical_local = typical_today
+    else:
+        typical_local = typical_today - timedelta(days=1)
     # Allow 60 min grace
     threshold = typical_local + timedelta(minutes=60)
     if local < threshold:
@@ -258,6 +260,11 @@ async def _detect_bedtime_overrun(
     if int(row["n"] or 0) > 0:
         return None
     overdue_min = int((local - typical_local).total_seconds() // 60)
+    # Sanity bound: if we're computing >12h overdue, our typical-bedtime
+    # logic disagrees with the user's actual schedule (e.g., they pulled
+    # an all-nighter). Don't pester.
+    if overdue_min > 12 * 60:
+        return None
     return Anomaly(
         kind="anomaly.detected",
         severity="info",

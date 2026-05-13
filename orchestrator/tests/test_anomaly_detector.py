@@ -153,6 +153,38 @@ async def test_bedtime_overrun_silent_if_already_asleep() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bedtime_overrun_uses_correct_date_after_midnight() -> None:
+    """Regression: a user with sleep_time=00:30 at 02:11 was reported as
+    1541 min overdue (using YESTERDAY's bedtime instead of TODAY's)."""
+    # 02:11 Dubai = 22:11 UTC the previous day
+    now_utc = datetime(2026, 5, 13, 22, 11, tzinfo=UTC)
+    pool = _fake_pool([
+        {"id": 1, "name": "Saeed", "sleep_time": time(0, 30)},
+        {"n": 0},
+    ])
+    a = await _detect_bedtime_overrun(pool, now=now_utc, user_tz_name="Asia/Dubai")
+    assert a is not None
+    # 02:11 Dubai - 00:30 Dubai (today) = 1h 41m = 101 min
+    assert 100 <= a.payload["overdue_minutes"] <= 102
+
+
+@pytest.mark.asyncio
+async def test_bedtime_overrun_silent_when_overdue_more_than_12h() -> None:
+    """Sanity bound: a user who pulled an all-nighter shouldn't get a
+    'bedtime overrun' nag at noon the next day."""
+    # Noon Dubai
+    now_utc = datetime(2026, 5, 14, 8, 0, tzinfo=UTC)  # 12:00 Dubai
+    pool = _fake_pool([
+        {"id": 1, "name": "Saeed", "sleep_time": time(0, 30)},
+        {"n": 0},
+    ])
+    a = await _detect_bedtime_overrun(pool, now=now_utc, user_tz_name="Asia/Dubai")
+    # 12:00 is outside the 23-04 fire window AND would also be >12h overdue.
+    # Either reason → no anomaly.
+    assert a is None
+
+
+@pytest.mark.asyncio
 async def test_emit_anomalies_respects_cooldown() -> None:
     redis_calls = []
 
