@@ -164,6 +164,12 @@ services:
       # Dashboard exposed on the LAN. TrueNAS users can change the host port
       # in the Apps GUI if 8080 conflicts.
       - "8080:8000"
+    volumes:
+      # Persistent location for nightly data-science reports + LoRA training
+      # data. Writable by the apps user (UID 568); created by the user during
+      # deploy via `mkdir -p $TRUENAS_APPDATA/data/{reports,lora}`.
+      - ${TRUENAS_APPDATA}/data/reports:/data/reports
+      - ${TRUENAS_APPDATA}/data/lora:/data/lora
     depends_on:
       redis: { condition: service_healthy }
       postgres: { condition: service_healthy }

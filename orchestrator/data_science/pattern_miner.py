@@ -89,6 +89,15 @@ class PatternMiner(SingleFlightJob):
                     FROM event_log
                     WHERE ts >= now() - ($1::int * interval '1 day')
                       AND agent <> 'data_science'
+                      AND agent <> 'dashboard_curator'
+                      AND agent NOT LIKE '__orchestrator__%'
+                      AND agent NOT LIKE 'observer.%'
+                      AND capability NOT IN (
+                          'summarize_activity',
+                          'summarize_alerts',
+                          'reflector.run',
+                          'advisor.run'
+                      )
                     ORDER BY ts ASC
                     """,
                     window_days,

@@ -24,7 +24,7 @@ class ReportGenerator(SingleFlightJob):
         event_log_store: Any | None = None,
     ) -> None:
         super().__init__(job_name="reports", pool=pool, event_log_store=event_log_store)
-        raw_dir = reports_dir or os.environ.get("REPORTS_DIR") or "data/reports"
+        raw_dir = reports_dir or os.environ.get("REPORTS_DIR") or "/data/reports"
         self.reports_dir = Path(raw_dir)
         self.llm = llm
         self.model = model or os.environ.get("REPORT_MODEL") or os.environ.get("DEFAULT_MODEL")

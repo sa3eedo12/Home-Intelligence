@@ -25,7 +25,7 @@ class LoraTrainingJob(SingleFlightJob):
     ) -> None:
         super().__init__(job_name="lora_training", pool=pool, event_log_store=event_log_store)
         self.llm = llm
-        self.data_dir = Path(data_dir or os.environ.get("LORA_DATA_DIR") or "data/lora")
+        self.data_dir = Path(data_dir or os.environ.get("LORA_DATA_DIR") or "/data/lora")
         self.model_base = (
             model_base or os.environ.get("HUMANIZER_MODEL") or os.environ.get("DEFAULT_MODEL")
         )
