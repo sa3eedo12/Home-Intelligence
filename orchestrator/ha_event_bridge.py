@@ -267,11 +267,12 @@ class HaEventBridge:
         if self._history_fetcher is not None:
             return await self._history_fetcher(since)
         # HA's /api/history/period/<timestamp> endpoint is fussy about the
-        # timestamp segment: microseconds and unencoded "+" cause 400 Bad Request
-        # on at least 2024.x+. Use whole seconds in UTC with a "Z" suffix and
-        # quote the path segment defensively.
+        # timestamp segment: microseconds and unencoded "+" cause 400 Bad
+        # Request, but URL-encoding the colons (%3A) ALSO causes 400 because
+        # HA's router parses the segment as a literal ISO timestamp. Use
+        # whole seconds in UTC with a "Z" suffix and keep colons raw.
         ts = since.astimezone(UTC).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
-        ts_quoted = quote(ts, safe="")
+        ts_quoted = quote(ts, safe=":")
         url = self._ha_url.rstrip("/") + "/api/history/period/" + ts_quoted
         async with httpx.AsyncClient(timeout=REPLAY_HTTP_TIMEOUT) as client:
             resp = await client.get(

@@ -419,11 +419,14 @@ async def test_history_url_uses_seconds_z_no_microseconds_url_encoded() -> None:
 
     url = captured.get("url", "")
     assert "/api/history/period/" in url, f"unexpected url {url!r}"
-    # Must NOT contain microsecond fraction or an unencoded "+"
-    assert "." not in url.split("/api/history/period/", 1)[1].split("?", 1)[0], url
-    assert "+" not in url.split("/api/history/period/", 1)[1].split("?", 1)[0], url
-    # SHOULD contain the URL-encoded "Z" (just "Z" since it's safe) at the end of timestamp
     ts_segment = url.split("/api/history/period/", 1)[1].split("?", 1)[0]
+    # Must NOT contain microsecond fraction or an unencoded "+"
+    assert "." not in ts_segment, ts_segment
+    assert "+" not in ts_segment, ts_segment
+    # Colons MUST stay raw — HA returns 400 if they're %3A-encoded
+    assert "%3A" not in ts_segment, ts_segment
+    assert ":" in ts_segment, ts_segment
+    # SHOULD end with literal Z (UTC marker)
     assert ts_segment.endswith("Z"), ts_segment
 
 
