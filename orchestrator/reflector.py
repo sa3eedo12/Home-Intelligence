@@ -155,6 +155,10 @@ class NightlyReflector:
         self.fallback_model = fallback_model or os.environ.get("DEFAULT_MODEL", "qwen3:8b")
         self.store = ReflectionStore(pool)
         self.health_store: Any | None = None
+        # Cache of available Ollama model tags. Populated lazily on first
+        # use; populated from /api/tags so we can skip an LLM call entirely
+        # when the configured reasoner model isn't pulled.
+        self._available_models: set[str] | None = None
         # Live status surfaced through GET /admin/reflection/status so the
         # Morning Brief page can show a "running…" banner while the
         # nightly job (or a manual run) is mid-flight.
@@ -427,9 +431,59 @@ class NightlyReflector:
             return []
         return [proposal for item in raw_proposals if (proposal := self._normalize_proposal(item))]
 
+    async def _reasoner_available(self, model: str) -> bool:
+        """Check (cached) whether ``model`` is pulled into the local Ollama.
+
+        Skips an entire LLM call if the model isn't available, saving the
+        full OLLAMA_TIMEOUT_SECONDS per reflection run when a user has set
+        REASONER_MODEL to a model they haven't pulled. Cached for the
+        process lifetime; restart the orchestrator after pulling new models.
+        """
+        if self._available_models is not None:
+            return model in self._available_models
+        ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(f"{ollama_url}/api/tags")
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            logger.warning("reflection_model_probe_failed", error=str(exc))
+            # Be optimistic: assume the model exists rather than skip the call.
+            self._available_models = set()
+            return True
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            self._available_models = set()
+            return True
+        names: set[str] = set()
+        for m in models:
+            if isinstance(m, dict) and m.get("name"):
+                names.add(str(m["name"]))
+        self._available_models = names
+        return model in names
+
     async def _chat_with_fallback(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         reasoner_model = os.environ.get("REASONER_MODEL", self.reasoner_model)
         fallback_model = os.environ.get("DEFAULT_MODEL", self.fallback_model)
+
+        # Pre-check: skip the reasoner model entirely if Ollama doesn't have
+        # it pulled. Without this, an HA without the big model wastes our
+        # entire OLLAMA_TIMEOUT_SECONDS (default 180s) on EACH reflection.
+        # Cached on the instance after the first probe.
+        if not await self._reasoner_available(reasoner_model):
+            logger.info(
+                "reflection_reasoner_skipped_not_pulled",
+                model=reasoner_model,
+                fallback=fallback_model,
+            )
+            return await self.llm.chat(
+                messages=messages,
+                model=fallback_model,
+                temperature=0.1,
+                response_format="json",
+            )
+
         try:
             return await self.llm.chat(
                 messages=messages,
