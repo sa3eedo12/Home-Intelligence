@@ -1,0 +1,141 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from tools.cycle_loads import (
+    CANDIDATE_LABELS,
+    _bucket_for_duration,
+    _guess_from_program,
+    _habitual_label,
+    _infer,
+    _keyboard_for,
+)
+
+
+def test_guess_from_program_keyword_match() -> None:
+    label, reason = _guess_from_program("Delicates")
+    assert label == "delicates"
+    assert "delicate" in reason
+
+    label, reason = _guess_from_program("Sports Cycle")
+    assert label == "workout"
+
+    label, reason = _guess_from_program("Cotton 60")
+    assert label == "colors"
+
+
+def test_guess_from_program_no_match() -> None:
+    label, reason = _guess_from_program(None)
+    assert label is None and reason == ""
+    label, reason = _guess_from_program("ECO mystery cycle")
+    assert label is None
+
+
+def test_duration_bucket_thresholds() -> None:
+    assert _bucket_for_duration(20 * 60)[0] == "quick"
+    assert _bucket_for_duration(35 * 60)[0] == "delicates"
+    assert _bucket_for_duration(60 * 60)[0] == "colors"
+    assert _bucket_for_duration(100 * 60)[0] == "towels"
+    assert _bucket_for_duration(150 * 60)[0] == "bedding"
+    assert _bucket_for_duration(None)[0] is None
+
+
+def test_habitual_label_majority_wins() -> None:
+    label, reason = _habitual_label(["colors", "colors", "whites"])
+    assert label == "colors"
+    assert "most common" in reason
+
+
+def test_habitual_label_no_repeat_means_no_signal() -> None:
+    label, _ = _habitual_label(["colors", "whites"])
+    assert label is None
+
+
+def test_infer_program_signal_beats_duration() -> None:
+    label, conf, reason = _infer(
+        duration_seconds=60 * 60,  # 'colors' bucket
+        program="Delicates",
+        history=[],
+    )
+    assert label == "delicates"
+    assert conf >= 0.75
+    assert "delicate" in reason
+
+
+def test_infer_duration_when_no_program() -> None:
+    label, conf, reason = _infer(
+        duration_seconds=20 * 60,
+        program=None,
+        history=[],
+    )
+    assert label == "quick"
+    assert 0.4 < conf < 0.6
+
+
+def test_infer_habit_boosts_agreeing_signal() -> None:
+    label, conf, _ = _infer(
+        duration_seconds=60 * 60,
+        program="Cotton",
+        history=["colors", "colors", "colors"],
+    )
+    assert label == "colors"
+    assert conf >= 0.85
+
+
+def test_infer_default_when_no_signals() -> None:
+    label, conf, reason = _infer(duration_seconds=None, program=None, history=[])
+    assert label == "colors"
+    assert conf == 0.2
+    assert "default" in reason.lower()
+
+
+def test_keyboard_has_guess_first_and_skip_button() -> None:
+    keyboard = _keyboard_for(42, "towels")
+    flat = [btn["callback"] for row in keyboard for btn in row]
+    # The guessed label should be the first button overall
+    assert keyboard[0][0]["callback"] == "cycle:42:towels"
+    assert keyboard[0][0]["text"].startswith("✅ ")
+    # _skip is always present
+    assert "cycle:42:_skip" in flat
+    # Every non-skip callback references a known candidate
+    for callback in flat:
+        label = callback.rsplit(":", 1)[1]
+        assert label in (*CANDIDATE_LABELS, "_skip")
+
+
+def test_keyboard_caps_button_count() -> None:
+    keyboard = _keyboard_for(1, "colors")
+    # 6 candidate buttons (across however many rows) + 1 skip row = max 3 rows total
+    assert len(keyboard) <= 3
+    candidate_count = sum(
+        1 for row in keyboard for btn in row if not btn["callback"].endswith(":_skip")
+    )
+    assert candidate_count == 6
+
+
+# --- helpers required by datetime parsing tests ---
+def test_iso_parse_roundtrips_z_suffix() -> None:
+    from tools.cycle_loads import _parse_iso
+
+    dt = _parse_iso("2026-05-13T19:00:00Z")
+    assert dt is not None
+    assert dt.tzinfo is not None
+    assert dt.astimezone(UTC).hour == 19
+
+
+def test_iso_parse_handles_datetime_passthrough() -> None:
+    from tools.cycle_loads import _parse_iso
+
+    now = datetime(2026, 5, 13, 19, 0, tzinfo=UTC)
+    assert _parse_iso(now) == now
+
+
+def test_coerce_int_accepts_floats_and_strings() -> None:
+    from tools.cycle_loads import _coerce_int
+
+    assert _coerce_int(60) == 60
+    assert _coerce_int("60") == 60
+    assert _coerce_int("60.5") == 60
+    assert _coerce_int(-1) is None
+    assert _coerce_int("garbage") is None
+    assert _coerce_int(None) is None

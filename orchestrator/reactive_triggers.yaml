@@ -47,10 +47,19 @@ triggers:
     stream: events.observed
     match:
       kind: appliance.cycle_completed
-    notify_from_payload:
-      text_template: "🧺 {summary}. Want me to remind you to pull the laundry out?"
-      topic_template: "appliance.cycle_completed"
-      severity_field: severity
+    dispatch:
+      agent: household_ops
+      capability: infer_cycle_load
+      # The reactive consumer hands the full envelope (agent/kind/summary/
+      # payload/ts) to handle_event as "payload"; the cycle's own fields
+      # (appliance, entity_id, duration_seconds, program, etc.) live one
+      # level deeper at payload.payload.
+      inputs_from: payload.payload
+    notify_from_result:
+      text_field: summary
+      topic: appliance.cycle_completed
+      severity: notice
+      keyboard_field: keyboard
 
   - id: cleaning_completed
     stream: events.observed

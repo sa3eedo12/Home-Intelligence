@@ -55,6 +55,21 @@ capabilities:
     description: Return recipe for a planned meal.
     side_effects: false
     cost: medium
+  - id: infer_cycle_load
+    description: |
+      Guess what kind of load a finished washer/dryer cycle was and offer
+      quick-reply buttons so the user can confirm or correct. Dispatched by
+      the appliance.cycle_completed reactive trigger.
+    side_effects: true
+    cost: low
+  - id: confirm_cycle_load
+    description: Persist the user's confirmation of a cycle's load type.
+    side_effects: true
+    cost: low
+  - id: recent_cycle_loads
+    description: List recent confirmed/unconfirmed appliance loads.
+    side_effects: false
+    cost: low
 subscribes:
   - events.home
 publishes:

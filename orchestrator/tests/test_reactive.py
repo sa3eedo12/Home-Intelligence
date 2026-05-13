@@ -88,7 +88,12 @@ async def test_system_severity_min_matching(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_observer_events_become_user_notifications(tmp_path: Path) -> None:
-    """The shipped reactive_triggers.yaml turns each observer event into a notification."""
+    """The shipped reactive_triggers.yaml turns each observer event into a notification.
+
+    NOTE: ``appliance_cycle_completed`` is excluded here because it dispatches
+    to ``household_ops.infer_cycle_load`` rather than rendering from the
+    payload directly. Its own dedicated test covers the dispatch path.
+    """
     repo_root = Path(__file__).resolve().parents[1]  # noqa: ASYNC240 - sync setup
     triggers_path = repo_root / "reactive_triggers.yaml"
     triggers_text = triggers_path.read_text(encoding="utf-8")  # noqa: ASYNC240
@@ -104,11 +109,6 @@ async def test_observer_events_become_user_notifications(tmp_path: Path) -> None
     by_id = {t["id"]: t for t in triggers}
 
     cases = [
-        (
-            "appliance_cycle_completed",
-            "appliance.cycle_completed",
-            "Washer cycle completed for Bosch",
-        ),
         ("cleaning_completed", "cleaning.completed", "Vacuum cleaning completed for Roomba"),
         ("coffee_brewed", "coffee.brewed", "Coffee brewed by Espresso"),
         (
@@ -162,3 +162,124 @@ async def test_observer_event_with_wrong_kind_is_ignored(tmp_path: Path) -> None
     )
     rows = await redis.xrange("notify.outbound")
     assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_appliance_cycle_completed_dispatches_and_carries_keyboard(tmp_path: Path) -> None:
+    """The shipped appliance_cycle_completed trigger should:
+    - Dispatch to household_ops.infer_cycle_load with the observer payload as inputs
+    - Read summary AND keyboard from the result and forward to notify.outbound
+    """
+    repo_root = Path(__file__).resolve().parents[1]  # noqa: ASYNC240
+    triggers_path = repo_root / "reactive_triggers.yaml"
+    triggers_text = triggers_path.read_text(encoding="utf-8")  # noqa: ASYNC240
+
+    redis = FakeRedis(decode_responses=True)
+    registry = MagicMock()
+    fake_keyboard = [[{"text": "colors", "callback": "cycle:1:colors"}]]
+    registry.dispatch = AsyncMock(
+        return_value={
+            "ok": True,
+            "result": {
+                "ok": True,
+                "summary": (
+                    "🧺 Washer cycle done. best guess: **colors** (80%). Confirm or correct?"
+                ),
+                "label": "colors",
+                "confidence": 0.8,
+                "cycle_load_id": 99,
+                "keyboard": fake_keyboard,
+            },
+        }
+    )
+    reactive = Reactive(registry=registry, redis=redis, triggers_path=str(triggers_path))
+
+    import yaml as _yaml
+
+    triggers = _yaml.safe_load(triggers_text)["triggers"]
+    trigger = next(t for t in triggers if t["id"] == "appliance_cycle_completed")
+
+    envelope = {
+        "agent": "observer.washer",
+        "kind": "appliance.cycle_completed",
+        "summary": "Washer cycle completed for Samsung Washer",
+        "payload": {
+            "appliance": "washer",
+            "entity_id": "sensor.washer_power",
+            "duration_seconds": 2700,
+            "program": "Cotton",
+        },
+        "ts": "2026-05-13T19:00:00+00:00",
+    }
+    await reactive.handle_event(trigger, envelope)
+
+    registry.dispatch.assert_awaited_once()
+    args = registry.dispatch.call_args
+    assert args.args[0] == "household_ops"
+    assert args.args[1] == "infer_cycle_load"
+    inputs = args.args[2]
+    assert inputs["appliance"] == "washer"
+    assert inputs["entity_id"] == "sensor.washer_power"
+    assert inputs["duration_seconds"] == 2700
+    assert inputs["program"] == "Cotton"
+
+    rows = await redis.xrange("notify.outbound")
+    assert len(rows) == 1
+    notification = json.loads(rows[0][1]["payload"])
+    assert "best guess" in notification["text"]
+    assert notification["keyboard"] == fake_keyboard
+
+
+@pytest.mark.asyncio
+async def test_reactive_inputs_from_payload_uses_nested_field(tmp_path: Path) -> None:
+    """Test the _build_dispatch_inputs helper with nested field selection."""
+    triggers_path = tmp_path / "reactive.yaml"
+    triggers_path.write_text("triggers: []", encoding="utf-8")
+    redis = FakeRedis(decode_responses=True)
+    registry = MagicMock()
+    registry.dispatch = AsyncMock(return_value={"ok": True, "result": {"summary": "ok"}})
+    reactive = Reactive(registry=registry, redis=redis, triggers_path=str(triggers_path))
+
+    trigger = {
+        "id": "x",
+        "match": {},
+        "dispatch": {
+            "agent": "x",
+            "capability": "y",
+            "inputs_from": "payload.payload",
+            "inputs": {"override_field": 1},
+        },
+        "notify_from_result": {"text_field": "summary", "topic": "x"},
+    }
+    await reactive.handle_event(
+        trigger,
+        {"payload": {"entity_id": "sensor.x", "duration_seconds": 60}, "summary": "ignored"},
+    )
+    args = registry.dispatch.call_args.args
+    assert args[2] == {"entity_id": "sensor.x", "duration_seconds": 60, "override_field": 1}
+
+
+@pytest.mark.asyncio
+async def test_reactive_notify_from_payload_passes_keyboard_field(tmp_path: Path) -> None:
+    triggers_path = tmp_path / "reactive.yaml"
+    triggers_path.write_text("triggers: []", encoding="utf-8")
+    redis = FakeRedis(decode_responses=True)
+    registry = MagicMock()
+    registry.dispatch = AsyncMock()
+    reactive = Reactive(registry=registry, redis=redis, triggers_path=str(triggers_path))
+
+    trigger = {
+        "id": "y",
+        "match": {},
+        "notify_from_payload": {
+            "text_template": "{summary}",
+            "topic_template": "x.y",
+            "keyboard_field": "kbd",
+        },
+    }
+    kbd = [[{"text": "Yes", "callback": "cycle:1:colors"}]]
+    await reactive.handle_event(trigger, {"summary": "hi", "kbd": kbd})
+    rows = await redis.xrange("notify.outbound")
+    assert len(rows) == 1
+    notif = json.loads(rows[0][1]["payload"])
+    assert notif["keyboard"] == kbd

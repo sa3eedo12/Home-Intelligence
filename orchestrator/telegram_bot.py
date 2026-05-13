@@ -457,6 +457,11 @@ def _make_callback(
         if len(parts) < 2:
             return
         action, workflow_id = parts[0], parts[1]
+
+        if action == "cycle":
+            await _handle_cycle_callback(update, query, parts, router)
+            return
+
         if action not in {"confirm", "cancel"}:
             return
 
@@ -488,6 +493,48 @@ def _make_callback(
                 await clear_pending(redis, chat_id)
 
     return callback_handler
+
+
+async def _handle_cycle_callback(
+    update: Update,
+    query: Any,
+    parts: list[str],
+    router: Router,
+) -> None:
+    """Handle ``cycle:<cycle_load_id>:<label>`` Telegram callbacks.
+
+    Dispatches to ``household_ops.confirm_cycle_load`` and rewrites the
+    message to reflect the final state so the buttons disappear.
+    """
+    if len(parts) < 3:
+        await query.edit_message_text("Cycle confirmation expired or invalid.")
+        return
+    try:
+        cycle_load_id = int(parts[1])
+    except ValueError:
+        await query.edit_message_text("Cycle confirmation has a bad id.")
+        return
+    label = parts[2]
+    chat_id = _chat_id(update)
+    if label == "_skip":
+        await query.edit_message_text("👌 Skipped.")
+        return
+    try:
+        result = await router.dispatch(
+            "household_ops",
+            "confirm_cycle_load",
+            {"cycle_load_id": cycle_load_id, "label": label, "chat_id": chat_id},
+        )
+    except Exception as exc:
+        logger.warning("cycle_confirm_dispatch_failed", error=str(exc))
+        await query.edit_message_text(f"Couldn't save: {exc}")
+        return
+    inner = result.get("result") if isinstance(result, dict) else None
+    if isinstance(inner, dict) and inner.get("ok"):
+        await query.edit_message_text(f"✅ Saved: {label}")
+    else:
+        err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
+        await query.edit_message_text(f"Couldn't save: {err}")
 
 
 async def _handle_pending_callback(
@@ -603,5 +650,35 @@ async def build_telegram_app(
     return app
 
 
+def _to_inline_keyboard(keyboard: Any) -> InlineKeyboardMarkup | None:
+    """Convert the list-of-lists of ``{text, callback}`` dicts produced by
+    reactive triggers / cycle inference into a telegram ``InlineKeyboardMarkup``.
+
+    Returns ``None`` for empty/invalid input so callers can pass it straight
+    through to ``send_message(reply_markup=...)``.
+    """
+    if not keyboard:
+        return None
+    rows: list[list[InlineKeyboardButton]] = []
+    for row in keyboard:
+        if not isinstance(row, list):
+            continue
+        buttons: list[InlineKeyboardButton] = []
+        for btn in row:
+            if not isinstance(btn, dict):
+                continue
+            text = str(btn.get("text") or "").strip()
+            callback = str(btn.get("callback") or "").strip()
+            if not text or not callback:
+                continue
+            buttons.append(InlineKeyboardButton(text=text, callback_data=callback))
+        if buttons:
+            rows.append(buttons)
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
 async def send(application: Application, chat_id: int, text: str, reply_markup=None) -> None:
-    await application.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+    converted = _to_inline_keyboard(reply_markup) if not isinstance(
+        reply_markup, InlineKeyboardMarkup
+    ) else reply_markup
+    await application.bot.send_message(chat_id=chat_id, text=text, reply_markup=converted)

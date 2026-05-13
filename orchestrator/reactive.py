@@ -77,6 +77,36 @@ class Reactive:
             except Exception as exc:
                 logger.warning("reactive_consumer_error", trigger=trigger_id, error=str(exc))
 
+    def _build_dispatch_inputs(
+        self, dispatch: dict[str, Any], payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Merge static ``dispatch.inputs`` with optional ``inputs_from`` payload key.
+
+        ``inputs_from: payload`` passes the entire observer payload as the
+        capability's arguments. ``inputs_from: payload.<field>`` picks a
+        sub-dict from the payload. Static ``inputs`` keys override anything
+        sourced from the payload.
+        """
+        static = dispatch.get("inputs") or {}
+        inputs_from = dispatch.get("inputs_from")
+        if not inputs_from:
+            return dict(static) if isinstance(static, dict) else {}
+        source: Any = payload
+        if isinstance(inputs_from, str):
+            # "payload" → use the payload itself; "payload.x.y" → walk into payload["x"]["y"]
+            parts = inputs_from.split(".")
+            if parts and parts[0] == "payload":
+                parts = parts[1:]
+            for part in parts:
+                if isinstance(source, dict):
+                    source = source.get(part, {})
+                else:
+                    source = {}
+        merged = dict(source) if isinstance(source, dict) else {}
+        if isinstance(static, dict):
+            merged.update(static)
+        return merged
+
     async def handle_event(self, trigger: dict[str, Any], payload: dict[str, Any]) -> None:
         if not self._matches(trigger.get("match", {}), payload):
             return
@@ -84,20 +114,26 @@ class Reactive:
         dispatch = trigger.get("dispatch")
         result: dict[str, Any] = {}
         if dispatch:
+            inputs = self._build_dispatch_inputs(dispatch, payload)
             result = await self._registry.dispatch(
                 dispatch.get("agent", ""),
                 dispatch.get("capability", ""),
-                dispatch.get("inputs", {}),
+                inputs,
             )
 
         notify_from_result = trigger.get("notify_from_result")
         if notify_from_result:
             output = result.get("result") if isinstance(result, dict) else {}
+            if not isinstance(output, dict):
+                # Some dispatch paths return the result directly (no "result" wrapper)
+                output = result if isinstance(result, dict) else {}
             text_field = notify_from_result.get("text_field", "summary")
-            if isinstance(output, dict):
-                text = str(output.get(text_field, ""))
-            else:
-                text = str(output)
+            text = str(output.get(text_field, "")) if isinstance(output, dict) else str(output)
+            keyboard: Any = notify_from_result.get("keyboard")
+            keyboard_field = notify_from_result.get("keyboard_field")
+            if keyboard_field and isinstance(output, dict):
+                # Output field overrides any static keyboard set in the yaml
+                keyboard = output.get(keyboard_field) or keyboard
             if text:
                 await self._redis.xadd(
                     "notify.outbound",
@@ -109,7 +145,7 @@ class Reactive:
                                 "severity": notify_from_result.get("severity", "info"),
                                 "agent": dispatch.get("agent") if dispatch else None,
                                 "capability": dispatch.get("capability") if dispatch else None,
-                                "keyboard": notify_from_result.get("keyboard"),
+                                "keyboard": keyboard,
                             }
                         )
                     },
@@ -122,6 +158,8 @@ class Reactive:
             text = template.format(**payload)
             topic = topic_template.format(**payload)
             severity = payload.get(notify_from_payload.get("severity_field", "severity"), "info")
+            keyboard_field = notify_from_payload.get("keyboard_field")
+            keyboard = payload.get(keyboard_field) if keyboard_field else None
             await self._redis.xadd(
                 "notify.outbound",
                 {
@@ -131,6 +169,7 @@ class Reactive:
                             "topic": topic,
                             "severity": severity,
                             "agent": payload.get("agent"),
+                            "keyboard": keyboard,
                         }
                     )
                 },
