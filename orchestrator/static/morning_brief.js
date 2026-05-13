@@ -5,11 +5,10 @@ async function copyProposalPrompt(button) {
   button.disabled = true;
   button.textContent = 'Copying…';
   try {
-    const response = await fetch(`/admin/proposals/${proposalId}/format`, { method: 'POST' });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const payload = await response.json();
+    const payload = await apiPost(`/admin/proposals/${proposalId}/format`);
     await navigator.clipboard.writeText(payload.markdown || '');
     button.textContent = 'Copied';
+    Toast.show('Proposal prompt copied', 'success');
   } catch (error) {
     console.error('copy proposal failed', error);
     button.textContent = 'Failed';
@@ -32,7 +31,6 @@ function deliveryBoxFor(button) {
   }
   return box;
 }
-
 function showDeliveryStatus(button, message, className = 'delivery-status') {
   const box = deliveryBoxFor(button);
   if (!box) return;
@@ -44,7 +42,6 @@ function showDeliveryStatus(button, message, className = 'delivery-status') {
   }
   status.textContent = message;
 }
-
 function showDeliveryLink(button, url, label, className) {
   const box = deliveryBoxFor(button);
   if (!box || !url) return;
@@ -59,21 +56,11 @@ function showDeliveryLink(button, url, label, className) {
   link.href = url;
   link.textContent = label;
 }
-
-async function readJson(response) {
-  try {
-    return await response.json();
-  } catch (_error) {
-    return {};
-  }
-}
-
 function configuredHelpText(payload) {
   const detail = String(payload.detail || payload.message || '').toLowerCase();
   if (!detail.includes('not configured')) return null;
   return 'Set GITHUB_REPO_TOKEN and GITHUB_REPO in your TrueNAS .env to enable this.';
 }
-
 async function postProposalDelivery(button, endpoint, options) {
   const proposalId = button.dataset.proposalId;
   if (!proposalId) return;
@@ -81,27 +68,21 @@ async function postProposalDelivery(button, endpoint, options) {
   button.disabled = true;
   button.textContent = options.pendingText;
   try {
-    const response = await fetch(`/admin/proposals/${proposalId}/${endpoint}`, { method: 'POST' });
-    const payload = await readJson(response);
-    if (!response.ok) {
-      const help = response.status === 503 ? configuredHelpText(payload) : null;
-      if (help) showDeliveryStatus(button, help, 'delivery-help');
-      throw new Error(payload.detail || `HTTP ${response.status}`);
-    }
+    const payload = await apiPost(`/admin/proposals/${proposalId}/${endpoint}`, undefined, { toastErrors: false });
     const url = payload[options.urlKey] || payload.url || payload.pr_url || payload.issue_url;
     showDeliveryLink(button, url, options.linkLabel, options.linkClass);
     if (payload.message) showDeliveryStatus(button, payload.message);
     button.textContent = payload.already_dispatched ? 'Already sent' : 'Sent';
+    Toast.show(payload.message || `${options.linkLabel} ready`, 'success');
   } catch (error) {
     console.error(`${endpoint} failed`, error);
-    button.textContent = 'Failed';
-    if (!String(error.message || error).includes('not configured')) {
-      showDeliveryStatus(button, `Failed: ${error.message || error}`, 'delivery-error');
-    }
+    const help = configuredHelpText({ detail: error.message || String(error) });
+    if (help) showDeliveryStatus(button, help, 'delivery-help');
+    else showDeliveryStatus(button, `Failed: ${error.message || error}`, 'delivery-error');
+    Toast.show(error.message || String(error), 'danger');
     button.disabled = false;
-    setTimeout(() => {
-      button.textContent = original;
-    }, 2200);
+    button.textContent = 'Failed';
+    setTimeout(() => { button.textContent = original; }, 2200);
     return;
   }
   button.disabled = true;
@@ -109,43 +90,24 @@ async function postProposalDelivery(button, endpoint, options) {
 
 document.addEventListener('click', (event) => {
   const copyButton = event.target.closest('.copy-prompt');
-  if (copyButton) {
-    copyProposalPrompt(copyButton);
-    return;
-  }
+  if (copyButton) { copyProposalPrompt(copyButton); return; }
   const issueButton = event.target.closest('.open-issue');
   if (issueButton) {
-    postProposalDelivery(issueButton, 'github-issue', {
-      pendingText: 'Opening…',
-      urlKey: 'url',
-      linkLabel: 'GitHub issue',
-      linkClass: 'github-issue-link',
-    });
+    postProposalDelivery(issueButton, 'github-issue', { pendingText: 'Opening…', urlKey: 'url', linkLabel: 'GitHub issue', linkClass: 'github-issue-link' });
     return;
   }
   const copilotButton = event.target.closest('.copilot-dispatch');
   if (copilotButton) {
-    postProposalDelivery(copilotButton, 'copilot-dispatch', {
-      pendingText: 'Dispatching…',
-      urlKey: 'issue_url',
-      linkLabel: 'Copilot issue',
-      linkClass: 'copilot-issue-link',
-    });
+    postProposalDelivery(copilotButton, 'copilot-dispatch', { pendingText: 'Dispatching…', urlKey: 'issue_url', linkLabel: 'Copilot issue', linkClass: 'copilot-issue-link' });
   }
 });
-
-// === Reflection-in-progress indicator =====================================
-// Polls /admin/reflection/status while a run is happening. Auto-refreshes
-// the page once the run finishes so the new brief appears.
 
 const banner = document.getElementById('reflection-banner');
 const phaseEl = document.getElementById('reflection-phase');
 const elapsedEl = document.getElementById('reflection-elapsed');
 const runNowBtn = document.getElementById('run-now-btn');
-
 let pollHandle = null;
 let lastSeenRunning = banner ? banner.dataset.running === '1' : false;
-
 function fmtElapsed(seconds) {
   if (seconds == null || isNaN(seconds)) return '';
   const s = Math.round(seconds);
@@ -154,50 +116,33 @@ function fmtElapsed(seconds) {
   const r = s % 60;
   return r ? `${m}m ${r}s` : `${m}m`;
 }
-
 async function tickReflectionStatus() {
   try {
-    const res = await fetch('/admin/reflection/status', { cache: 'no-store' });
-    if (!res.ok) return;
-    const status = await res.json();
+    const status = await apiGet('/admin/reflection/status', { toastErrors: false });
     const running = !!status.running;
-
     if (banner) {
       banner.classList.toggle('visible', running);
       banner.dataset.running = running ? '1' : '0';
       if (phaseEl) phaseEl.textContent = status.phase || (running ? 'starting' : '');
-      if (elapsedEl) elapsedEl.textContent = running
-        ? `· ${fmtElapsed(status.elapsed_seconds)}`
-        : '';
+      if (elapsedEl) elapsedEl.textContent = running ? `· ${fmtElapsed(status.elapsed_seconds)}` : '';
     }
-
-    if (lastSeenRunning && !running) {
-      // Just finished — refresh so the new brief shows up.
-      window.location.reload();
-      return;
-    }
+    if (lastSeenRunning && !running) { window.location.reload(); return; }
     lastSeenRunning = running;
-
-    if (running && pollHandle == null) {
-      pollHandle = setInterval(tickReflectionStatus, 3000);
-    } else if (!running && pollHandle != null) {
-      clearInterval(pollHandle);
-      pollHandle = null;
-    }
+    if (running && pollHandle == null) pollHandle = setInterval(tickReflectionStatus, 3000);
+    else if (!running && pollHandle != null) { clearInterval(pollHandle); pollHandle = null; }
   } catch (error) {
     console.warn('reflection status poll failed', error);
   }
 }
-
 async function startReflectionNow() {
   if (!runNowBtn) return;
   const original = runNowBtn.textContent;
   runNowBtn.disabled = true;
   runNowBtn.textContent = 'Starting…';
   try {
-    const res = await fetch('/admin/reflection/run', { method: 'POST' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await apiPost('/admin/reflection/run');
     runNowBtn.textContent = 'Started';
+    Toast.show('Reflection started', 'success');
     await tickReflectionStatus();
   } catch (error) {
     console.error('start reflection failed', error);
@@ -209,22 +154,9 @@ async function startReflectionNow() {
     }, 2000);
   }
 }
-
 if (runNowBtn) runNowBtn.addEventListener('click', startReflectionNow);
-
-// Always poll once on load — covers the case where a nightly run kicked off
-// while no one was looking at the dashboard.
 tickReflectionStatus();
-// If the page loaded with running=true (server-rendered), kick off polling now.
-if (lastSeenRunning && pollHandle == null) {
-  pollHandle = setInterval(tickReflectionStatus, 3000);
-}
-
-
-// === Profile question answer/skip ==========================================
-// Each "Question for you" card carries a data-profile-key attribute. Save
-// posts to /admin/profile/upsert; Skip posts to /admin/profile/skip so the
-// reflector deprioritises that gap. After either, fade the card out.
+if (lastSeenRunning && pollHandle == null) pollHandle = setInterval(tickReflectionStatus, 3000);
 
 async function handleQuestionForm(form, action) {
   const card = form.closest('.question-card');
@@ -234,31 +166,19 @@ async function handleQuestionForm(form, action) {
   const status = form.querySelector('.question-status');
   const buttons = form.querySelectorAll('button');
   const value = (input?.value || '').trim();
-
   if (action === 'save' && !value) {
-    if (status) {
-      status.hidden = false;
-      status.textContent = 'Type an answer first.';
-    }
+    Toast.show('Type an answer first.', 'warning');
+    if (status) { status.hidden = false; status.textContent = 'Type an answer first.'; }
     return;
   }
-
   buttons.forEach((b) => (b.disabled = true));
-  if (status) {
-    status.hidden = false;
-    status.textContent = action === 'save' ? 'Saving…' : 'Skipping…';
-  }
-
+  if (status) { status.hidden = false; status.textContent = action === 'save' ? 'Saving…' : 'Skipping…'; }
   try {
     const url = action === 'save' ? '/admin/profile/upsert' : '/admin/profile/skip';
     const body = action === 'save' ? { key, value, source: 'morning_brief' } : { key };
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await apiPost(url, body);
     if (status) status.textContent = action === 'save' ? '✓ Saved' : '✓ Skipped';
+    Toast.show(action === 'save' ? 'Answer saved' : 'Question skipped', 'success');
     card.classList.add('question-answered');
     setTimeout(() => card.remove(), 800);
   } catch (error) {
@@ -267,14 +187,12 @@ async function handleQuestionForm(form, action) {
     buttons.forEach((b) => (b.disabled = false));
   }
 }
-
 document.addEventListener('submit', (event) => {
   const form = event.target.closest('.question-answer-form');
   if (!form) return;
   event.preventDefault();
   handleQuestionForm(form, 'save');
 });
-
 document.addEventListener('click', (event) => {
   const skip = event.target.closest('.skip-question');
   if (skip) {

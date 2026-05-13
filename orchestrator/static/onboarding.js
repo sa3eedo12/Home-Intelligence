@@ -2,7 +2,7 @@
   function showError(message) {
     const banner = document.getElementById('onboarding-error-banner');
     if (banner) {
-      banner.style.display = 'block';
+      banner.hidden = false;
       banner.textContent = `Onboarding script error: ${message}. Form actions may not work — check the browser console.`;
     }
     console.error('[onboarding]', message);
@@ -20,36 +20,17 @@
   const savedRoutineKeys = new Set();
   let activeHabit = null;
 
-  async function requestJSON(url, options = {}) {
-    const resp = await fetch(url, {
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-      ...options,
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => resp.statusText);
-      throw new Error(`${resp.status} ${text}`);
-    }
-    return resp.json();
+  function requestJSON(url, options = {}) {
+    const method = options.method || 'GET';
+    if (method === 'GET') return apiGet(url);
+    let body;
+    if (typeof options.body === 'string') {
+      try { body = JSON.parse(options.body); } catch (_err) { body = options.body; }
+    } else body = options.body;
+    return apiPost(url, body, { method });
   }
 
-  function showDialog(dialog) {
-    if (!dialog) return;
-    if (typeof dialog.showModal === 'function') dialog.showModal();
-    else dialog.setAttribute('open', 'open');
-  }
-
-  function closeDialog(dialog) {
-    if (!dialog) return;
-    if (typeof dialog.close === 'function') dialog.close();
-    else dialog.removeAttribute('open');
-  }
-
-  function csv(value) {
-    return String(value || '')
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
-  }
+  function csv(value) { return String(value || '').split(',').map((item) => item.trim()).filter(Boolean); }
 
   function memberPayload(form) {
     const formData = new FormData(form);
@@ -71,37 +52,31 @@
     const container = document.getElementById('routine-fields');
     if (!container) return;
     const missing = summary.missing_profile_keys || [];
-    const labels = {
-      wake_time: 'Usual wake time',
-      sleep_time: 'Usual sleep time',
-      work_hours: 'Work hours',
-    };
-    const hints = {
-      wake_time: 'Example: 07:00',
-      sleep_time: 'Example: 22:30',
-      work_hours: 'Example: weekdays 09:00-17:00',
-    };
+    const labels = { wake_time: 'Usual wake time', sleep_time: 'Usual sleep time', work_hours: 'Work hours' };
+    const hints = { wake_time: 'Example: 07:00', sleep_time: 'Example: 22:30', work_hours: 'Example: weekdays 09:00-17:00' };
     container.innerHTML = '';
     if (!missing.length) {
-      const done = document.createElement('p');
-      done.className = 'empty';
-      done.textContent = 'All routine keys are filled.';
+      const done = document.createElement('div');
+      done.className = 'empty-state compact';
+      done.innerHTML = '<div class="empty-state-icon">✅</div><h3>Routine keys complete</h3><p>All routine keys are filled.</p>';
       container.appendChild(done);
       return;
     }
     for (const key of missing) {
       const card = document.createElement('article');
-      card.className = 'field-card';
+      card.className = 'field-card card-hover';
       card.dataset.key = key;
       const label = document.createElement('label');
+      label.className = 'label';
       label.textContent = labels[key] || key;
       const input = document.createElement('input');
+      input.className = 'input';
       input.name = key;
       input.type = key.endsWith('_time') ? 'time' : 'text';
       input.placeholder = hints[key] || '';
       const button = document.createElement('button');
       button.type = 'button';
-      button.className = 'save-routine-key';
+      button.className = 'btn btn-primary save-routine-key';
       button.textContent = 'Save';
       label.appendChild(input);
       card.append(label, button);
@@ -112,30 +87,20 @@
   function finishIfRoutineReady() {
     const missing = summary.missing_profile_keys || [];
     if (savedRoutineKeys.size >= missing.length) window.location.reload();
-    else window.alert('Save each missing routine field first.');
+    else Toast.show('Save each missing routine field first.', 'warning');
   }
-
-  // Always attach the submit/click listeners FIRST so they survive any
-  // exception in rendering helpers below. The handlers themselves no-op
-  // when the relevant DOM nodes aren't on the page.
 
   async function submitMemberForm(form) {
     if (!(form instanceof HTMLFormElement)) return;
     const button = form.querySelector('button[type="submit"]');
     try {
       if (button) button.setAttribute('disabled', 'disabled');
-      await requestJSON('/admin/household/upsert', {
-        method: 'POST',
-        body: JSON.stringify(memberPayload(form)),
-      });
-      window.location.reload();
-    } catch (err) {
-      window.alert(err.message || String(err));
-      if (button) button.removeAttribute('disabled');
-    }
+      await requestJSON('/admin/household/upsert', { method: 'POST', body: JSON.stringify(memberPayload(form)) });
+      Toast.show('Household member saved', 'success');
+      setTimeout(() => window.location.reload(), 650);
+    } catch (_err) { if (button) button.removeAttribute('disabled'); }
   }
 
-  // Document-delegated submit (covers the normal Enter-in-input + button-click path).
   document.addEventListener('submit', (event) => {
     const form = event.target;
     if (!(form instanceof HTMLFormElement) || form.id !== 'member-form') return;
@@ -143,26 +108,13 @@
     submitMemberForm(form);
   });
 
-  // Belt-and-suspenders: also bind directly on the form element AND on the
-  // submit button. Some browser configurations don't bubble the submit event
-  // to document when the form has a `javascript:` action or other oddness.
   const memberForm = document.getElementById('member-form');
   if (memberForm instanceof HTMLFormElement) {
-    memberForm.addEventListener('submit', (event) => {
-      event.preventDefault();
-      submitMemberForm(memberForm);
-    });
+    memberForm.addEventListener('submit', (event) => { event.preventDefault(); submitMemberForm(memberForm); });
     const saveBtn = memberForm.querySelector('button[type="submit"]');
     if (saveBtn instanceof HTMLButtonElement) {
       saveBtn.addEventListener('click', (event) => {
-        // Don't preventDefault here — let the form's submit pipeline run so
-        // the browser still validates required fields. We just guarantee
-        // submitMemberForm gets called even if the submit event somehow
-        // doesn't reach the listeners above.
-        if (typeof memberForm.requestSubmit === 'function') {
-          event.preventDefault();
-          memberForm.requestSubmit();
-        }
+        if (typeof memberForm.requestSubmit === 'function') { event.preventDefault(); memberForm.requestSubmit(); }
       });
     }
   }
@@ -170,46 +122,30 @@
   document.addEventListener('click', async (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
-
     try {
-      if (target.id === 'stage1-next') {
-        await requestJSON('/admin/onboarding/stage');
-        window.location.reload();
-        return;
-      }
-
+      if (target.id === 'stage1-next') { await requestJSON('/admin/onboarding/stage'); Toast.show('Moved to the next stage', 'success'); setTimeout(() => window.location.reload(), 650); return; }
       if (target.classList.contains('save-routine-key')) {
         const card = target.closest('.field-card');
         const input = card ? card.querySelector('input') : null;
         const key = card instanceof HTMLElement ? card.dataset.key || '' : '';
         const value = input instanceof HTMLInputElement ? input.value.trim() : '';
-        if (!key || !value) {
-          window.alert('Enter a value first.');
-          return;
-        }
+        if (!key || !value) { Toast.show('Enter a value first.', 'warning'); return; }
         target.setAttribute('disabled', 'disabled');
-        await requestJSON('/admin/profile/upsert', {
-          method: 'POST',
-          body: JSON.stringify({ key, value, source: 'onboarding_wizard' }),
-        });
+        await requestJSON('/admin/profile/upsert', { method: 'POST', body: JSON.stringify({ key, value, source: 'onboarding_wizard' }) });
         savedRoutineKeys.add(key);
         target.textContent = 'Saved';
+        Toast.show(`${key} saved`, 'success');
         return;
       }
-
-      if (target.id === 'finish-routines') {
-        finishIfRoutineReady();
-        return;
-      }
-
+      if (target.id === 'finish-routines') { finishIfRoutineReady(); return; }
       if (target.id === 'clear-member-form') {
         const form = document.getElementById('member-form');
         if (form instanceof HTMLFormElement) form.reset();
         const id = form ? form.querySelector('input[name="id"]') : null;
         if (id instanceof HTMLInputElement) id.value = '';
+        Toast.show('Member form cleared', 'info');
         return;
       }
-
       if (target.classList.contains('edit-member')) {
         const card = target.closest('.member-card');
         const script = card ? card.querySelector('.member-json') : null;
@@ -223,47 +159,37 @@
           else field.value = value == null ? '' : String(value);
         }
         form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        Toast.show('Member loaded for editing', 'info');
         return;
       }
-
       if (target.classList.contains('forget-member')) {
         const card = target.closest('.member-card');
         const id = card instanceof HTMLElement ? Number(card.dataset.memberId) : 0;
         if (!id || !window.confirm('Remove this household member?')) return;
-        await requestJSON('/admin/household/forget', {
-          method: 'POST',
-          body: JSON.stringify({ id }),
-        });
-        window.location.reload();
+        await requestJSON('/admin/household/forget', { method: 'POST', body: JSON.stringify({ id }) });
+        Toast.show('Household member removed', 'success');
+        setTimeout(() => window.location.reload(), 650);
         return;
       }
-
       if (target.id === 'finish-household') {
         if ((summary.members || []).length > 0) window.location.reload();
-        else window.alert('Add at least one household member first.');
+        else Toast.show('Add at least one household member first.', 'warning');
         return;
       }
-
       const habitCard = target.closest('.habit-card');
       if (target.classList.contains('confirm-habit') && habitCard instanceof HTMLElement) {
-        await requestJSON('/admin/knowledge/confirm', {
-          method: 'POST',
-          body: JSON.stringify({ table: 'habits', id: habitCard.dataset.id }),
-        });
-        window.location.reload();
+        await requestJSON('/admin/knowledge/confirm', { method: 'POST', body: JSON.stringify({ table: 'habits', id: habitCard.dataset.id }) });
+        Toast.show('Habit confirmed', 'success');
+        setTimeout(() => window.location.reload(), 650);
         return;
       }
-
       if (target.classList.contains('skip-habit') && habitCard instanceof HTMLElement) {
-        if (!window.confirm("Skip this inferred habit?")) return;
-        await requestJSON('/admin/knowledge/forget', {
-          method: 'POST',
-          body: JSON.stringify({ table: 'habits', id: habitCard.dataset.id }),
-        });
-        window.location.reload();
+        if (!window.confirm('Skip this inferred habit?')) return;
+        await requestJSON('/admin/knowledge/forget', { method: 'POST', body: JSON.stringify({ table: 'habits', id: habitCard.dataset.id }) });
+        Toast.show('Habit skipped', 'success');
+        setTimeout(() => window.location.reload(), 650);
         return;
       }
-
       if (target.classList.contains('edit-habit') && habitCard instanceof HTMLElement) {
         const script = habitCard.querySelector('.habit-json');
         const modal = document.getElementById('habit-edit-modal');
@@ -271,26 +197,11 @@
         if (!(script instanceof HTMLScriptElement) || !(textarea instanceof HTMLTextAreaElement)) return;
         const habit = JSON.parse(script.textContent || '{}');
         activeHabit = { id: habitCard.dataset.id, table: 'habits' };
-        textarea.value = JSON.stringify(
-          {
-            subject: habit.subject,
-            pattern: habit.pattern || {},
-            frequency: habit.frequency || null,
-            confidence: habit.confidence || 0,
-            source: habit.source || 'onboarding_wizard',
-          },
-          null,
-          2,
-        );
-        showDialog(modal);
+        textarea.value = JSON.stringify({ subject: habit.subject, pattern: habit.pattern || {}, frequency: habit.frequency || null, confidence: habit.confidence || 0, source: habit.source || 'onboarding_wizard' }, null, 2);
+        Modal.open(modal);
         return;
       }
-
-      if (target.id === 'cancel-habit-edit') {
-        closeDialog(document.getElementById('habit-edit-modal'));
-        return;
-      }
-
+      if (target.id === 'cancel-habit-edit') { Modal.close(document.getElementById('habit-edit-modal')); return; }
       if (target.id === 'save-habit-edit' && activeHabit) {
         const textarea = document.getElementById('habit-edit-json');
         const error = document.getElementById('habit-edit-error');
@@ -298,37 +209,21 @@
         try {
           if (error) error.textContent = '';
           const payload = JSON.parse(textarea.value || '{}');
-          await requestJSON(`/admin/knowledge/habits/${encodeURIComponent(activeHabit.id)}`, {
-            method: 'PATCH',
-            body: JSON.stringify(payload),
-          });
-          window.location.reload();
-        } catch (err) {
-          if (error) error.textContent = err.message || String(err);
-        }
+          await requestJSON(`/admin/knowledge/habits/${encodeURIComponent(activeHabit.id)}`, { method: 'PATCH', body: JSON.stringify(payload) });
+          Toast.show('Habit saved', 'success');
+          setTimeout(() => window.location.reload(), 650);
+        } catch (err) { if (error) error.textContent = err.message || String(err); }
         return;
       }
-
       if (target.id === 'finish-onboarding') {
         const confirmed = Number(target.dataset.confirmedHabits || '0');
-        if (confirmed < 1) {
-          window.alert('Confirm at least one habit first, or wait for morning briefs to surface one.');
-          return;
-        }
+        if (confirmed < 1) { Toast.show('Confirm at least one habit first, or wait for morning briefs to surface one.', 'warning'); return; }
         await requestJSON('/admin/onboarding/complete', { method: 'POST', body: '{}' });
-        window.location.reload();
+        Toast.show('Onboarding complete', 'success');
+        setTimeout(() => window.location.reload(), 650);
       }
-    } catch (err) {
-      target.removeAttribute('disabled');
-      window.alert(err.message || String(err));
-    }
+    } catch (_err) { target.removeAttribute('disabled'); }
   });
 
-  // Render routine fields LAST so any exception from this rendering doesn't
-  // break the listeners attached above. Wrap to be extra safe.
-  try {
-    renderRoutineFields();
-  } catch (renderErr) {
-    showError(`renderRoutineFields failed: ${renderErr.message}`);
-  }
+  try { renderRoutineFields(); } catch (renderErr) { showError(`renderRoutineFields failed: ${renderErr.message}`); }
 })();

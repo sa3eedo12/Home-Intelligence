@@ -66,6 +66,10 @@ def _page(graph: _Graph, store: _Store) -> str:
     with TestClient(_app(graph, store)) as client:
         resp = client.get("/dashboard/onboarding")
     assert resp.status_code == 200
+    assert "/static/_design.css" in resp.text
+    assert "/static/_app.js" in resp.text
+    assert "/static/onboarding.js" in resp.text
+    assert "toast-stack" in resp.text
     return resp.text
 
 
