@@ -223,7 +223,12 @@ async def infer_cleaning_run(
 async def confirm_cleaning_run(
     cleaning_run_id: int, status: str, chat_id: int | None = None
 ) -> dict[str, Any]:
-    """Record the user's correction. Called by Telegram callback handler."""
+    """Record the user's correction. Called by Telegram callback handler.
+
+    Returns a ``learning`` field with a conversational note about how the
+    confirmation will improve future inferences. Telegram callback handler
+    surfaces it back to the user instead of a bland 'Saved'.
+    """
     if not isinstance(cleaning_run_id, int) or cleaning_run_id <= 0:
         return {"ok": False, "error": "cleaning_run_id must be a positive integer"}
     if status not in VALID_STATUSES:
@@ -232,7 +237,29 @@ async def confirm_cleaning_run(
     record = await store.confirm(cleaning_run_id, status=status, chat_id=chat_id)
     if record is None:
         return {"ok": False, "error": "cleaning_run not found"}
-    return {"ok": True, "record": _jsonable(record)}
+    history = await store.recent(limit=10)
+    same_status = sum(1 for r in history if (r.get("confirmed_status") or "") == status)
+    was_correction = status != (record.get("guessed_status") or "")
+    learning = _learning_message(status, same_status, len(history), was_correction=was_correction)
+    return {"ok": True, "record": _jsonable(record), "learning": learning}
+
+
+def _learning_message(
+    status: str, same_count: int, total: int, *, was_correction: bool
+) -> str:
+    if was_correction:
+        if same_count >= 3:
+            return (
+                f"Noted — most recent runs were {status}; I'll bias that way. "
+                f"(saw {same_count}/{total})"
+            )
+        return f"Got it. Updated to {status}; I'll factor that in next time."
+    if same_count >= 3:
+        return (
+            f"Saved as {status}. {same_count}/{total} of recent runs were {status} — "
+            "that's becoming a strong pattern."
+        )
+    return f"Saved as {status}."
 
 
 @tool("recent_cleaning_runs")

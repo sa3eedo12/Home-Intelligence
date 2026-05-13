@@ -373,7 +373,33 @@ async def confirm_presence_return(
     record = await store.confirm(presence_return_id, normalized_context, chat_id)
     if record is None:
         return {"ok": False, "error": "presence_return not found"}
-    return {"ok": True, "record": _jsonable(record)}
+    person = str(record.get("person") or "")
+    history = await store.confirmed_context_history(person, limit_days=30) if person else []
+    same = sum(1 for h in history if _confirm_match(h, normalized_context))
+    was_correction = normalized_context != (record.get("guessed_context") or "")
+    learning = _presence_learning(
+        normalized_context, same, len(history), was_correction=was_correction
+    )
+    return {"ok": True, "record": _jsonable(record), "learning": learning}
+
+
+def _confirm_match(history_item: Any, ctx: str) -> bool:
+    if isinstance(history_item, dict):
+        return (history_item.get("confirmed_context") or history_item.get("context") or "") == ctx
+    if isinstance(history_item, (list, tuple)) and len(history_item) >= 3:
+        return history_item[2] == ctx
+    return False
+
+
+def _presence_learning(ctx: str, same: int, total: int, *, was_correction: bool) -> str:
+    if was_correction:
+        return f"Got it — '{ctx}'. I'll lean that way for similar return times."
+    if same >= 4:
+        return (
+            f"Saved as {ctx}. Most of your similar returns were {ctx} too "
+            f"({same}/{total}) — strong pattern."
+        )
+    return f"Saved as {ctx}."
 
 
 @tool("recent_presence_returns")

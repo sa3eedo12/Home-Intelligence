@@ -601,7 +601,8 @@ async def _handle_clean_callback(
         return
     inner = result.get("result") if isinstance(result, dict) else None
     if isinstance(inner, dict) and inner.get("ok"):
-        await query.edit_message_text(f"✅ Saved: {status}")
+        learning = inner.get("learning")
+        await query.edit_message_text(str(learning) if learning else f"✅ Saved: {status}")
     else:
         err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
         await query.edit_message_text(f"Couldn't save: {err}")
@@ -685,7 +686,8 @@ async def _handle_sleep_callback(
         return
     inner = result.get("result") if isinstance(result, dict) else None
     if isinstance(inner, dict) and inner.get("ok"):
-        await query.edit_message_text(f"✅ Saved: {quality}")
+        learning = inner.get("learning")
+        await query.edit_message_text(str(learning) if learning else f"✅ Saved: {quality}")
     else:
         err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
         await query.edit_message_text(f"Couldn't save: {err}")
@@ -723,7 +725,8 @@ async def _handle_presence_callback(
         return
     inner = result.get("result") if isinstance(result, dict) else None
     if isinstance(inner, dict) and inner.get("ok"):
-        await query.edit_message_text(f"✅ Saved: {context}")
+        learning = inner.get("learning")
+        await query.edit_message_text(str(learning) if learning else f"✅ Saved: {context}")
     else:
         err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
         await query.edit_message_text(f"Couldn't save: {err}")

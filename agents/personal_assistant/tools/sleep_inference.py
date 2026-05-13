@@ -588,7 +588,30 @@ async def confirm_sleep_summary(
     )
     if record is None:
         return {"ok": False, "error": "sleep_summary not found"}
-    return {"ok": True, "record": json.loads(json.dumps(record, default=str))}
+    history = await store.recent(limit=14)
+    same = sum(1 for r in history if (r.get("confirmed_quality") or "") == confirmed_quality)
+    was_correction = confirmed_quality != (record.get("guessed_quality") or "")
+    learning = _sleep_learning(confirmed_quality, same, len(history), was_correction=was_correction)
+    return {
+        "ok": True,
+        "record": json.loads(json.dumps(record, default=str)),
+        "learning": learning,
+    }
+
+
+def _sleep_learning(
+    quality: str, same: int, total: int, *, was_correction: bool
+) -> str:
+    if was_correction:
+        return f"Got it — your nights have been more {quality} than I thought."
+    if same >= 4:
+        return (
+            f"Saved as {quality}. {same}/{total} of recent nights were {quality} — "
+            "I'm getting your sleep pattern."
+        )
+    if same >= 1:
+        return f"Saved as {quality}. ({same} other {quality} night(s) recently.)"
+    return f"Saved as {quality}."
 
 
 @tool("late_bedtime_check")
