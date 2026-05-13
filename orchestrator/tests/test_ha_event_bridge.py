@@ -389,16 +389,22 @@ async def test_history_url_uses_seconds_z_no_microseconds_url_encoded() -> None:
     microseconds or an unencoded ``+`` (TrueNAS user reported 2026-05-13)."""
     redis = FakeRedis()
     ws = FakeWs(_auth_handshake_frames())
-    captured = {}
+    captured: dict[str, list[str]] = {"urls": []}
 
     async def fake_send(self, request, **kwargs):
-        captured["url"] = str(request.url)
-        return httpx.Response(
-            200, request=request, json=[]
-        )
-
-
-    import httpx as _httpx
+        url_str = str(request.url)
+        captured["urls"].append(url_str)
+        if "/api/states" in url_str:
+            return httpx.Response(
+                200,
+                request=request,
+                json=[
+                    {"entity_id": "sensor.washing_machine", "state": "idle"},
+                    {"entity_id": "switch.lamp", "state": "off"},
+                    {"entity_id": "sun.sun", "state": "above_horizon"},  # filtered out
+                ],
+            )
+        return httpx.Response(200, request=request, json=[])
 
     bridge = HaEventBridge(
         redis=redis,
@@ -409,16 +415,17 @@ async def test_history_url_uses_seconds_z_no_microseconds_url_encoded() -> None:
         replay_hours=6,
         # No history_fetcher so the real httpx path runs
     )
-    with patch.object(_httpx.AsyncClient, "send", fake_send):
+    with patch.object(httpx.AsyncClient, "send", fake_send):
         await bridge.start()
-        for _ in range(40):
-            if "url" in captured:
+        for _ in range(60):
+            if any("/api/history/period" in u for u in captured["urls"]):
                 break
             await asyncio.sleep(0.01)
         await bridge.stop()
 
-    url = captured.get("url", "")
-    assert "/api/history/period/" in url, f"unexpected url {url!r}"
+    history_urls = [u for u in captured["urls"] if "/api/history/period/" in u]
+    assert history_urls, f"history endpoint not called: {captured['urls']!r}"
+    url = history_urls[0]
     ts_segment = url.split("/api/history/period/", 1)[1].split("?", 1)[0]
     # Must NOT contain microsecond fraction or an unencoded "+"
     assert "." not in ts_segment, ts_segment
@@ -428,6 +435,83 @@ async def test_history_url_uses_seconds_z_no_microseconds_url_encoded() -> None:
     assert ":" in ts_segment, ts_segment
     # SHOULD end with literal Z (UTC marker)
     assert ts_segment.endswith("Z"), ts_segment
+    # filter_entity_id MUST be present (HA 2024.x+ requires it)
+    assert "filter_entity_id=" in url, f"missing filter_entity_id: {url}"
+    # Only interesting domains were sent (sun.sun was filtered out)
+    assert "sensor.washing_machine" in url
+    assert "switch.lamp" in url
+    assert "sun.sun" not in url
+
+
+async def test_history_replay_uses_explicit_entity_list_env(monkeypatch) -> None:
+    monkeypatch.setenv("HA_BRIDGE_REPLAY_ENTITIES", "sensor.washing_machine,sensor.dryer")
+    redis = FakeRedis()
+    ws = FakeWs(_auth_handshake_frames())
+    captured: dict[str, list[str]] = {"urls": []}
+
+    async def fake_send(self, request, **kwargs):
+        captured["urls"].append(str(request.url))
+        return httpx.Response(200, request=request, json=[])
+
+    bridge = HaEventBridge(
+        redis=redis,
+        ha_url="http://ha.local:8123",
+        ha_token="t",
+        backoff_schedule=(0.02,),
+        ws_connector=_ws_connector(ws),
+        replay_hours=6,
+    )
+    with patch.object(httpx.AsyncClient, "send", fake_send):
+        await bridge.start()
+        for _ in range(60):
+            if any("/api/history/period" in u for u in captured["urls"]):
+                break
+            await asyncio.sleep(0.01)
+        await bridge.stop()
+    # Must NOT have called /api/states (we have an explicit list)
+    assert not any("/api/states" in u for u in captured["urls"]), captured["urls"]
+    history_urls = [u for u in captured["urls"] if "/api/history/period/" in u]
+    assert history_urls, captured["urls"]
+    assert "sensor.washing_machine" in history_urls[0]
+    assert "sensor.dryer" in history_urls[0]
+
+
+async def test_history_replay_chunks_large_entity_lists() -> None:
+    redis = FakeRedis()
+    ws = FakeWs(_auth_handshake_frames())
+    captured: dict[str, list[str]] = {"urls": []}
+
+    big_entity_list = [
+        {"entity_id": f"sensor.s{i}", "state": "x"} for i in range(125)
+    ]
+
+    async def fake_send(self, request, **kwargs):
+        url_str = str(request.url)
+        captured["urls"].append(url_str)
+        if "/api/states" in url_str:
+            return httpx.Response(200, request=request, json=big_entity_list)
+        return httpx.Response(200, request=request, json=[])
+
+    bridge = HaEventBridge(
+        redis=redis,
+        ha_url="http://ha.local:8123",
+        ha_token="t",
+        backoff_schedule=(0.02,),
+        ws_connector=_ws_connector(ws),
+        replay_hours=6,
+    )
+    with patch.object(httpx.AsyncClient, "send", fake_send):
+        await bridge.start()
+        for _ in range(80):
+            history_calls = [u for u in captured["urls"] if "/api/history/period/" in u]
+            if len(history_calls) >= 3:
+                break
+            await asyncio.sleep(0.01)
+        await bridge.stop()
+
+    history_calls = [u for u in captured["urls"] if "/api/history/period/" in u]
+    # 125 entities chunked at 50 per request → ceil(125/50) = 3 calls
+    assert len(history_calls) == 3, f"expected 3 chunks, got {len(history_calls)}: {history_calls}"
 
 
 async def test_replay_history_now_can_be_invoked_after_first_session_failed() -> None:

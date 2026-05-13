@@ -60,6 +60,33 @@ DEFAULT_PING_INTERVAL = 30.0
 WEBSOCKET_OPEN_TIMEOUT = 10.0
 DEFAULT_REPLAY_HOURS = 6
 REPLAY_HTTP_TIMEOUT = 30.0
+# HA's /api/history/period requires filter_entity_id in 2024.x+ for security.
+# We chunk the entity list to stay under HA's URL/header length limits.
+HISTORY_ENTITY_CHUNK_SIZE = 50
+# Domains worth replaying for observers + reactive triggers. Anything else
+# (sun, sensor noise like uptime/cpu, weather forecasts) just bloats the stream.
+INTERESTING_DOMAINS: frozenset[str] = frozenset(
+    {
+        "binary_sensor",
+        "climate",
+        "cover",
+        "device_tracker",
+        "fan",
+        "humidifier",
+        "input_boolean",
+        "lawn_mower",
+        "light",
+        "lock",
+        "media_player",
+        "person",
+        "remote",
+        "sensor",
+        "switch",
+        "vacuum",
+        "valve",
+        "water_heater",
+    }
+)
 
 logger = get_logger("orchestrator.ha_event_bridge")
 
@@ -268,26 +295,65 @@ class HaEventBridge:
             return await self._history_fetcher(since)
         # HA's /api/history/period/<timestamp> endpoint is fussy about the
         # timestamp segment: microseconds and unencoded "+" cause 400 Bad
-        # Request, but URL-encoding the colons (%3A) ALSO causes 400 because
-        # HA's router parses the segment as a literal ISO timestamp. Use
-        # whole seconds in UTC with a "Z" suffix and keep colons raw.
+        # Request, URL-encoded colons (%3A) cause 400 too, AND HA 2024.x+
+        # requires filter_entity_id (security hardening — without it: 400
+        # "filter_entity_id is missing"). Use whole seconds in UTC with "Z",
+        # keep colons raw, and pass observer-relevant entities chunked.
         ts = since.astimezone(UTC).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
         ts_quoted = quote(ts, safe=":")
         url = self._ha_url.rstrip("/") + "/api/history/period/" + ts_quoted
-        async with httpx.AsyncClient(timeout=REPLAY_HTTP_TIMEOUT) as client:
-            resp = await client.get(
-                url,
-                headers={
-                    "Authorization": f"Bearer {self._ha_token}",
-                    "Content-Type": "application/json",
-                },
-                params={"minimal_response": "false", "significant_changes_only": "false"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        headers = {
+            "Authorization": f"Bearer {self._ha_token}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=REPLAY_HTTP_TIMEOUT, headers=headers) as client:
+            entity_ids = await self._fetch_replay_entity_ids(client)
+            if not entity_ids:
+                logger.info("ha_bridge_history_replay_no_entities")
+                return []
+            histories: list[list[dict[str, Any]]] = []
+            for chunk in _chunked(entity_ids, HISTORY_ENTITY_CHUNK_SIZE):
+                resp = await client.get(
+                    url,
+                    params={
+                        "minimal_response": "false",
+                        "significant_changes_only": "false",
+                        "filter_entity_id": ",".join(chunk),
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if isinstance(data, list):
+                    histories.extend(item for item in data if isinstance(item, list))
+            return histories
+
+    async def _fetch_replay_entity_ids(self, client: httpx.AsyncClient) -> list[str]:
+        """Get the list of entities to replay history for.
+
+        Order of preference:
+          1. ``HA_BRIDGE_REPLAY_ENTITIES`` env var (comma-separated explicit list)
+          2. ``GET /api/states`` filtered to observer-relevant domains
+        """
+        explicit = os.environ.get("HA_BRIDGE_REPLAY_ENTITIES", "").strip()
+        if explicit:
+            return [eid for eid in (e.strip() for e in explicit.split(",")) if eid]
+        url = self._ha_url.rstrip("/") + "/api/states"
+        resp = await client.get(url)
+        resp.raise_for_status()
+        data = resp.json()
         if not isinstance(data, list):
             return []
-        return [item for item in data if isinstance(item, list)]
+        result: list[str] = []
+        for state in data:
+            if not isinstance(state, dict):
+                continue
+            entity_id = str(state.get("entity_id") or "").strip()
+            if not entity_id or "." not in entity_id:
+                continue
+            domain = entity_id.split(".", 1)[0]
+            if domain in INTERESTING_DOMAINS:
+                result.append(entity_id)
+        return result
 
     async def replay_history_now(self, *, hours: int | None = None) -> dict[str, Any]:
         """Public entry point that re-runs history replay on demand.
@@ -434,6 +500,10 @@ class HaEventBridge:
         if not isinstance(decoded, dict):
             raise RuntimeError(f"unexpected non-object frame from HA: {type(decoded).__name__}")
         return decoded
+
+
+def _chunked(items: list[str], size: int) -> list[list[str]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 def _default_ws_connector(url: str):  # pragma: no cover - thin wrapper around websockets lib
