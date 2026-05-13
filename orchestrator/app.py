@@ -33,6 +33,7 @@ from .dashboard import router as dashboard_router
 from .data_science import LoraTrainingJob, MaintenanceJob, PatternMiner, ReembedJob, ReportGenerator
 from .event_recorder import EventRecorder
 from .github_client import GitHubClient
+from .ha_event_bridge import build_from_env as build_ha_bridge
 from .health import probe_lemonade, probe_ollama, probe_postgres, probe_qdrant, probe_redis
 from .notify import run_consumer, send_morning_brief
 from .observers import ObserverRunner
@@ -416,6 +417,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     await observer_runner.start()
 
+    ha_event_bridge = build_ha_bridge(redis)
+    await ha_event_bridge.start()
+
     app.state.pool = pool
     app.state.registry = registry
     app.state.router = router
@@ -439,6 +443,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.health_store = health_store
     app.state.event_recorder = event_recorder
     app.state.observer_runner = observer_runner
+    app.state.ha_event_bridge = ha_event_bridge
     app.state.knowledge_graph = knowledge_graph
     app.state.embedder = embedder
     app.state.reembed = reembed
@@ -466,6 +471,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     await observer_runner.stop()
+    await ha_event_bridge.stop()
     await reactive.stop()
     await event_recorder.stop()
     await activity_aggregator.stop()

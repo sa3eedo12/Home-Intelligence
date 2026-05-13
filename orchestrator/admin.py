@@ -1254,3 +1254,15 @@ async def activity_snapshot(request: Request) -> dict[str, Any]:
     snapshot = aggregator.snapshot()
     snapshot["recent"] = aggregator.recent_events(limit=50)
     return snapshot
+
+
+@router.get("/admin/ha-bridge/status")
+async def ha_bridge_status(request: Request) -> dict[str, Any]:
+    bridge = getattr(request.app.state, "ha_event_bridge", None)
+    if bridge is None:
+        return {
+            "ok": False,
+            "error": "ha_event_bridge not started",
+            "enabled": False,
+        }
+    return {"ok": True, **bridge.status.snapshot()}
