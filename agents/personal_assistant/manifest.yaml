@@ -87,6 +87,17 @@ capabilities:
     description: List recent presence return-context guesses and confirmations.
     side_effects: false
     cost: low
+  - id: auto_infer_observer_event
+    description: Automatically evaluate an observer event for one conservative inferred memory and return a confirmation prompt.
+    inputs: { agent: "string?", kind: string, summary: "string?", payload: "object?", ts: "string?" }
+    side_effects: true
+    cost: high
+    llm: qwen3:8b
+  - id: confirm_auto_inference
+    description: Confirm, reject, or skip an auto-inferred memory proposal.
+    inputs: { auto_inference_id: integer, status: string, chat_id: "integer?" }
+    side_effects: true
+    cost: low
 subscribes:
   - events.system
   - events.home
