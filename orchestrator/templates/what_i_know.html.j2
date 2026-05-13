@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>What I Know · Home Intelligence</title>
+  <link rel="stylesheet" href="/static/_design.css">
+  <link rel="stylesheet" href="/static/what_i_know.css">
+  <script src="/static/_app.js" defer></script>
+  <script src="/static/what_i_know.js" defer></script>
+</head>
+<body>
+  <header class="wik-topbar">
+    <a href="/dashboard" class="back-link">← Dashboard</a>
+    <div>
+      <h1>What I Know About You</h1>
+      <p>The system's living model of your home and routine.</p>
+    </div>
+    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
+  </header>
+
+  {% set summary = summary or {} %}
+  {% set household = summary.household or {} %}
+  {% set devices = summary.devices or {} %}
+  {% set habits = summary.habits or {} %}
+  {% set inferences = summary.inferences or {} %}
+  {% set observations = summary.observations or {} %}
+  {% set health = summary.health or {} %}
+  {% set open_questions = summary.open_questions or [] %}
+
+  <main class="wik-shell">
+
+    {% if open_questions %}
+    <section class="open-questions card" aria-label="Open questions">
+      <h2>🤔 Things I'm waiting to learn</h2>
+      <p class="muted">Each one is a quick tap in Telegram or About You.</p>
+      <ul class="question-list">
+        {% for q in open_questions %}
+          <li>
+            <span class="question-topic badge badge-{{ q.topic }}">{{ q.topic }}</span>
+            <strong>{{ q.summary }}</strong>
+            {% if q.example %}<small class="example">{{ q.example }}</small>{% endif %}
+            {% if q.action %}<small class="action">{{ q.action }}</small>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+
+    <section class="grid-2">
+      <article class="card">
+        <h2>🏠 Household</h2>
+        {% if household.members %}
+          <ul class="member-list">
+            {% for m in household.members %}
+              <li>
+                <strong>{{ m.name }}</strong>
+                <span class="muted">({{ m.role }})</span>
+                {% if m.sleep_time or m.wake_time %}
+                  <small>Sleep {{ m.sleep_time or '?' }} · Wake {{ m.wake_time or '?' }}</small>
+                {% endif %}
+                {% if m.allergies %}<small>Allergies: {{ m.allergies | join(', ') }}</small>{% endif %}
+                {% if m.dietary_restrictions %}<small>Diet: {{ m.dietary_restrictions | join(', ') }}</small>{% endif %}
+                {% if m.telegram_chat_id %}<small class="muted">Telegram linked ✓</small>{% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="muted empty-state">No household members yet — head to <a href="/dashboard/onboarding">Onboarding</a>.</p>
+        {% endif %}
+      </article>
+
+      <article class="card">
+        <h2>📦 Devices I track</h2>
+        <p class="muted">{{ devices.total or 0 }} adopted across {{ (devices.by_type or {}) | length }} type(s).</p>
+        {% if devices.by_type %}
+          <details class="device-types" open>
+            <summary>By type</summary>
+            <ul class="type-list">
+              {% for type, items in devices.by_type | dictsort %}
+                <li>
+                  <strong>{{ type }}</strong> <span class="muted">({{ items | length }})</span>
+                  <ul class="device-sub">
+                    {% for d in items[:8] %}
+                      <li>{{ d.friendly_name or d.entity_id or 'unnamed' }}{% if d.entity_id %} <small class="muted">{{ d.entity_id }}</small>{% endif %}</li>
+                    {% endfor %}
+                    {% if items | length > 8 %}<li class="muted">…and {{ items | length - 8 }} more</li>{% endif %}
+                  </ul>
+                </li>
+              {% endfor %}
+            </ul>
+          </details>
+        {% else %}
+          <p class="muted empty-state">No devices identified — head to <a href="/dashboard/discovery">Discovery</a>.</p>
+        {% endif %}
+      </article>
+    </section>
+
+    <section class="grid-2">
+      <article class="card habit-card">
+        <h2>🧠 Habits I've learned</h2>
+        <p class="muted">{{ habits.confirmed | length }} confirmed · {{ habits.unconfirmed | length }} pending.</p>
+        {% if habits.confirmed %}
+          <ul class="habit-list">
+            {% for h in habits.confirmed[:8] %}
+              <li>
+                <strong>{{ h.subject or '—' }}</strong>: {{ h.pattern }}
+                {% if h.frequency %}<small>{{ h.frequency }}</small>{% endif %}
+                {% if h.confidence %}<span class="confidence">{{ ((h.confidence or 0) * 100) | round(0) | int }}%</span>{% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="muted empty-state">No confirmed habits yet — once observers gather more data, candidates appear in <a href="/dashboard/about-you">About You</a>.</p>
+        {% endif %}
+        {% if habits.unconfirmed %}
+          <details>
+            <summary>{{ habits.unconfirmed | length }} unconfirmed candidates</summary>
+            <ul class="habit-list muted">
+              {% for h in habits.unconfirmed[:5] %}
+                <li>{{ h.subject or '—' }}: {{ h.pattern }}</li>
+              {% endfor %}
+            </ul>
+          </details>
+        {% endif %}
+      </article>
+
+      <article class="card">
+        <h2>👀 What I've observed (24h)</h2>
+        {% if observations.counts_24h_by_kind %}
+          <ul class="kind-counts">
+            {% for kind, n in observations.counts_24h_by_kind.items() %}
+              <li>
+                <span class="kind-pill">{{ kind }}</span>
+                <strong>{{ n }}</strong>
+              </li>
+            {% endfor %}
+          </ul>
+          {% if observations.recent %}
+            <details>
+              <summary>Last {{ observations.recent | length }} events</summary>
+              <ul class="event-list">
+                {% for e in observations.recent %}
+                  <li><small class="muted">{{ e.ts[:19] }}</small> {{ e.summary }}</li>
+                {% endfor %}
+              </ul>
+            </details>
+          {% endif %}
+        {% else %}
+          <p class="muted empty-state">No observer events in the last 24h.</p>
+        {% endif %}
+      </article>
+    </section>
+
+    <section class="card">
+      <h2>🔁 Recent inferences</h2>
+      <p class="muted">What I guessed, and how often you confirmed.</p>
+      <div class="inference-grid">
+        {% set sections = [
+          ('🧺 Appliance cycles', inferences.appliance_cycles, 'guessed_label', 'confirmed_label'),
+          ('🧹 Vacuum cleanings', inferences.vacuum_cleanings, 'guessed_status', 'confirmed_status'),
+          ('🌙 Sleep summaries', inferences.sleep_summaries, 'guessed_quality', 'confirmed_quality'),
+          ('👋 Presence returns', inferences.presence_returns, 'guessed_context', 'confirmed_context'),
+          ('📺 TV left on', inferences.tv_left_on, 'suggested_action', 'confirmed_action'),
+        ] %}
+        {% for title, sec, guessed, confirmed in sections %}
+          {% set sec = sec or {} %}
+          <div class="inference-tile">
+            <h3>{{ title }}</h3>
+            <p class="muted">{{ sec.confirmed or 0 }} confirmed of {{ sec.total or 0 }}</p>
+            {% if sec.recent %}
+              <ul>
+                {% for r in sec.recent[:5] %}
+                  <li>
+                    <span class="ts">{{ (r.ended_at or r.detected_at or r.returned_at or r.night_of or '') | string | truncate(16, True, '') }}</span>
+                    <span class="guess">{{ r[guessed] or '?' }}</span>
+                    {% if r[confirmed] and r[confirmed] != r[guessed] %}
+                      → <span class="corrected">{{ r[confirmed] }}</span>
+                    {% elif r[confirmed] %}
+                      ✓
+                    {% else %}
+                      <small class="muted">pending</small>
+                    {% endif %}
+                  </li>
+                {% endfor %}
+              </ul>
+            {% else %}
+              <p class="muted">No data yet</p>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    {% set auto = inferences.auto_inferences or {} %}
+    {% if auto.recent %}
+    <section class="card">
+      <h2>🤖 Auto-inferences</h2>
+      <p class="muted">
+        {% for status, n in (auto.by_status or {}).items() %}
+          <span class="status-pill status-{{ status }}">{{ status }}: {{ n }}</span>
+        {% endfor %}
+      </p>
+      <ul class="auto-list">
+        {% for ai in auto.recent[:8] %}
+          <li>
+            <strong>{{ ai.inference }}</strong>
+            <small class="muted">{{ ((ai.confidence or 0) * 100) | round(0) | int }}% · {{ ai.status }}</small>
+            {% if ai.reasoning %}<small>{{ ai.reasoning | truncate(120) }}</small>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+
+    <section class="grid-2">
+      <article class="card">
+        <h2>❤️ Health signal</h2>
+        {% if health.available %}
+          <p>Last received: <strong>{{ health.last_metric }}</strong> = {{ health.last_value }}</p>
+          <small class="muted">at {{ (health.last_ts or '')[:19] }}</small>
+          <p><a href="/dashboard/health">Open Health dashboard →</a></p>
+        {% else %}
+          <p class="muted empty-state">No HealthKit data yet — set up the Mac bridge or the iOS app.</p>
+        {% endif %}
+      </article>
+
+      <article class="card">
+        <h2>🛠 What's next</h2>
+        <p>The system gets smarter the more you confirm and correct. Each tap on a Telegram quick-reply teaches it your patterns.</p>
+        <ul>
+          <li><a href="/dashboard/about-you">About You</a> — confirm habits and edit knowledge</li>
+          <li><a href="/dashboard/morning-brief">Morning Brief</a> — what was learned overnight</li>
+          <li><a href="/dashboard/discovery">Discovery</a> — adopt new HA devices</li>
+        </ul>
+      </article>
+    </section>
+
+  </main>
+</body>
+</html>

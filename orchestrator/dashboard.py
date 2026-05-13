@@ -490,6 +490,19 @@ async def health_dashboard(request: Request) -> HTMLResponse:
     )
 
 
+@router.get("/dashboard/what-i-know", response_class=HTMLResponse)
+async def what_i_know(request: Request) -> HTMLResponse:
+    """The 'feels intelligent' page — what the system has learned about you."""
+    from .intelligence import gather_intelligence_summary
+
+    summary = await gather_intelligence_summary(request)
+    return templates.TemplateResponse(
+        request=request,
+        name="what_i_know.html.j2",
+        context={"summary": summary},
+    )
+
+
 @router.get("/dashboard/data-science", response_class=HTMLResponse)
 async def data_science(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(

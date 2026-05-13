@@ -1364,6 +1364,20 @@ async def migrations_status(request: Request) -> dict[str, Any]:
     return {"ok": summary["error"] == 0, "summary": summary, "results": results}
 
 
+@router.get("/admin/intelligence/summary")
+async def intelligence_summary(request: Request) -> dict[str, Any]:
+    """One big snapshot of "what the system has actually learned about you".
+
+    Powers the /dashboard/what-i-know page. Aggregates household members,
+    confirmed habits, devices by type, recent inferences (with confirmation
+    counts), observation kinds in last 24h, health-data presence, and a list
+    of open questions awaiting user reply.
+    """
+    from .intelligence import gather_intelligence_summary
+
+    return await gather_intelligence_summary(request)
+
+
 @router.get("/admin/observations/recent")
 async def observations_recent(request: Request) -> dict[str, Any]:
     limit = _query_int(request, "limit", default=10, low=1, high=50) or 10
