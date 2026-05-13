@@ -601,17 +601,37 @@ class NightlyReflector:
         gaps: list[dict[str, str]],
         errors: list[dict[str, str]],
     ) -> str:
-        if errors:
-            return "Reflection completed with partial data; check the diagnostics before acting."
+        # If we DO have proposals, lead with them — even if some phases failed.
         if proposals:
             auto = sum(1 for proposal in proposals if proposal.get("status") == "auto_confirmed")
+            tail = " (some phases had errors — see diagnostics)" if errors else ""
             return (
                 f"Reflection found {len(proposals)} improvement ideas, "
-                f"with {auto} auto-confirmed."
+                f"with {auto} auto-confirmed.{tail}"
             )
-        if gaps:
+        # No proposals + no errors → calm headline
+        if not errors and not gaps:
+            return "Reflection found no urgent gaps overnight."
+        if not errors and gaps:
             return f"Reflection found {len(gaps)} profile gaps to ask about over time."
-        return "Reflection found no urgent gaps overnight."
+        # We have errors AND no proposals — surface what DID work instead of
+        # the bland "partial data" headline.
+        bits: list[str] = []
+        if gaps:
+            bits.append(f"{len(gaps)} profile gap(s) to learn")
+        # The user's data — what we DO know — is more interesting than 'failure'
+        failed_phases = [str(e.get("phase") or "?") for e in errors]
+        if bits:
+            return (
+                "Reflection partially completed: "
+                + ", ".join(bits)
+                + f". Failed phases: {', '.join(failed_phases)}."
+            )
+        return (
+            "Reflection couldn't generate proposals (failed: "
+            + ", ".join(failed_phases)
+            + "). Check diagnostics — usually means the LLM was slow."
+        )
 
     async def _save_brief(self, body: dict[str, Any]) -> int:
         return await self.store.record_brief(summary=str(body.get("summary") or ""), body=body)
