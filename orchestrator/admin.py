@@ -1006,6 +1006,10 @@ async def set_member_trackers(member_id: int, request: Request) -> dict[str, Any
 
     attrs = dict(target.get("attributes") or {})
     attrs["tracker_entity_ids"] = tracker_ids
+    # list_members() returns sleep_time/wake_time as 'HH:MM' strings; put_member
+    # wants datetime.time objects. Tolerate both via auto_setup._parse_hhmm.
+    from .auto_setup import _parse_hhmm
+
     member = await graph.put_member(
         member_id=member_id,
         name=str(target.get("name") or ""),
@@ -1013,8 +1017,8 @@ async def set_member_trackers(member_id: int, request: Request) -> dict[str, Any
         telegram_chat_id=target.get("telegram_chat_id"),
         allergies=list(target.get("allergies") or []),
         dietary_restrictions=list(target.get("dietary_restrictions") or []),
-        sleep_time=target.get("sleep_time"),
-        wake_time=target.get("wake_time"),
+        sleep_time=_parse_hhmm(target.get("sleep_time")),
+        wake_time=_parse_hhmm(target.get("wake_time")),
         attributes=attrs,
     )
     return {"ok": True, "id": member_id, "tracker_entity_ids": tracker_ids, "member": member}

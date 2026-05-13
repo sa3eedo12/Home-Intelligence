@@ -202,6 +202,27 @@ async def discover_proposal(*, knowledge_graph: Any) -> dict[str, Any]:
     }
 
 
+def _parse_hhmm(value: Any) -> Any:
+    """``put_member`` wants a datetime.time for sleep_time/wake_time; list_members
+    returns them as 'HH:MM' strings or already-time objects. Tolerate both."""
+    if value is None:
+        return None
+    if hasattr(value, "hour"):
+        return value
+    s = str(value).strip()
+    if not s:
+        return None
+    parts = s.split(":")
+    try:
+        from datetime import time as _time
+
+        if len(parts) >= 2:
+            return _time(int(parts[0]), int(parts[1]))
+    except (ValueError, TypeError):
+        return None
+    return None
+
+
 async def apply_proposal(
     *,
     proposal: dict[str, Any],
@@ -261,8 +282,8 @@ async def apply_proposal(
                     telegram_chat_id=target.get("telegram_chat_id"),
                     allergies=list(target.get("allergies") or []),
                     dietary_restrictions=list(target.get("dietary_restrictions") or []),
-                    sleep_time=target.get("sleep_time"),
-                    wake_time=target.get("wake_time"),
+                    sleep_time=_parse_hhmm(target.get("sleep_time")),
+                    wake_time=_parse_hhmm(target.get("wake_time")),
                     attributes=attrs,
                 )
                 member_updates.append({"name": member_name, "tracker_entity_ids": list(eids)})
