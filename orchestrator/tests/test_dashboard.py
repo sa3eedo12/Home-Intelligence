@@ -41,6 +41,11 @@ def test_dashboard_renders_with_empty_state() -> None:
     # New SPA shell elements must be present.
     assert "agent-grid" in resp.text
     assert "activity-feed" in resp.text
+    assert "nav-rail" in resp.text
+    assert "toast-stack" in resp.text
+    assert "data-theme-toggle" in resp.text
+    assert "/static/_design.css" in resp.text
+    assert "/static/_app.js" in resp.text
     assert "/static/dashboard.js" in resp.text
     assert "/dashboard/stream" not in resp.text  # the JS opens it, not the HTML directly
 
@@ -114,4 +119,5 @@ def test_dashboard_renders_with_curator_narrative_and_agents() -> None:
     assert "All systems nominal" in resp.text
     assert "morning_brief" in resp.text
     assert "Quiet on" in resp.text  # button exists
+    assert 'id="connection-state"' in resp.text
     assert 'data-job="morning_brief"' in resp.text  # run-now button is wired

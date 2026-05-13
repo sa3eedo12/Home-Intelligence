@@ -59,8 +59,12 @@ def test_data_science_dashboard_renders_synthetic_data() -> None:
 
     assert resp.status_code == 200
     assert "Data science" in resp.text
+    assert "/static/_design.css" in resp.text
+    assert "/static/_app.js" in resp.text
     assert "/static/data_science.css" in resp.text
     assert "/static/data_science.js" in resp.text
+    assert 'id="ds-status"' in resp.text
+    assert 'id="job-status"' in resp.text
     assert "2026W19" in resp.text
     assert "Run maintenance now" in resp.text
     assert 'data-job="reembed"' in resp.text

@@ -1,128 +1,108 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>About You — Home Intelligence</title>
+  <link rel="stylesheet" href="/static/_design.css">
   <link rel="stylesheet" href="/static/about_you.css">
+  <script src="/static/_app.js" defer></script>
+  <script src="/static/about_you.js" defer></script>
 </head>
-<body>
+<body class="page-body about-you-body">
   <header class="topbar">
     <a class="back-link" href="/dashboard">← Dashboard</a>
-    <h1>About You</h1>
-    <p>Review, correct, confirm, or forget what Home Intelligence has learned.</p>
+    <div>
+      <h1>About You</h1>
+      <p>Review, correct, confirm, or forget what Home Intelligence has learned.</p>
+    </div>
+    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
   </header>
 
   {% macro confidence_bar(confidence) -%}
     {% set pct = ((confidence or 0) * 100) | round(0, 'floor') %}
-    <div class="confidence" title="confidence {{ pct }}%">
-      <span style="width: {{ pct }}%"></span>
-    </div>
+    <div class="confidence" title="confidence {{ pct }}%"><span style="width: {{ pct }}%"></span></div>
     <small>{{ pct }}% confidence</small>
   {%- endmacro %}
 
   {% macro actions(table, item_id) -%}
     <div class="card-actions">
-      <button type="button" class="edit-btn">✏️ Edit</button>
-      <button type="button" class="confirm-btn">✓ Confirm</button>
-      <button type="button" class="forget-btn danger">🗑️ Forget</button>
-      <button type="button" class="why-btn linklike">Why?</button>
+      <button type="button" class="btn btn-secondary btn-sm edit-btn">✏️ Edit</button>
+      <button type="button" class="btn btn-primary btn-sm confirm-btn">✓ Confirm</button>
+      <button type="button" class="btn btn-danger btn-sm forget-btn danger">🗑️ Forget</button>
+      <button type="button" class="btn btn-ghost btn-sm why-btn linklike">Why?</button>
     </div>
   {%- endmacro %}
 
   <main>
-    <section>
-      <h2>Things</h2>
+    <section class="card">
+      <div class="section-header"><div><h2>Things</h2><p>Devices, appliances, rooms, and other learned objects.</p></div></div>
       <div class="card-grid">
         {% for item in knowledge.things %}
-          <article class="knowledge-card" data-table="things" data-id="{{ item.id }}">
+          <article class="knowledge-card card-hover" data-table="things" data-id="{{ item.id }}">
             <script type="application/json" class="card-json">{{ item | tojson }}</script>
-            <header>
-              <h3>{{ item.friendly_name }}</h3>
-              <span>{{ item.type }}</span>
-            </header>
+            <header><h3>{{ item.friendly_name }}</h3><span class="badge badge-muted">{{ item.type }}</span></header>
             <pre>{{ (item.attributes or {}) | tojson }}</pre>
             {{ confidence_bar(item.confidence) }}
-            <dl>
-              <dt>Source</dt><dd>{{ item.source or 'unknown' }}</dd>
-              <dt>Last confirmed</dt><dd>{{ item.last_confirmed_at or item.learned_at or '—' }}</dd>
-            </dl>
+            <dl><dt>Source</dt><dd>{{ item.source or 'unknown' }}</dd><dt>Last confirmed</dt><dd>{{ item.last_confirmed_at or item.learned_at or '—' }}</dd></dl>
             {{ actions('things', item.id) }}
           </article>
         {% else %}
-          <p class="empty">No things learned yet.</p>
+          <div class="empty-state"><div class="empty-state-icon">🏠</div><h3>No things learned yet</h3><p>Adopt Home Assistant entities from Discovery to start building the home graph.</p><a class="btn btn-primary btn-sm" href="/dashboard/discovery">Open Discovery</a></div>
         {% endfor %}
       </div>
     </section>
 
-    <section>
-      <h2>Habits</h2>
+    <section class="card">
+      <div class="section-header"><div><h2>Habits</h2><p>Observed routines that may need confirmation.</p></div></div>
       <div class="card-grid">
         {% for item in knowledge.habits %}
-          <article class="knowledge-card" data-table="habits" data-id="{{ item.id }}">
+          <article class="knowledge-card card-hover" data-table="habits" data-id="{{ item.id }}">
             <script type="application/json" class="card-json">{{ item | tojson }}</script>
-            <header>
-              <h3>{{ item.subject }}</h3>
-              <span>{{ item.frequency or 'observed pattern' }}</span>
-            </header>
+            <header><h3>{{ item.subject }}</h3><span class="badge badge-info">{{ item.frequency or 'observed pattern' }}</span></header>
             <pre>{{ (item.pattern or {}) | tojson }}</pre>
             {{ confidence_bar(item.confidence) }}
-            <dl>
-              <dt>Source</dt><dd>{{ item.source or 'unknown' }}</dd>
-              <dt>Last confirmed</dt><dd>{{ item.last_observed_at or item.created_at or '—' }}</dd>
-            </dl>
+            <dl><dt>Source</dt><dd>{{ item.source or 'unknown' }}</dd><dt>Last confirmed</dt><dd>{{ item.last_observed_at or item.created_at or '—' }}</dd></dl>
             {{ actions('habits', item.id) }}
           </article>
         {% else %}
-          <p class="empty">No habits learned yet.</p>
+          <div class="empty-state"><div class="empty-state-icon">☕</div><h3>No habits learned yet</h3><p>Morning briefs will surface patterns once observers collect enough evidence.</p></div>
         {% endfor %}
       </div>
     </section>
 
-    <section>
-      <h2>Preferences</h2>
+    <section class="card">
+      <div class="section-header"><div><h2>Preferences</h2><p>Your saved choices and defaults.</p></div></div>
       <div class="card-grid">
         {% for item in knowledge.preferences %}
-          <article class="knowledge-card" data-table="preferences" data-id="{{ item.key }}">
+          <article class="knowledge-card card-hover" data-table="preferences" data-id="{{ item.key }}">
             <script type="application/json" class="card-json">{{ item | tojson }}</script>
-            <header>
-              <h3>{{ item.key }}</h3>
-              <span>preference</span>
-            </header>
+            <header><h3>{{ item.key }}</h3><span class="badge badge-muted">preference</span></header>
             <pre>{{ item.value | tojson }}</pre>
             {{ confidence_bar(item.confidence) }}
-            <dl>
-              <dt>Source</dt><dd>{{ item.source or 'unknown' }}</dd>
-              <dt>Last confirmed</dt><dd>{{ item.updated_at or '—' }}</dd>
-            </dl>
+            <dl><dt>Source</dt><dd>{{ item.source or 'unknown' }}</dd><dt>Last confirmed</dt><dd>{{ item.updated_at or '—' }}</dd></dl>
             {{ actions('preferences', item.key) }}
           </article>
         {% else %}
-          <p class="empty">No preferences learned yet.</p>
+          <div class="empty-state"><div class="empty-state-icon">✨</div><h3>No preferences learned yet</h3><p>Answer questions in Morning Brief or Onboarding to teach your defaults.</p></div>
         {% endfor %}
       </div>
     </section>
 
-    <section>
-      <h2>Routines</h2>
+    <section class="card">
+      <div class="section-header"><div><h2>Routines</h2><p>Reusable steps and schedules for home workflows.</p></div></div>
       <div class="card-grid">
         {% for item in knowledge.routines %}
-          <article class="knowledge-card" data-table="routines" data-id="{{ item.id }}">
+          <article class="knowledge-card card-hover" data-table="routines" data-id="{{ item.id }}">
             <script type="application/json" class="card-json">{{ item | tojson }}</script>
-            <header>
-              <h3>{{ item.name }}</h3>
-              <span>routine</span>
-            </header>
+            <header><h3>{{ item.name }}</h3><span class="badge badge-success">routine</span></header>
             <pre>{{ {'steps': item.steps, 'schedule': item.schedule} | tojson }}</pre>
             {{ confidence_bar(1.0 if item.last_run_at else 0.5) }}
-            <dl>
-              <dt>Source</dt><dd>{{ item.source or 'unknown' }}</dd>
-              <dt>Last confirmed</dt><dd>{{ item.last_run_at or item.created_at or '—' }}</dd>
-            </dl>
+            <dl><dt>Source</dt><dd>{{ item.source or 'unknown' }}</dd><dt>Last confirmed</dt><dd>{{ item.last_run_at or item.created_at or '—' }}</dd></dl>
             {{ actions('routines', item.id) }}
           </article>
         {% else %}
-          <p class="empty">No routines learned yet.</p>
+          <div class="empty-state"><div class="empty-state-icon">🪜</div><h3>No routines learned yet</h3><p>Complete onboarding to seed the first household routines.</p><a class="btn btn-primary btn-sm" href="/dashboard/onboarding">Open Onboarding</a></div>
         {% endfor %}
       </div>
     </section>
@@ -132,12 +112,9 @@
     <form method="dialog">
       <h2>Edit learned fact</h2>
       <p>Edit JSON fields, then save. Unknown fields are ignored by the server.</p>
-      <textarea id="edit-json" spellcheck="false"></textarea>
+      <textarea id="edit-json" class="textarea" spellcheck="false"></textarea>
       <p class="modal-error" id="edit-error" role="alert"></p>
-      <menu>
-        <button type="button" id="cancel-edit">Cancel</button>
-        <button type="button" id="save-edit">Save</button>
-      </menu>
+      <menu><button type="button" class="btn btn-secondary" id="cancel-edit">Cancel</button><button type="button" class="btn btn-primary" id="save-edit">Save</button></menu>
     </form>
   </dialog>
 
@@ -145,10 +122,10 @@
     <form method="dialog">
       <h2>Why?</h2>
       <div id="evidence-list" class="evidence-list"></div>
-      <menu><button type="button" id="close-evidence">Close</button></menu>
+      <menu><button type="button" class="btn btn-secondary" id="close-evidence">Close</button></menu>
     </form>
   </dialog>
 
-  <script src="/static/about_you.js" defer></script>
+  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
 </body>
 </html>

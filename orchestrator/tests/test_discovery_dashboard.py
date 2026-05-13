@@ -63,7 +63,12 @@ def test_discovery_renders_unidentified_entities_only() -> None:
     assert "appliance.washer" in resp.text
     assert "sensor.dryer" not in resp.text
     assert "sensor.ignore_me" not in resp.text
+    assert "/static/_design.css" in resp.text
+    assert "/static/_app.js" in resp.text
     assert "/static/discovery.js" in resp.text
+    assert 'id="search"' in resp.text
+    assert 'id="group-by"' in resp.text
+    assert "toast-stack" in resp.text
     app.state.registry.dispatch.assert_awaited_once_with(
         "home_automation",
         "list_entities",

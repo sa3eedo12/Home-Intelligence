@@ -1,25 +1,9 @@
 (() => {
-  async function postJSON(url, payload) {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => resp.statusText);
-      throw new Error(`${resp.status} ${text}`);
-    }
-    return resp.json();
-  }
-
   function value(card, selector) {
     const field = card.querySelector(selector);
-    return field instanceof HTMLInputElement || field instanceof HTMLSelectElement
-      ? field.value.trim()
-      : '';
+    return field instanceof HTMLInputElement || field instanceof HTMLSelectElement ? field.value.trim() : '';
   }
 
-  // ====================== grouping + search + filtering ====================
   const container = document.getElementById('entity-groups');
   const groupBy = document.getElementById('group-by');
   const search = document.getElementById('search');
@@ -30,7 +14,6 @@
     if (mode === 'area') return card.dataset.area || 'Unassigned';
     if (mode === 'domain') return card.dataset.domain || 'unknown';
     if (mode === 'none') return 'All entities';
-    // default: by suggested type, with a friendly bucket label
     const t = card.dataset.suggestedType || 'other';
     if (t.startsWith('appliance.')) return 'Appliances';
     if (t.startsWith('device.')) return 'Devices (TV / monitor / phone / …)';
@@ -48,11 +31,10 @@
     if (!container) return;
     const mode = groupBy ? groupBy.value : 'type';
     const q = (search?.value || '').toLowerCase().trim();
-
-    // Reset: detach all cards from their current parent
     allCards.forEach((card) => card.remove());
+    container.querySelectorAll('.group-section').forEach((s) => s.remove());
+    container.querySelector('.search-empty')?.remove();
 
-    // Match + bucket
     const buckets = new Map();
     let visibleCount = 0;
     for (const card of allCards) {
@@ -64,10 +46,7 @@
       buckets.get(key).push(card);
     }
 
-    // Clear out any old groups + render new ones
-    container.querySelectorAll('.group-section').forEach((s) => s.remove());
-    const sortedKeys = Array.from(buckets.keys()).sort();
-    for (const key of sortedKeys) {
+    for (const key of Array.from(buckets.keys()).sort()) {
       const cards = buckets.get(key);
       const section = document.createElement('section');
       section.className = 'group-section';
@@ -82,6 +61,13 @@
       container.appendChild(section);
     }
 
+    if (!visibleCount && allCards.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-state search-empty';
+      empty.innerHTML = '<div class="empty-state-icon">🔎</div><h3>No matching entities</h3><p>Try a different search or grouping.</p>';
+      container.appendChild(empty);
+    }
+
     if (summaryLine) {
       const total = allCards.length;
       summaryLine.textContent = q
@@ -91,10 +77,9 @@
   }
 
   if (groupBy) groupBy.addEventListener('change', render);
-  if (search) search.addEventListener('input', render);
+  if (search) search.addEventListener('input', debounce(render, 120));
   render();
 
-  // ====================== adopt / ignore / bulk ============================
   document.addEventListener('click', async (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
@@ -102,9 +87,7 @@
     if (target.id === 'bulk-adopt-area') {
       const cards = container ? Array.from(container.querySelectorAll('.entity-card')) : [];
       if (!cards.length) return;
-      if (!window.confirm(`Adopt all ${cards.length} visible entities using their currently-selected type?`)) {
-        return;
-      }
+      if (!window.confirm(`Adopt all ${cards.length} visible entities using their currently-selected type?`)) return;
       target.setAttribute('disabled', 'disabled');
       let ok = 0;
       let failed = 0;
@@ -112,19 +95,19 @@
         const entityId = card.dataset.entityId || '';
         if (!entityId) continue;
         try {
-          await postJSON('/admin/discovery/adopt', {
+          await apiPost('/admin/discovery/adopt', {
             entity_id: entityId,
             type: value(card, '.type-select'),
             friendly_name: value(card, '.friendly-name') || entityId,
-          });
+          }, { toastErrors: false });
           ok += 1;
         } catch (err) {
           console.error('bulk adopt failed for', entityId, err);
           failed += 1;
         }
       }
-      window.alert(`Adopted ${ok} entity(ies). ${failed ? failed + ' failed.' : ''}`);
-      window.location.reload();
+      Toast.show(`Adopted ${ok} entity(ies).${failed ? ` ${failed} failed.` : ''}`, failed ? 'warning' : 'success');
+      setTimeout(() => window.location.reload(), 750);
       return;
     }
 
@@ -136,23 +119,18 @@
     try {
       if (target.classList.contains('adopt-btn')) {
         target.setAttribute('disabled', 'disabled');
-        const payload = {
-          entity_id: entityId,
-          type: value(card, '.type-select'),
-          friendly_name: value(card, '.friendly-name') || entityId,
-        };
-        await postJSON('/admin/discovery/adopt', payload);
-        window.location.reload();
+        await apiPost('/admin/discovery/adopt', { entity_id: entityId, type: value(card, '.type-select'), friendly_name: value(card, '.friendly-name') || entityId });
+        Toast.show(`Adopted ${entityId}`, 'success');
+        setTimeout(() => window.location.reload(), 650);
       }
       if (target.classList.contains('ignore-btn')) {
         target.setAttribute('disabled', 'disabled');
-        await postJSON('/admin/discovery/ignore', { entity_id: entityId });
-        window.location.reload();
+        await apiPost('/admin/discovery/ignore', { entity_id: entityId });
+        Toast.show(`Ignored ${entityId}`, 'success');
+        setTimeout(() => window.location.reload(), 650);
       }
-    } catch (err) {
+    } catch (_err) {
       target.removeAttribute('disabled');
-      console.error(err);
-      window.alert(err.message || String(err));
     }
   });
 })();

@@ -63,5 +63,9 @@ def test_morning_brief_page_renders_synthetic_brief() -> None:
     assert "Send to Copilot CLI on NAS" in resp.text
     assert "Coming in Chapter 6" not in resp.text
     assert "health-banner" in resp.text
+    assert "/static/_design.css" in resp.text
+    assert "/static/_app.js" in resp.text
     assert "/static/morning_brief.css" in resp.text
     assert "/static/morning_brief.js" in resp.text
+    assert 'id="run-now-btn"' in resp.text
+    assert "toast-stack" in resp.text

@@ -1,89 +1,72 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Discovery — Home Intelligence</title>
+  <link rel="stylesheet" href="/static/_design.css">
   <link rel="stylesheet" href="/static/discovery.css">
+  <script src="/static/_app.js" defer></script>
+  <script src="/static/discovery.js" defer></script>
 </head>
-<body>
+<body class="page-body discovery-body">
   <header class="topbar">
     <a class="back-link" href="/dashboard">← Dashboard</a>
-    <h1>Discovery</h1>
-    <p>Identify Home Assistant entities and adopt them into the Things registry.</p>
+    <div><h1>Discovery</h1><p>Identify Home Assistant entities and adopt them into the Things registry.</p></div>
+    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
   </header>
 
   <main>
-    <section class="summary-card">
-      <h2>Discovery</h2>
-      <p id="summary-line">
-        Showing {{ discovery.entities|length }} unidentified of {{ discovery.total_count }} HA entities.
-        {{ discovery.identified_count }} entity ids are already adopted or ignored.
-      </p>
+    <section class="summary-card card">
+      <div class="section-header"><div><h2>Discovery</h2>
+      <p id="summary-line">Showing {{ discovery.entities|length }} unidentified of {{ discovery.total_count }} HA entities. {{ discovery.identified_count }} entity ids are already adopted or ignored.</p></div></div>
     </section>
 
-    <section class="filters">
-      <input type="search" id="search" placeholder="Search by id, name, area, or type…" autocomplete="off">
+    <section class="filters card">
+      <label class="label search-label">Search
+        <input class="input" type="search" id="search" placeholder="Search by id, name, area, or type…" autocomplete="off">
+      </label>
       <div class="filter-chips">
-        <label>Group by
-          <select id="group-by">
+        <label class="label compact-label">Group by
+          <select class="select" id="group-by">
             <option value="type" selected>Suggested type</option>
             <option value="area">Area</option>
             <option value="domain">HA domain</option>
             <option value="none">No grouping</option>
           </select>
         </label>
-        <button type="button" class="chip" id="bulk-adopt-area" title="Adopt every visible entity using its suggested type">
-          Adopt all visible (with suggested types)
-        </button>
+        <button type="button" class="chip btn btn-secondary" id="bulk-adopt-area" title="Adopt every visible entity using its suggested type">Adopt all visible (with suggested types)</button>
       </div>
     </section>
 
     <section id="entity-groups" aria-label="Unidentified Home Assistant entities">
       {% if not discovery.entities %}
-        <p class="empty">Everything visible from Home Assistant is already adopted or ignored.</p>
+        <div class="empty-state"><div class="empty-state-icon">✅</div><h3>Everything is adopted</h3><p>Everything visible from Home Assistant is already adopted or ignored.</p></div>
       {% endif %}
       {% for entity in discovery.entities %}
-        <article class="entity-card"
+        <article class="entity-card card-hover"
                  data-entity-id="{{ entity.entity_id }}"
                  data-area="{{ entity.area or 'Unassigned' }}"
                  data-domain="{{ entity.entity_id.split('.')[0] }}"
                  data-suggested-type="{{ entity.suggested_type }}"
                  data-search="{{ (entity.entity_id ~ ' ' ~ entity.friendly_name ~ ' ' ~ (entity.area or '') ~ ' ' ~ entity.suggested_type)|lower }}">
-          <header>
-            <h3>{{ entity.friendly_name }}</h3>
-            <code>{{ entity.entity_id }}</code>
-          </header>
-          <dl>
-            <dt>Area</dt><dd>{{ entity.area or 'Unassigned' }}</dd>
-            <dt>State</dt><dd>{{ entity.state }}</dd>
-          </dl>
-          <label>
-            Type
-            <select class="type-select">
+          <header><h3>{{ entity.friendly_name }}</h3><code>{{ entity.entity_id }}</code></header>
+          <dl><dt>Area</dt><dd>{{ entity.area or 'Unassigned' }}</dd><dt>State</dt><dd>{{ entity.state }}</dd></dl>
+          <label class="label">Type
+            <select class="select type-select">
               {% for type in discovery.types %}
-                <option value="{{ type }}" {{ 'selected' if type == entity.suggested_type else '' }}>
-                  {{ type }}
-                </option>
+                <option value="{{ type }}" {{ 'selected' if type == entity.suggested_type else '' }}>{{ type }}</option>
               {% endfor %}
             </select>
           </label>
-          <label>
-            Friendly name
-            <input class="friendly-name" value="{{ entity.friendly_name }}">
-          </label>
-          <p class="hint">
-            Photo upload coming in a later chapter. For now, just adopt with a friendly name and type.
-          </p>
-          <div class="actions">
-            <button type="button" class="adopt-btn">Adopt</button>
-            <button type="button" class="ignore-btn danger">Ignore</button>
-          </div>
+          <label class="label">Friendly name<input class="input friendly-name" value="{{ entity.friendly_name }}"></label>
+          <p class="hint">Photo upload coming in a later chapter. For now, just adopt with a friendly name and type.</p>
+          <div class="actions"><button type="button" class="btn btn-primary adopt-btn">Adopt</button><button type="button" class="btn btn-danger ignore-btn danger">Ignore</button></div>
         </article>
       {% endfor %}
     </section>
   </main>
 
-  <script src="/static/discovery.js" defer></script>
+  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
 </body>
 </html>

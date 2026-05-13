@@ -1,163 +1,241 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Home Intelligence Dashboard</title>
+  <link rel="stylesheet" href="/static/_design.css">
   <link rel="stylesheet" href="/static/dashboard.css">
-</head>
-<body>
-  <header class="topbar">
-    <h1>🏠 Home Intelligence</h1>
-    <a class="morning-brief-link" href="/dashboard/morning-brief">Morning Brief →</a>
-    <a class="btn ghost" href="/dashboard/about-you">About You →</a>
-    <a class="btn ghost" href="/dashboard/discovery">Discovery →</a>
-    <a class="btn ghost" href="/dashboard/onboarding">Onboarding →</a>
-    <a class="btn ghost" href="/dashboard/health">Health →</a>
-    <a class="btn ghost" href="/dashboard/data-science">Data science →</a>
-    <div class="stack-leds" id="stack-leds">
-      {% for service, details in status.stack.items() %}
-        <span class="led {{ 'ok' if details.ok else 'down' }}" title="{{ service }}">
-          <span class="dot"></span>{{ service }}
-        </span>
-      {% endfor %}
-    </div>
-    <div class="topbar-actions">
-      <span id="connection-state" class="conn-state offline">connecting…</span>
-      <button class="btn" data-quiet="on">Quiet on</button>
-      <button class="btn" data-quiet="off">Quiet off</button>
-      <button class="btn" data-quiet="clear">Clear quiet</button>
-      <button class="btn ghost" id="reload-btn">Reload config</button>
-    </div>
-  </header>
-
-  <main>
-    <section class="curator-card" id="curator-card">
-      <h2>📰 Curator</h2>
-      <article class="narrative" id="curator-narrative">
-        {% if status.narrative and status.narrative.narrative %}
-          <pre>{{ status.narrative.narrative }}</pre>
-          <small>updated {{ status.narrative.generated_at }}</small>
-        {% else %}
-          <em>The dashboard_curator agent will publish a summary here within a minute.</em>
-        {% endif %}
-      </article>
-      {% if status.alert_narrative and status.alert_narrative.narrative %}
-        <article class="narrative narrative-alerts" id="curator-alert-narrative">
-          <h3>⚠️ Alert briefing</h3>
-          <pre>{{ status.alert_narrative.narrative }}</pre>
-          <small>updated {{ status.alert_narrative.generated_at }}</small>
-        </article>
-      {% else %}
-        <article class="narrative narrative-alerts" id="curator-alert-narrative" hidden></article>
-      {% endif %}
-    </section>
-
-    <section class="agent-grid-section">
-      <h2>🤖 Agents <small>last {{ status.activity.window_minutes }} min</small></h2>
-      <div class="agent-grid" id="agent-grid">
-        {% for agent_name in status.agents %}
-          {% set live = none %}
-          {% for row in status.activity.agents %}
-            {% if row.agent == agent_name %}{% set live = row %}{% endif %}
-          {% endfor %}
-          <article class="agent-tile" data-agent="{{ agent_name }}"
-                   data-state="{{ live.state if live else 'idle' }}">
-            <header>
-              <span class="state-pill"></span>
-              <strong class="agent-name">{{ agent_name }}</strong>
-            </header>
-            <div class="current-task">
-              {% if live and live.current %}
-                {{ live.current.capability }}
-              {% else %}
-                <em>idle</em>
-              {% endif %}
-            </div>
-            <div class="metrics">
-              <span class="ok-count">ok: {{ (live.ok if live else 0) }}</span>
-              <span class="err-count">err: {{ (live.errors if live else 0) }}</span>
-              <span class="avg-ms">{{ ('%.0f' % live.avg_ms) if live else 0 }} ms</span>
-            </div>
-            <svg class="sparkline" viewBox="0 0 60 14" preserveAspectRatio="none"></svg>
-          </article>
-        {% endfor %}
-      </div>
-    </section>
-
-    <div class="two-col">
-      <section class="activity-feed">
-        <h2>📡 Activity feed</h2>
-        <ol id="activity-feed">
-          {% for event in status.recent_activity %}
-            <li class="activity-item status-{{ event.status }}" data-agent="{{ event.agent }}">
-              <span class="ts">{{ event.ts }}</span>
-              <span class="agent">{{ event.agent }}</span>
-              <span class="cap">{{ event.capability }}</span>
-              <span class="status-tag">{{ event.status }}</span>
-              {% if event.duration_ms %}<span class="dur">{{ '%.0f' % event.duration_ms }}ms</span>{% endif %}
-            </li>
-          {% endfor %}
-        </ol>
-      </section>
-
-      <section class="jobs-section">
-        <h2>⏰ Scheduled jobs</h2>
-        <ul class="jobs-list">
-          {% for job in status.jobs %}
-            <li>
-              <button class="run-btn" data-job="{{ job.id }}" title="Run now">▶</button>
-              <strong>{{ job.id }}</strong>
-              <span class="job-meta">next {{ job.next_run_time or 'n/a' }}</span>
-              <span class="job-status">{{ job.last_status }}</span>
-            </li>
-          {% endfor %}
-        </ul>
-      </section>
-    </div>
-
-    <div class="two-col">
-      <section class="notifications-section">
-        <h2>🔔 Recent notifications</h2>
-        <ul class="notifications-list">
-          {% for item in status.recent_notifications[:15] %}
-            <li class="severity-{{ item.severity }}">
-              <span class="ts">{{ item.ts }}</span>
-              <span class="topic">{{ item.topic or '—' }}</span>
-              <span class="severity">{{ item.severity }}</span>
-              <span class="decision">{{ item.decision }}</span>
-              {% if item.text %}<span class="text">{{ item.text }}</span>{% endif %}
-            </li>
-          {% endfor %}
-        </ul>
-      </section>
-
-      <section class="overrides-section">
-        <h2>🎛️ Active overrides</h2>
-        <ul class="mutes-list">
-          {% for mute in status.active_mutes %}
-            <li>
-              <strong>{{ mute.key }}</strong>
-              <span class="ttl">{{ mute.ttl_seconds }}s</span>
-              <button class="unmute-btn" data-key="{{ mute.key }}">unmute</button>
-            </li>
-          {% endfor %}
-          {% if not status.active_mutes %}
-            <li class="empty"><em>no active mutes</em></li>
-          {% endif %}
-        </ul>
-        <p class="quiet-state">
-          quiet override: <strong>{{ status.quiet_override or 'auto' }}</strong>
-        </p>
-        <details class="models">
-          <summary>Models</summary>
-          <p>NPU: {{ status.models.npu|join(', ') or '—' }}</p>
-          <p>iGPU: {{ status.models.igpu|join(', ') or '—' }}</p>
-        </details>
-      </section>
-    </div>
-  </main>
-
+  <script src="/static/_app.js" defer></script>
   <script src="/static/dashboard.js" defer></script>
+</head>
+<body class="dashboard-body">
+  {% set stack = status.stack|default({}, true) %}
+  {% set agents = status.agents|default([], true) %}
+  {% set activity = status.activity|default({'window_minutes': 5, 'agents': [], 'total_events': 0}, true) %}
+  {% set recent_activity = status.recent_activity|default([], true) %}
+  {% set jobs = status.jobs|default([], true) %}
+  {% set recent_notifications = status.recent_notifications|default([], true) %}
+  {% set active_mutes = status.active_mutes|default([], true) %}
+  {% set models = status.models|default({'npu': [], 'igpu': []}, true) %}
+  {% set people_home = status.people_home|default([], true) %}
+
+  <input type="checkbox" id="nav-toggle" class="nav-toggle" aria-label="Toggle navigation">
+  <label class="nav-toggle-button btn btn-secondary btn-icon" for="nav-toggle" role="button" tabindex="0" aria-controls="dashboard-navigation" aria-expanded="false" aria-label="Open dashboard navigation">☰</label>
+
+  <div class="dashboard-shell">
+    <aside class="nav-rail-wrap">
+      <nav class="nav-rail" id="dashboard-navigation" aria-label="Dashboard navigation">
+        <a class="nav-brand" href="/dashboard"><span aria-hidden="true">🏠</span><span>Home Intelligence</span></a>
+        <a class="nav-link active" href="/dashboard" aria-current="page"><span class="nav-icon" aria-hidden="true">🏠</span><span class="nav-label">Home</span></a>
+        <a class="nav-link" href="/dashboard/morning-brief"><span class="nav-icon" aria-hidden="true">🌅</span><span class="nav-label">Morning Brief</span></a>
+        <a class="nav-link" href="/dashboard/about-you"><span class="nav-icon" aria-hidden="true">👤</span><span class="nav-label">About You</span></a>
+        <a class="nav-link" href="/dashboard/discovery"><span class="nav-icon" aria-hidden="true">🔍</span><span class="nav-label">Discovery</span></a>
+        <a class="nav-link" href="/dashboard/onboarding"><span class="nav-icon" aria-hidden="true">🪜</span><span class="nav-label">Onboarding</span></a>
+        <a class="nav-link" href="/dashboard/health"><span class="nav-icon" aria-hidden="true">❤️</span><span class="nav-label">Health</span></a>
+        <a class="nav-link" href="/dashboard/data-science"><span class="nav-icon" aria-hidden="true">📊</span><span class="nav-label">Data Science</span></a>
+      </nav>
+    </aside>
+
+    <main class="dashboard-main">
+      <header class="dashboard-header card">
+        <div>
+          <p class="eyebrow">Home view</p>
+          <h1>Home Intelligence</h1>
+        </div>
+        <div class="dashboard-header-actions">
+          <span class="last-updated">Updated <time id="last-updated">{{ status.narrative.generated_at if status.narrative and status.narrative.generated_at else 'on load' }}</time></span>
+          <span id="connection-state" class="conn-state badge badge-warning connecting">connecting…</span>
+          <button class="btn btn-secondary btn-icon" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
+          <button class="btn btn-secondary btn-sm" data-quiet="on">Quiet on</button>
+          <button class="btn btn-secondary btn-sm" data-quiet="off">Quiet off</button>
+          <button class="btn btn-ghost btn-sm" data-quiet="clear">Clear quiet</button>
+          <button class="btn btn-ghost btn-sm" id="reload-btn">Reload config</button>
+        </div>
+      </header>
+
+      <section class="hero-grid" aria-label="Home summary">
+        <article class="card hero-card curator-card" id="curator-card">
+          <div class="hero-meta">
+            <p class="eyebrow">Right now</p>
+            {% if recent_notifications %}<span class="badge badge-info">NEW</span>{% endif %}
+          </div>
+          <time id="current-time" class="current-time">--:--</time>
+          <div class="hero-facts">
+            <span><strong>Who's home</strong>{{ people_home|join(', ') if people_home else 'Presence learning' }}</span>
+            <span><strong>Quiet</strong>{{ status.quiet_override or 'auto' }}</span>
+          </div>
+          <article class="narrative hero-narrative" id="curator-narrative" aria-live="polite">
+            {% if status.narrative and status.narrative.narrative %}
+              <pre>{{ status.narrative.narrative }}</pre>
+              <small>updated {{ status.narrative.generated_at }}</small>
+            {% else %}
+              <div class="empty-state compact">
+                <span class="skeleton skeleton-line"></span>
+                <p>The dashboard curator will publish a summary here within a minute.</p>
+              </div>
+            {% endif %}
+          </article>
+          {% if status.alert_narrative and status.alert_narrative.narrative %}
+            <article class="narrative narrative-alerts" id="curator-alert-narrative">
+              <h3>⚠️ Alert briefing</h3>
+              <pre>{{ status.alert_narrative.narrative }}</pre>
+              <small>updated {{ status.alert_narrative.generated_at }}</small>
+            </article>
+          {% else %}
+            <article class="narrative narrative-alerts" id="curator-alert-narrative" hidden></article>
+          {% endif %}
+        </article>
+
+        <article class="card stack-card">
+          <div class="section-header compact-header">
+            <div>
+              <h2>Stack health</h2>
+              <p>Core services on the local stack</p>
+            </div>
+          </div>
+          <div class="stack-leds" id="stack-leds">
+            {% for service, details in stack.items() %}
+              <span class="led {{ 'ok' if details.ok else 'down' }}" title="{{ service }}">
+                <span class="dot" aria-hidden="true"></span>{{ service }}
+              </span>
+            {% else %}
+              <div class="empty-state compact"><div class="empty-state-icon">🛰️</div><h3>No health data yet</h3><p>Waiting for the next status snapshot.</p></div>
+            {% endfor %}
+          </div>
+        </article>
+      </section>
+
+      <section class="card agent-grid-section">
+        <div class="section-header">
+          <div>
+            <h2>Live agents</h2>
+            <p>Last {{ activity.window_minutes }} min · {{ activity.total_events|default(0) }} events</p>
+          </div>
+          <span class="badge badge-muted">SSE live</span>
+        </div>
+        <div class="agent-grid" id="agent-grid" aria-live="polite">
+          {% for agent_name in agents %}
+            {% set live = none %}
+            {% for row in activity.agents|default([], true) %}
+              {% if row.agent == agent_name %}{% set live = row %}{% endif %}
+            {% endfor %}
+            <article class="agent-tile card-hover" data-agent="{{ agent_name }}"
+                     data-state="{{ live.state if live else 'idle' }}">
+              <header>
+                <span class="state-pill" aria-hidden="true"></span>
+                <strong class="agent-name">{{ agent_name }}</strong>
+              </header>
+              <div class="current-task">
+                {% if live and live.current %}
+                  {{ live.current.capability }}
+                {% else %}
+                  <em>idle</em>
+                {% endif %}
+              </div>
+              <div class="metrics">
+                <span class="ok-count">ok: {{ (live.ok if live else 0) }}</span>
+                <span class="err-count">err: {{ (live.errors if live else 0) }}</span>
+                <span class="avg-ms">{{ ('%.0f' % live.avg_ms) if live else 0 }} ms</span>
+              </div>
+              <svg class="sparkline" viewBox="0 0 60 14" preserveAspectRatio="none" aria-hidden="true"></svg>
+            </article>
+          {% else %}
+            <article class="agent-tile skeleton-card" aria-hidden="true"><span class="skeleton skeleton-line"></span><span class="skeleton skeleton-line"></span><span class="skeleton skeleton-line"></span></article>
+            <article class="agent-tile skeleton-card" aria-hidden="true"><span class="skeleton skeleton-line"></span><span class="skeleton skeleton-line"></span><span class="skeleton skeleton-line"></span></article>
+            <article class="agent-tile skeleton-card" aria-hidden="true"><span class="skeleton skeleton-line"></span><span class="skeleton skeleton-line"></span><span class="skeleton skeleton-line"></span></article>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="dashboard-content-grid">
+        <section class="card activity-feed">
+          <div class="section-header">
+            <div><h2>Live activity feed</h2><p>Recent agent work, grouped by relative time</p></div>
+          </div>
+          <ol id="activity-feed">
+            {% for event in recent_activity %}
+              <li class="activity-item status-{{ event.status }}" data-agent="{{ event.agent }}">
+                <span class="ts" data-ts="{{ event.ts }}">{{ event.ts }}</span>
+                <span class="agent">{{ event.agent }}</span>
+                <span class="cap">{{ event.capability }}</span>
+                <span class="status-tag">{{ event.status }}</span>
+                {% if event.duration_ms %}<span class="dur">{{ '%.0f' % event.duration_ms }}ms</span>{% endif %}
+              </li>
+            {% else %}
+              <li class="empty-state compact activity-empty"><div class="empty-state-icon">📡</div><h3>No activity yet</h3><p>Live events will appear here as agents run.</p></li>
+            {% endfor %}
+          </ol>
+        </section>
+
+        <section class="card jobs-section">
+          <div class="section-header">
+            <div><h2>Scheduled jobs</h2><p>Manual run controls</p></div>
+          </div>
+          <ul class="jobs-list">
+            {% for job in jobs %}
+              <li>
+                <button class="run-btn btn btn-secondary btn-icon btn-sm" data-job="{{ job.id }}" title="Run now" aria-label="Run {{ job.id }} now">▶</button>
+                <strong>{{ job.id }}</strong>
+                <span class="job-meta">next {{ job.next_run_time or 'n/a' }}</span>
+                <span class="job-status badge badge-muted">{{ job.last_status }}</span>
+              </li>
+            {% else %}
+              <li class="empty-state compact"><div class="empty-state-icon">⏰</div><h3>No jobs registered</h3><p>Scheduler jobs will show up here.</p></li>
+            {% endfor %}
+          </ul>
+        </section>
+      </section>
+
+      <section class="card inbox-section">
+        <div class="section-header">
+          <div><h2>Inbox peek</h2><p>Top 3 recent cards and notifications</p></div>
+          {% if recent_notifications %}<span class="badge badge-info">{{ recent_notifications|length }} recent</span>{% endif %}
+        </div>
+        <ul class="inbox-list">
+          {% for item in recent_notifications[:3] %}
+            <li class="severity-{{ item.severity }}">
+              <span class="badge {{ 'badge-danger' if item.severity in ['alert', 'critical'] else ('badge-warning' if item.severity == 'warn' else 'badge-info') }}">{{ item.severity }}</span>
+              <div>
+                <strong>{{ item.topic or 'Inbox card' }}</strong>
+                <p>{{ item.text or item.decision }}</p>
+                <small>{{ item.ts }}</small>
+              </div>
+            </li>
+          {% else %}
+            <li class="empty-state compact"><div class="empty-state-icon">✅</div><h3>No inbox cards</h3><p>New suggestions and notifications will appear here.</p></li>
+          {% endfor %}
+        </ul>
+      </section>
+
+      <section class="dashboard-content-grid compact-ops">
+        <section class="card overrides-section">
+          <div class="section-header"><div><h2>Active overrides</h2><p>Temporary mute and quiet controls</p></div></div>
+          <ul class="mutes-list">
+            {% for mute in active_mutes %}
+              <li>
+                <strong>{{ mute.key }}</strong>
+                <span class="ttl badge badge-muted">{{ mute.ttl_seconds }}s</span>
+                <button class="unmute-btn btn btn-secondary btn-sm" data-key="{{ mute.key }}">unmute</button>
+              </li>
+            {% else %}
+              <li class="empty-state compact"><div class="empty-state-icon">🎛️</div><h3>No active mutes</h3><p>Everything is following policy defaults.</p></li>
+            {% endfor %}
+          </ul>
+          <p class="quiet-state">quiet override: <strong>{{ status.quiet_override or 'auto' }}</strong></p>
+        </section>
+
+        <section class="card models-section">
+          <div class="section-header"><div><h2>Models</h2><p>Local inference inventory</p></div></div>
+          <dl class="model-list">
+            <dt>NPU</dt><dd>{{ models.npu|join(', ') or '—' }}</dd>
+            <dt>iGPU</dt><dd>{{ models.igpu|join(', ') or '—' }}</dd>
+          </dl>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
 </body>
 </html>

@@ -1,161 +1,105 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Morning Brief · Home Intelligence</title>
+  <link rel="stylesheet" href="/static/_design.css">
   <link rel="stylesheet" href="/static/morning_brief.css">
+  <script src="/static/_app.js" defer></script>
   <script src="/static/morning_brief.js" defer></script>
 </head>
-<body>
+<body class="page-body morning-brief-body">
   <header class="brief-topbar">
     <a href="/dashboard" class="back-link">← Dashboard</a>
     <h1>🌅 Morning Brief</h1>
-    <button type="button" id="run-now-btn" class="run-now">Run reflection now</button>
+    <button type="button" id="run-now-btn" class="run-now btn btn-primary">Run reflection now</button>
+    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
   </header>
 
-  <div id="reflection-banner"
-       class="reflection-banner {{ 'visible' if reflection_state and reflection_state.running else '' }}"
-       data-running="{{ '1' if reflection_state and reflection_state.running else '0' }}">
+  <div id="reflection-banner" class="reflection-banner {{ 'visible' if reflection_state and reflection_state.running else '' }}" data-running="{{ '1' if reflection_state and reflection_state.running else '0' }}">
     <span class="spinner" aria-hidden="true"></span>
-    <span class="reflection-banner-text">
-      Reflection is running…
-      <span id="reflection-phase" class="reflection-phase">{{ reflection_state.phase or 'starting' }}</span>
-      <span id="reflection-elapsed" class="reflection-elapsed"></span>
-    </span>
+    <span class="reflection-banner-text">Reflection is running… <span id="reflection-phase" class="reflection-phase">{{ reflection_state.phase or 'starting' }}</span><span id="reflection-elapsed" class="reflection-elapsed"></span></span>
     <small>The page will refresh automatically when it finishes.</small>
   </div>
 
   {% set reflection = status.reflection if status and status.reflection else {'healthy': false} %}
   {% if not reflection.healthy and not (reflection_state and reflection_state.running) %}
-    <div class="health-banner">
-      Reflection is stale or has not run yet{% if reflection.age_hours is not none %}
-      ({{ '%.1f' % reflection.age_hours }}h old){% endif %}.
-    </div>
+    <div class="health-banner">Reflection is stale or has not run yet{% if reflection.age_hours is not none %} ({{ '%.1f' % reflection.age_hours }}h old){% endif %}.</div>
   {% endif %}
 
   <main class="brief-shell">
     {% if brief %}
       {% set body = brief.body_json or {} %}
-      <section class="headline-card">
-        <p class="eyebrow">generated {{ brief.generated_at }}</p>
-        <h2>{{ brief.summary or body.summary or 'No summary available.' }}</h2>
+      <section class="headline-card card"><p class="eyebrow">generated {{ brief.generated_at }}</p><h2>{{ brief.summary or body.summary or 'No summary available.' }}</h2></section>
+
+      <section class="brief-section card">
+        <div class="section-header"><div><h2>Yesterday</h2><p>Notable events from the last reflection window.</p></div></div>
+        <ul>{% for item in body.yesterday or [] %}<li><strong>#{{ item.id }}</strong> {{ item.summary }}</li>{% else %}<li class="empty-state compact"><div class="empty-state-icon">🌙</div><h3>No notable events</h3><p>No notable events were logged.</p></li>{% endfor %}</ul>
       </section>
 
-      <section class="brief-section">
-        <h2>Yesterday</h2>
-        <ul>
-          {% for item in body.yesterday or [] %}
-            <li><strong>#{{ item.id }}</strong> {{ item.summary }}</li>
-          {% else %}
-            <li class="empty">No notable events were logged.</li>
-          {% endfor %}
-        </ul>
-      </section>
-
-      <section class="brief-section">
-        <h2>Questions for you</h2>
+      <section class="brief-section card">
+        <div class="section-header"><div><h2>Questions for you</h2><p>Quick answers improve future automation.</p></div></div>
         <div class="card-grid">
           {% for item in body.questions_for_you or [] %}
             {% set profile_key = (item.evidence_keys or [None])[0] %}
-            <article class="mini-card question-card"
-                     data-question-kind="{{ item.kind or '' }}"
-                     {% if profile_key %}data-profile-key="{{ profile_key }}"{% endif %}>
-              <h3>{{ item.title }}</h3>
-              <p>{{ item.rationale or item.kind }}</p>
+            <article class="mini-card card-hover question-card" data-question-kind="{{ item.kind or '' }}" {% if profile_key %}data-profile-key="{{ profile_key }}"{% endif %}>
+              <h3>{{ item.title }}</h3><p>{{ item.rationale or item.kind }}</p>{% if item.kind %}<span class="badge badge-info">{{ item.kind }}</span>{% endif %}
               {% if profile_key %}
                 <form class="question-answer-form" onsubmit="return false;">
-                  <input type="text" class="question-answer-input"
-                         placeholder="Your answer (e.g. 7:30am, weekdays only, peanuts, …)">
-                  <div class="question-actions">
-                    <button type="submit" class="save-answer">Save</button>
-                    <button type="button" class="skip-question">Skip</button>
-                  </div>
+                  <input type="text" class="input question-answer-input" placeholder="Your answer (e.g. 7:30am, weekdays only, peanuts, …)">
+                  <div class="question-actions"><button type="submit" class="btn btn-primary btn-sm save-answer">Save</button><button type="button" class="btn btn-ghost btn-sm skip-question">Skip</button></div>
                   <p class="question-status" hidden></p>
                 </form>
               {% endif %}
             </article>
           {% else %}
-            <p class="empty">No questions today.</p>
+            <div class="empty-state"><div class="empty-state-icon">✅</div><h3>No questions today</h3><p>The reflector does not need any clarification right now.</p></div>
           {% endfor %}
         </div>
       </section>
 
-      <section class="brief-section">
-        <h2>Suggestions for me</h2>
-        <div class="card-grid">
-          {% for item in body.suggestions_for_me or [] %}
-            <article class="mini-card">
-              <h3>{{ item.title }}</h3>
-              <p>{{ item.rationale }}</p>
-            </article>
-          {% else %}
-            <p class="empty">No operational suggestions today.</p>
-          {% endfor %}
-        </div>
+      <section class="brief-section card">
+        <div class="section-header"><div><h2>Suggestions for me</h2><p>Operational improvements the system can handle.</p></div></div>
+        <div class="card-grid">{% for item in body.suggestions_for_me or [] %}<article class="mini-card card-hover"><h3>{{ item.title }}</h3><p>{{ item.rationale }}</p></article>{% else %}<div class="empty-state"><div class="empty-state-icon">🧘</div><h3>No suggestions today</h3><p>No operational suggestions today.</p></div>{% endfor %}</div>
       </section>
 
-      <section class="brief-section">
-        <h2>Code wishlist</h2>
-        <div class="card-grid">
-          {% for item in body.code_wishlist or [] %}
-            <article class="mini-card">
-              <h3>{{ item.title }}</h3>
-              <p>{{ item.rationale }}</p>
-            </article>
-          {% else %}
-            <p class="empty">No code wishlist items today.</p>
-          {% endfor %}
-        </div>
+      <section class="brief-section card">
+        <div class="section-header"><div><h2>Code wishlist</h2><p>Ideas that may become implementation work.</p></div></div>
+        <div class="card-grid">{% for item in body.code_wishlist or [] %}<article class="mini-card card-hover"><h3>{{ item.title }}</h3><p>{{ item.rationale }}</p></article>{% else %}<div class="empty-state"><div class="empty-state-icon">🧰</div><h3>No code wishlist items</h3><p>No code wishlist items today.</p></div>{% endfor %}</div>
       </section>
 
-      <section class="brief-section">
-        <h2>Proposal cards</h2>
+      <section class="brief-section card">
+        <div class="section-header"><div><h2>Proposal cards</h2><p>Saved cards ready for delivery or dispatch.</p></div></div>
         <div class="proposal-list">
           {% for proposal in proposals %}
-            <article class="proposal-card" data-proposal-id="{{ proposal.id }}">
+            <article class="proposal-card card-hover" data-proposal-id="{{ proposal.id }}">
               <div>
-                <p class="eyebrow">{{ proposal.kind }} · {{ proposal.status }} · {{ '%.0f' % ((proposal.confidence or 0) * 100) }}%</p>
-                <h3>{{ proposal.title }}</h3>
-                <p>{{ proposal.rationale }}</p>
-                {% if proposal.evidence_event_ids %}
-                  <p class="evidence">Evidence: events {{ proposal.evidence_event_ids|join(', ') }}</p>
-                {% endif %}
+                <p class="proposal-meta"><span class="badge badge-info">{{ proposal.kind }}</span><span class="badge badge-muted">{{ proposal.status }}</span><span class="badge badge-success">{{ '%.0f' % ((proposal.confidence or 0) * 100) }}%</span></p>
+                <h3>{{ proposal.title }}</h3><p>{{ proposal.rationale }}</p>
+                {% if proposal.evidence_event_ids %}<p class="evidence">Evidence: events {{ proposal.evidence_event_ids|join(', ') }}</p>{% endif %}
               </div>
               <div class="proposal-actions">
-                <button type="button" class="copy-prompt" data-proposal-id="{{ proposal.id }}">Copy prompt</button>
-                <button type="button"
-                        class="open-issue"
-                        data-proposal-id="{{ proposal.id }}"
-                        {% if proposal.github_issue_url %}disabled{% endif %}>Open as GitHub issue</button>
-                <button type="button"
-                        class="copilot-dispatch"
-                        data-proposal-id="{{ proposal.id }}"
-                        {% if proposal.delivery_channel == 'copilot_dispatch' and proposal.dispatched_at and not proposal.dispatch_error %}disabled{% endif %}>Send to Copilot CLI on NAS</button>
+                <button type="button" class="btn btn-secondary copy-prompt" data-proposal-id="{{ proposal.id }}">Copy prompt</button>
+                <button type="button" class="btn btn-secondary open-issue" data-proposal-id="{{ proposal.id }}" {% if proposal.github_issue_url %}disabled{% endif %}>Open as GitHub issue</button>
+                <button type="button" class="btn btn-primary copilot-dispatch" data-proposal-id="{{ proposal.id }}" {% if proposal.delivery_channel == 'copilot_dispatch' and proposal.dispatched_at and not proposal.dispatch_error %}disabled{% endif %}>Send to Copilot CLI on NAS</button>
                 <div class="proposal-delivery" aria-live="polite">
-                  {% if proposal.github_issue_url %}
-                    <a href="{{ proposal.github_issue_url }}" target="_blank" rel="noreferrer">GitHub issue</a>
-                  {% endif %}
-                  {% if proposal.github_pr_url %}
-                    <a href="{{ proposal.github_pr_url }}" target="_blank" rel="noreferrer">GitHub PR</a>
-                  {% endif %}
-                  {% if proposal.dispatch_error %}
-                    <small class="delivery-error">Delivery failed: {{ proposal.dispatch_error }}</small>
-                  {% endif %}
+                  {% if proposal.github_issue_url %}<a href="{{ proposal.github_issue_url }}" target="_blank" rel="noreferrer">GitHub issue</a>{% endif %}
+                  {% if proposal.github_pr_url %}<a href="{{ proposal.github_pr_url }}" target="_blank" rel="noreferrer">GitHub PR</a>{% endif %}
+                  {% if proposal.dispatch_error %}<small class="delivery-error">Delivery failed: {{ proposal.dispatch_error }}</small>{% endif %}
                 </div>
               </div>
             </article>
           {% else %}
-            <p class="empty">No saved proposals yet.</p>
+            <div class="empty-state"><div class="empty-state-icon">📭</div><h3>No saved proposals</h3><p>No saved proposals yet.</p></div>
           {% endfor %}
         </div>
       </section>
     {% else %}
-      <section class="headline-card">
-        <h2>No morning brief yet.</h2>
-        <p>Run reflection manually from the dashboard admin controls or wait for the 02:30 job.</p>
-      </section>
+      <section class="headline-card card"><div class="empty-state"><div class="empty-state-icon">🌅</div><h3>No morning brief yet</h3><p>Run reflection manually from the dashboard admin controls or wait for the 02:30 job.</p></div></section>
     {% endif %}
   </main>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
 </body>
 </html>

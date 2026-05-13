@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+CSS = Path(__file__).resolve().parents[1] / "static" / "_design.css"
+
+
+def test_design_tokens_define_expected_variables() -> None:
+    css = CSS.read_text()
+    expected = [
+        "--bg",
+        "--surface",
+        "--surface-2",
+        "--surface-3",
+        "--border",
+        "--text-primary",
+        "--text-secondary",
+        "--text-muted",
+        "--accent",
+        "--accent-hover",
+        "--success",
+        "--warning",
+        "--danger",
+        "--info",
+        "--on-bg",
+        "--on-surface",
+        "--on-surface-2",
+        "--on-surface-3",
+        "--on-accent",
+        "--on-success",
+        "--on-warning",
+        "--on-danger",
+        "--on-info",
+        "--font-family-sans",
+        "--font-family-mono",
+        "--font-size-xs",
+        "--font-size-sm",
+        "--font-size-md",
+        "--font-size-lg",
+        "--font-size-xl",
+        "--font-size-2xl",
+        "--line-height-tight",
+        "--line-height-normal",
+        "--line-height-relaxed",
+        "--font-weight-normal",
+        "--font-weight-medium",
+        "--font-weight-bold",
+        "--space-0",
+        "--space-1",
+        "--space-2",
+        "--space-3",
+        "--space-4",
+        "--space-5",
+        "--space-6",
+        "--space-8",
+        "--space-10",
+        "--space-12",
+        "--radius-sm",
+        "--radius-md",
+        "--radius-lg",
+        "--radius-full",
+        "--shadow-sm",
+        "--shadow-md",
+        "--shadow-lg",
+        "--transition-fast",
+        "--transition-normal",
+        "--transition-slow",
+        "--z-base",
+        "--z-raised",
+        "--z-sticky",
+        "--z-modal",
+        "--z-toast",
+    ]
+    for token in expected:
+        assert token in css
+
+
+def test_design_tokens_define_expected_components() -> None:
+    css = CSS.read_text()
+    selectors = [
+        ":root",
+        '[data-theme="light"]',
+        ".card",
+        ".card-hover",
+        ".btn",
+        ".btn-primary",
+        ".btn-secondary",
+        ".btn-ghost",
+        ".btn-danger",
+        ".btn-sm",
+        ".btn-icon",
+        ".badge",
+        ".badge-success",
+        ".badge-warning",
+        ".badge-danger",
+        ".badge-info",
+        ".badge-muted",
+        ".input",
+        ".select",
+        ".textarea",
+        ".label",
+        ".skeleton",
+        ".toast",
+        ".toast-stack",
+        ".modal",
+        ".nav-rail",
+        ".empty-state",
+        ".section-header",
+    ]
+    for selector in selectors:
+        assert selector in css

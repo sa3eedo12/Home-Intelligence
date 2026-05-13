@@ -1,86 +1,74 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Data Science · Home Intelligence</title>
+  <link rel="stylesheet" href="/static/_design.css">
   <link rel="stylesheet" href="/static/data_science.css">
+  <script src="/static/_app.js" defer></script>
   <script src="/static/data_science.js" defer></script>
 </head>
-<body>
+<body class="page-body data-science-body">
   <header class="ds-topbar">
     <a href="/dashboard" class="back-link">← Dashboard</a>
     <h1>📊 Data science</h1>
-    <span id="ds-status" class="status-pill">idle</span>
+    <span id="ds-status" class="status-pill badge badge-muted">idle</span>
+    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
   </header>
 
   <main class="ds-shell">
-    <section class="hero-card">
+    <section class="hero-card card">
       <p class="eyebrow">Embedding freshness</p>
       <h2>{{ data_science.embedding.current_model }}</h2>
       <p>{{ data_science.embedding.stale_event_count }} event_log rows need the current embedding model.</p>
       <div class="actions">
-        <button type="button" data-job="maintenance">Run maintenance now</button>
-        <button type="button" data-job="weekly_report">Generate weekly report now</button>
-        <button type="button" data-job="reembed">Re-embed now</button>
+        <button class="btn btn-secondary" type="button" data-job="maintenance">Run maintenance now</button>
+        <button class="btn btn-secondary" type="button" data-job="weekly_report">Generate weekly report now</button>
+        <button class="btn btn-primary" type="button" data-job="reembed">Re-embed now</button>
       </div>
     </section>
 
     <section class="card">
-      <h2>Recent reports</h2>
+      <div class="section-header"><div><h2>Recent reports</h2><p>Generated weekly/monthly analysis artifacts.</p></div></div>
       <ul class="report-list">
         {% for report in data_science.reports %}
-          <li>
-            <a href="/admin/reports/{{ report.kind }}/{{ report.period_label }}" target="_blank" rel="noreferrer">
-              {{ report.kind }} · {{ report.period_label }}
-            </a>
-            <span>{{ report.summary or 'no summary' }}</span>
-            <small>{{ report.generated_at }}</small>
-          </li>
+          <li><a href="/admin/reports/{{ report.kind }}/{{ report.period_label }}" target="_blank" rel="noreferrer">{{ report.kind }} · {{ report.period_label }}</a><span>{{ report.summary or 'no summary' }}</span><small>{{ report.generated_at }}</small></li>
         {% else %}
-          <li class="empty">No reports generated yet.</li>
+          <li class="empty-state compact"><div class="empty-state-icon">📄</div><h3>No reports yet</h3><p>No reports generated yet.</p></li>
         {% endfor %}
       </ul>
     </section>
 
     <div class="two-col">
       <section class="card">
-        <h2>Maintenance runs</h2>
+        <div class="section-header"><div><h2>Maintenance runs</h2><p>Archival and cleanup history.</p></div></div>
         <ul class="run-list">
           {% for run in data_science.maintenance_runs %}
-            <li class="status-{{ run.status }}">
-              <strong>{{ run.status }}</strong>
-              <span>{{ run.summary }}</span>
-              <small>{{ run.ts }} · archived {{ run.archived_rows }} rows · errors {{ run.errors|length }}</small>
-            </li>
+            <li class="status-{{ run.status }}"><strong>{{ run.status }}</strong><span>{{ run.summary }}</span><small>{{ run.ts }} · archived {{ run.archived_rows }} rows · errors {{ run.errors|length }}</small></li>
           {% else %}
-            <li class="empty">No maintenance history yet.</li>
+            <li class="empty-state compact"><div class="empty-state-icon">🧹</div><h3>No maintenance history</h3><p>No maintenance history yet.</p></li>
           {% endfor %}
         </ul>
       </section>
 
       <section class="card">
-        <h2>LoRA shadow training</h2>
+        <div class="section-header"><div><h2>LoRA shadow training</h2><p>Optional local fine-tuning experiments.</p></div></div>
         {% if data_science.last_lora_run %}
           {% set run = data_science.last_lora_run %}
-          <dl class="kv">
-            <dt>Status</dt><dd>{{ run.status }}</dd>
-            <dt>Started</dt><dd>{{ run.started_at }}</dd>
-            <dt>Finished</dt><dd>{{ run.finished_at or 'running' }}</dd>
-            <dt>Base model</dt><dd>{{ run.model_base or 'default' }}</dd>
-            <dt>Training file</dt><dd>{{ run.training_file or '—' }}</dd>
-            {% if run.error %}<dt>Error</dt><dd>{{ run.error }}</dd>{% endif %}
-          </dl>
+          <dl class="kv"><dt>Status</dt><dd>{{ run.status }}</dd><dt>Started</dt><dd>{{ run.started_at }}</dd><dt>Finished</dt><dd>{{ run.finished_at or 'running' }}</dd><dt>Base model</dt><dd>{{ run.model_base or 'default' }}</dd><dt>Training file</dt><dd>{{ run.training_file or '—' }}</dd>{% if run.error %}<dt>Error</dt><dd>{{ run.error }}</dd>{% endif %}</dl>
         {% else %}
-          <p class="empty">LoRA training has not run yet. It is disabled by default.</p>
+          <div class="empty-state compact"><div class="empty-state-icon">🧪</div><h3>LoRA has not run</h3><p>LoRA training has not run yet. It is disabled by default.</p></div>
         {% endif %}
       </section>
     </div>
 
     <section class="card">
-      <h2>Job status</h2>
-      <div id="job-status" class="job-status-grid" aria-live="polite"></div>
+      <div class="section-header"><div><h2>Job status</h2><p>Live status from data science jobs.</p></div></div>
+      <div id="job-status" class="job-status-grid" aria-live="polite"><article class="job-card skeleton-card" aria-hidden="true"><span class="skeleton skeleton-line"></span><span class="skeleton skeleton-line"></span></article></div>
     </section>
   </main>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
 </body>
 </html>

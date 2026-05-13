@@ -76,8 +76,13 @@ def test_about_you_renders_learned_knowledge() -> None:
     assert "user.coffee_brew" in resp.text
     assert "lights.after_sunset" in resp.text
     assert "Laundry day" in resp.text
+    assert "/static/_design.css" in resp.text
+    assert "/static/_app.js" in resp.text
     assert "/static/about_you.css" in resp.text
     assert "/static/about_you.js" in resp.text
+    assert 'id="edit-modal"' in resp.text
+    assert 'id="evidence-modal"' in resp.text
+    assert "toast-stack" in resp.text
     assert 'data-table="things"' in resp.text
     assert "Confirm" in resp.text
     assert "Why?" in resp.text
