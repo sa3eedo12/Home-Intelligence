@@ -90,7 +90,27 @@ class ReflectionStore:
             logger.warning("reflection_store_unavailable", operation=operation, error=str(exc))
             yield None
 
-    async def list_recent_events(self, window_hours: int = 24) -> list[dict[str, Any]]:
+    async def list_recent_events(
+        self,
+        window_hours: int = 24,
+        *,
+        exclude_agents: tuple[str, ...] = (
+            # Internal noise: dashboard_curator runs every 60s, observer.* events
+            # are summarized elsewhere, data_science / __orchestrator__ housekeeping
+            # don't add information for the reflector. Filtering at the SQL level
+            # keeps the reflector's evidence set small and signal-rich.
+            "dashboard_curator",
+            "data_science",
+            "__orchestrator__",
+        ),
+        exclude_capabilities: tuple[str, ...] = (
+            "summarize_activity",
+            "summarize_alerts",
+            "agent_card",
+            "reflector.run",
+            "advisor.run",
+        ),
+    ) -> list[dict[str, Any]]:
         try:
             hours = max(1, min(int(window_hours), 24 * 14))
         except (TypeError, ValueError):
@@ -104,10 +124,18 @@ class ReflectionStore:
                     SELECT e.id, e.ts, e.agent, e.capability, e.summary, e.payload
                     FROM event_log e
                     WHERE e.ts >= now() - ($1::int * interval '1 hour')
+                      AND NOT (
+                        e.agent = ANY($2::text[])
+                        OR e.agent LIKE 'observer.%'
+                        OR e.agent LIKE '__orchestrator__%'
+                      )
+                      AND NOT (e.capability = ANY($3::text[]))
                     ORDER BY e.ts DESC
                     LIMIT 500
                     """,
                     hours,
+                    list(exclude_agents),
+                    list(exclude_capabilities),
                 )
             except Exception as exc:
                 logger.warning(

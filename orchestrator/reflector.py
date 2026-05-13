@@ -275,8 +275,17 @@ class NightlyReflector:
         try:
             return await fn(*args)
         except Exception as exc:
-            logger.warning("reflection_phase_failed", phase=name, error=str(exc))
-            errors.append({"phase": name, "error": str(exc)})
+            # Always log type+repr so empty-str exceptions (httpx.ReadTimeout etc.)
+            # don't silently disappear from the log.
+            error_repr = f"{type(exc).__name__}: {exc!s}".strip().rstrip(":")
+            logger.warning(
+                "reflection_phase_failed",
+                phase=name,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                error_repr=error_repr,
+            )
+            errors.append({"phase": name, "error": error_repr})
             return fallback
 
     async def _gather_evidence(self) -> dict[str, Any]:

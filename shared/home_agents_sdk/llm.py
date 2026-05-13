@@ -1,8 +1,22 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
+
+
+def _ollama_timeout() -> float:
+    """Default timeout for Ollama requests. JSON-structured chats with the
+    nightly reflector model can routinely take 60-90s on modest hardware,
+    so the historical 60s default caused silent ReadTimeout failures
+    swallowed as empty errors. 180s is a generous ceiling that lets the
+    reflector finish without indefinitely hanging the orchestrator."""
+    raw = os.environ.get("OLLAMA_TIMEOUT_SECONDS", "180")
+    try:
+        return max(10.0, float(raw))
+    except (TypeError, ValueError):
+        return 180.0
 
 
 class OllamaClient:
@@ -24,7 +38,7 @@ class OllamaClient:
         }
         if response_format is not None:
             payload["format"] = response_format
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=_ollama_timeout()) as client:
             resp = await client.post(f"{self.base_url}/api/chat", json=payload)
             resp.raise_for_status()
             return resp.json()
@@ -44,13 +58,13 @@ class OllamaClient:
         }
         if response_format is not None:
             payload["format"] = response_format
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=_ollama_timeout()) as client:
             resp = await client.post(f"{self.base_url}/api/generate", json=payload)
             resp.raise_for_status()
             return resp.json()
 
     async def embed(self, text: str, model: str = "bge-m3") -> list[float]:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=_ollama_timeout()) as client:
             resp = await client.post(
                 f"{self.base_url}/api/embeddings",
                 json={"model": model, "prompt": text},
