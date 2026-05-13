@@ -2,21 +2,25 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from . import Observer
 from .utils import (
+    device_key_for,
     extract_state_change,
     is_finishing_state,
     is_idle_state,
     is_running_state,
     matches_appliance,
     normalized_state,
+    parse_datetime,
     remember_bounded,
     seconds_between,
 )
 
 MAX_TRACKED_ENTITIES = 256
+DEVICE_DEDUP_WINDOW = timedelta(minutes=10)
 VACUUM_IDLE_STATES = {"docked", "idle", "off", "standby"}
 VACUUM_RUNNING_STATES = {"cleaning", "on", "running"}
 VACUUM_FINISHING_STATES = {"returning", "returning_home", "finished", "finishing"}
@@ -35,6 +39,7 @@ class VacuumObserver(Observer):
     def __init__(self) -> None:
         super().__init__()
         self._states: OrderedDict[str, _CycleState] = OrderedDict()
+        self._recent_completions: OrderedDict[str, datetime] = OrderedDict()
 
     async def handle(self, payload: dict[str, Any]) -> None:
         change = extract_state_change(payload)
@@ -55,9 +60,26 @@ class VacuumObserver(Observer):
             "running",
             "finishing",
         }:
-            await self._emit_completed(change, entry)
+            if not self._recently_completed(change.entity_id, change.ts):
+                await self._emit_completed(change, entry)
+                self._mark_completed(change.entity_id, change.ts)
             entry.phase = "idle"
             entry.started_at = None
+
+    def _recently_completed(self, entity_id: str, ts: str | None) -> bool:
+        device = device_key_for(entity_id)
+        last = self._recent_completions.get(device)
+        if last is None:
+            return False
+        now = parse_datetime(ts) or datetime.now(UTC)
+        return (now - last) < DEVICE_DEDUP_WINDOW
+
+    def _mark_completed(self, entity_id: str, ts: str | None) -> None:
+        device = device_key_for(entity_id)
+        self._recent_completions[device] = parse_datetime(ts) or datetime.now(UTC)
+        self._recent_completions.move_to_end(device)
+        while len(self._recent_completions) > 64:
+            self._recent_completions.popitem(last=False)
 
     async def _emit_completed(self, change, entry: _CycleState) -> None:
         event_payload: dict[str, Any] = {

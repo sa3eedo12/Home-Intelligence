@@ -2,22 +2,26 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from . import Observer
 from .utils import (
     detect_brand,
+    device_key_for,
     extract_state_change,
     first_attr,
     is_finishing_state,
     is_idle_state,
     is_running_state,
     matches_appliance,
+    parse_datetime,
     remember_bounded,
     seconds_between,
 )
 
 MAX_TRACKED_ENTITIES = 256
+DEVICE_DEDUP_WINDOW = timedelta(minutes=10)
 
 
 @dataclass
@@ -34,6 +38,7 @@ class WasherObserver(Observer):
     def __init__(self) -> None:
         super().__init__()
         self._states: OrderedDict[str, _CycleState] = OrderedDict()
+        self._recent_completions: OrderedDict[str, datetime] = OrderedDict()
 
     async def handle(self, payload: dict[str, Any]) -> None:
         change = extract_state_change(payload)
@@ -50,10 +55,32 @@ class WasherObserver(Observer):
             entry.phase = "finishing"
             return
         if is_idle_state(change.new_state) and entry.phase in {"running", "finishing"}:
+            if self._recently_completed(change.entity_id, change.ts):
+                entry.phase = "idle"
+                entry.started_at = None
+                entry.attrs_at_start = {}
+                return
             await self._emit_completed(change, entry)
+            self._mark_completed(change.entity_id, change.ts)
             entry.phase = "idle"
             entry.started_at = None
             entry.attrs_at_start = {}
+
+    def _recently_completed(self, entity_id: str, ts: str | None) -> bool:
+        device = device_key_for(entity_id)
+        last = self._recent_completions.get(device)
+        if last is None:
+            return False
+        now = parse_datetime(ts) or datetime.now(UTC)
+        return (now - last) < DEVICE_DEDUP_WINDOW
+
+    def _mark_completed(self, entity_id: str, ts: str | None) -> None:
+        device = device_key_for(entity_id)
+        self._recent_completions[device] = parse_datetime(ts) or datetime.now(UTC)
+        self._recent_completions.move_to_end(device)
+        # bound memory: keep at most 64 device cooldowns
+        while len(self._recent_completions) > 64:
+            self._recent_completions.popitem(last=False)
 
     async def _emit_completed(self, change, entry: _CycleState) -> None:
         details = await self._recent_details(change.entity_id)

@@ -108,6 +108,45 @@ async def _reflection_status(app: FastAPI) -> dict[str, Any]:
     }
 
 
+async def _people_home(app: FastAPI) -> list[str]:
+    """Compute the list of household members currently at home.
+
+    Reads the most recent ``presence.changed`` event per entity from the
+    event_log and returns the friendly names whose latest state is ``home``.
+    Returns an empty list when no presence events have ever been observed
+    (the dashboard then falls back to the "Presence learning" placeholder).
+    """
+    pool = getattr(app.state, "pool", None)
+    if pool is None:
+        return []
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT ON (payload->>'entity_id')
+                    payload->>'entity_id' AS entity_id,
+                    payload->>'state'     AS state,
+                    payload->>'person'    AS person,
+                    ts
+                FROM event_log
+                WHERE capability = 'presence.changed'
+                  AND payload ? 'state'
+                  AND ts > now() - interval '7 days'
+                ORDER BY payload->>'entity_id', ts DESC
+                """
+            )
+    except Exception as exc:
+        logger.warning("people_home_query_failed", error=str(exc))
+        return []
+    home: list[str] = []
+    for row in rows:
+        if str(row.get("state") or "").lower() == "home":
+            name = str(row.get("person") or row.get("entity_id") or "").strip()
+            if name and name not in home:
+                home.append(name)
+    return home
+
+
 async def _build_status(app: FastAPI) -> dict[str, Any]:
     results = await asyncio.gather(
         probe_ollama(app.state.ollama_url),
@@ -136,6 +175,7 @@ async def _build_status(app: FastAPI) -> dict[str, Any]:
     quiet_override = await app.state.redis.get("policy:override:quiet")
     activity_snapshot = app.state.activity_aggregator.snapshot()
     recent_activity = app.state.activity_aggregator.recent_events(limit=30)
+    people_home = await _people_home(app)
 
     narrative_raw = await app.state.redis.get("dashboard:narrative")
     alert_narrative_raw = await app.state.redis.get("dashboard:alert_narrative")
@@ -178,6 +218,7 @@ async def _build_status(app: FastAPI) -> dict[str, Any]:
         "narrative": narrative,
         "alert_narrative": alert_narrative,
         "reflection": reflection,
+        "people_home": people_home,
     }
 
 

@@ -117,6 +117,27 @@ def domain_of(entity_id: str) -> str:
     return entity_id.split(".", 1)[0] if "." in entity_id else ""
 
 
+def device_key_for(entity_id: str) -> str:
+    """Best-effort grouping of multi-entity HA devices into one logical device.
+
+    HA exposes a single appliance as N entities (e.g. a Samsung washer
+    surfaces as ``sensor.washer_power``, ``sensor.washer_remote_control``,
+    ``sensor.washer_bubble_soak``). When the cycle ends, ALL of them flip
+    to idle, which would cause N "cycle done" notifications. We dedupe by
+    ``device_key`` so only the first transition wins for a short cooldown.
+
+    Heuristic: take the entity_id's local-part and keep only the first
+    underscore-delimited slug. ``sensor.washer_power`` → ``"washer"``;
+    ``vacuum.living_room_roomba`` → ``"living"``. Imperfect but stable
+    enough for the common HA naming convention. Users with multiple
+    appliances of the same type that share a first slug can override
+    via the registry once we surface device_id from HA's device
+    registry.
+    """
+    local = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+    return local.split("_", 1)[0] if "_" in local else local
+
+
 def normalized_state(state: str | None) -> str:
     return str(state or "").strip().casefold().replace(" ", "_").replace("-", "_")
 
