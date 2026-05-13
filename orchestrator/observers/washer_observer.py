@@ -42,7 +42,9 @@ class WasherObserver(Observer):
 
     async def handle(self, payload: dict[str, Any]) -> None:
         change = extract_state_change(payload)
-        if change is None or not matches_appliance(change, "washer"):
+        # canonical_only=True: a Samsung/LG washer exposes ~30 entities, only
+        # sensor.<x>_machine_state authoritatively tracks "running vs stop".
+        if change is None or not matches_appliance(change, "washer", canonical_only=True):
             return
         entry = remember_bounded(self._states, change.entity_id, _CycleState, MAX_TRACKED_ENTITIES)
         if is_running_state(change.new_state):

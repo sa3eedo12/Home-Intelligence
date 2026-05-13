@@ -35,6 +35,7 @@ from .event_recorder import EventRecorder
 from .github_client import GitHubClient
 from .ha_event_bridge import build_from_env as build_ha_bridge
 from .health import probe_lemonade, probe_ollama, probe_postgres, probe_qdrant, probe_redis
+from .migrations import run_pending_migrations
 from .notify import run_consumer, send_morning_brief
 from .observers import ObserverRunner
 from .observers.coffee_observer import build as build_coffee
@@ -247,6 +248,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     }
 
     pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
+    # Run any pending migrations BEFORE anything else queries the DB. Each
+    # init/*.sql file is idempotent (CREATE TABLE IF NOT EXISTS etc.) and we
+    # also track applied_migrations so re-runs are cheap.
+    migration_results = await run_pending_migrations(pool)
+    app.state.migration_results = migration_results
     bus = EventBus(redis_url)
     try:
         await bus.connect()

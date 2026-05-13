@@ -27,9 +27,47 @@ BRAND_KEYWORDS: dict[str, tuple[str, ...]] = {
     "Samsung SmartThings": ("samsung", "smartthings", "smart things"),
     "LG ThinQ": ("lg", "thinq", "thin q"),
 }
-RUNNING_STATES = {"on", "run", "running", "active", "in_progress", "washing", "cleaning", "brewing"}
-FINISHING_STATES = {"done", "complete", "completed", "finish", "finished", "finishing"}
-IDLE_STATES = {"off", "idle", "standby", "docked", "paused"}
+RUNNING_STATES = {
+    "on",
+    "run",
+    "running",
+    "active",
+    "in_progress",
+    "washing",
+    "cleaning",
+    "brewing",
+    "wash",
+    "rinse",
+    "spin",
+    "drying",
+    "dry",
+}
+FINISHING_STATES = {
+    "done",
+    "complete",
+    "completed",
+    "finish",
+    "finished",
+    "finishing",
+    "drain",
+    "drained",
+}
+# Note: include "stop" because Samsung SmartThings reports the washer's
+# machine_state as "stop" between cycles (not "idle" or "off").
+IDLE_STATES = {"off", "idle", "standby", "docked", "paused", "stop", "stopped", "none", "ready"}
+# Entity-id suffixes that indicate the canonical operation/job state for an
+# appliance. The matchers use this to ignore noisy sub-entities like
+# `_remote_control`, `_bubble_soak`, `_power`, `_energy` that flip with the
+# cycle but aren't authoritative for "is the appliance running?".
+CANONICAL_STATE_SUFFIXES: tuple[str, ...] = (
+    "_machine_state",
+    "_job_state",
+    "_operation_state",
+    "_run_state",
+    "_state",
+    "_cycle",
+    "_program",
+)
 PROGRAM_KEYS = (
     "active_program",
     "selected_program",
@@ -97,10 +135,56 @@ def extract_state_change(payload: dict[str, Any]) -> StateChange | None:
     )
 
 
-def matches_appliance(change: StateChange, appliance: str) -> bool:
+def is_canonical_state_entity(entity_id: str) -> bool:
+    """True if the entity_id looks like an appliance's canonical operation state.
+
+    Samsung exposes a washer as ~30 entities (sensor.washer_power,
+    binary_sensor.washer_remote_control, switch.washer_bubble_soak,
+    select.washer_water_temperature, sensor.washer_machine_state, etc.). Only
+    one of these — sensor.<x>_machine_state — actually tracks "is the cycle
+    running?". Letting the observer react to all 30 created spurious cycle
+    events whenever the user touched a remote control button or the energy
+    sensor flipped to 0. Tightening to canonical state suffixes also kills
+    most of the multi-entity dedup edge cases.
+
+    Examples:
+      sensor.washer_machine_state → True
+      sensor.dryer_job_state      → True
+      vacuum.saeeds_deebot        → True (vacuum.* is itself canonical)
+      sensor.washer_power         → False
+      switch.washer_bubble_soak   → False
+      binary_sensor.washer_remote_control → False
+    """
+    domain = domain_of(entity_id)
+    # The vacuum.* domain itself is canonical (HA's spec for vacuum integrations).
+    if domain == "vacuum":
+        return True
+    if domain != "sensor":
+        return False
+    local = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+    return any(local.endswith(suffix) for suffix in CANONICAL_STATE_SUFFIXES)
+
+
+def matches_appliance(
+    change: StateChange, appliance: str, *, canonical_only: bool = False
+) -> bool:
+    """Return True if ``change`` looks like a transition for the named appliance.
+
+    ``canonical_only=True`` restricts matches to the entity that actually
+    represents the appliance's operation/cycle state, suppressing the dozens
+    of HA sub-entities that share the appliance's name. Use this for big
+    appliances that expose 20+ entities (washer, dryer, dishwasher) where the
+    only authoritative cycle signal is ``sensor.<x>_machine_state`` / similar.
+
+    Default (``False``) keeps the legacy substring match — safe for appliances
+    where the natural HA entity is already authoritative (vacuum.* domain,
+    smart plug switches for coffee makers, etc.).
+    """
     needles = APPLIANCE_SYNONYMS.get(appliance, [appliance])
     if appliance == "vacuum" and domain_of(change.entity_id) == "vacuum":
         return True
+    if canonical_only and not is_canonical_state_entity(change.entity_id):
+        return False
     haystack = " ".join(
         [
             change.entity_id,

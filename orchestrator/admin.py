@@ -1345,6 +1345,25 @@ async def ha_bridge_replay(request: Request) -> dict[str, Any]:
     return await bridge.replay_history_now(hours=hours)
 
 
+@router.get("/admin/migrations/status")
+async def migrations_status(request: Request) -> dict[str, Any]:
+    """Report which init/*.sql migrations have been applied (and any errors).
+
+    Useful for verifying after a deploy that the new tables exist; replaces
+    the manual `psql` check that the user had to run when cycle_loads silently
+    didn't exist.
+    """
+    results = getattr(request.app.state, "migration_results", None)
+    if results is None:
+        return {"ok": False, "error": "migrations have not run yet"}
+    summary = {
+        "applied": sum(1 for r in results if r["status"] == "applied"),
+        "skipped": sum(1 for r in results if r["status"] == "skipped"),
+        "error": sum(1 for r in results if r["status"] == "error"),
+    }
+    return {"ok": summary["error"] == 0, "summary": summary, "results": results}
+
+
 @router.get("/admin/observations/recent")
 async def observations_recent(request: Request) -> dict[str, Any]:
     limit = _query_int(request, "limit", default=10, low=1, high=50) or 10
