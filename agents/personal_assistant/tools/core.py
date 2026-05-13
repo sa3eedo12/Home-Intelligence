@@ -116,6 +116,26 @@ async def list_reminders(status: str = "pending", limit: int = 20) -> dict[str, 
     return {"items": [dict(r) for r in rows]}
 
 
+async def due_reminders(limit: int = 5, user_id: str = "") -> list[dict[str, Any]]:
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, text, due_at, status
+            FROM reminders
+            WHERE status = 'pending'
+              AND due_at <= $1
+              AND ($2 = '' OR user_id = $2)
+            ORDER BY due_at ASC, id ASC
+            LIMIT $3
+            """,
+            datetime.now(UTC),
+            user_id,
+            limit,
+        )
+    return [dict(r) for r in rows]
+
+
 @tool("cancel_reminder", side_effects=True)
 async def cancel_reminder(reminder_id: int) -> dict[str, Any]:
     pool = await _pool()

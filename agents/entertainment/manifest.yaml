@@ -32,6 +32,5 @@ capabilities:
     llm: qwen3:8b
 subscribes:
   - events.home
-publishes:
-  - notify.outbound
-  - events.system
+# No publishes: media recommendations and watch history are pull-based today.
+publishes: []

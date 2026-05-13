@@ -8,6 +8,8 @@ import asyncpg
 import dateparser
 from home_agents_sdk import tool
 
+from . import notify_helper
+
 _POOL: asyncpg.Pool | None = None
 
 _WEEKDAY = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
@@ -57,6 +59,39 @@ def _next_due(current_due: datetime | None, recurrence: str, completed_at: datet
     return base + timedelta(days=1)
 
 
+def _as_aware_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return None
+
+
+def _is_due(value: Any, now: datetime | None = None) -> bool:
+    due_at = _as_aware_datetime(value)
+    if due_at is None:
+        return False
+    return due_at <= (now or datetime.now(UTC))
+
+
+async def _publish_due_chore(chore: dict[str, Any], *, capability: str, reason: str) -> None:
+    if _is_due(chore.get("due_at")):
+        await notify_helper.publish_chore_due(chore, capability=capability, reason=reason)
+
+
+async def _publish_due_chores(
+    chores: list[dict[str, Any]], *, capability: str, reason: str
+) -> None:
+    for chore in chores:
+        await _publish_due_chore(chore, capability=capability, reason=reason)
+
+
 @tool("chores_add", side_effects=True)
 async def chores_add(
     title: str,
@@ -76,7 +111,9 @@ async def chores_add(
             due,
             recurrence,
         )
-    return dict(row)
+    result = dict(row)
+    await _publish_due_chore(result, capability="chores_add", reason="created_due")
+    return result
 
 
 @tool("chores_list")
@@ -98,7 +135,9 @@ async def chores_list(on_date: str | None = None) -> dict[str, Any]:
                 ),
                 day,
             )
-    return {"items": [dict(r) for r in rows]}
+    items = [dict(r) for r in rows]
+    await _publish_due_chores(items, capability="chores_list", reason="listed_due")
+    return {"items": items}
 
 
 @tool("chores_complete", side_effects=True)
@@ -114,17 +153,23 @@ async def chores_complete(chore_id: int) -> dict[str, Any]:
             return {"ok": False, "error": "chore not found"}
         await conn.execute("UPDATE chores SET status='done' WHERE id=$1", chore_id)
         next_due = None
+        new_row = None
         if row["recurrence"]:
             next_due = _next_due(row["due_at"], row["recurrence"], now)
-            await conn.execute(
+            new_row = await conn.fetchrow(
                 (
                     "INSERT INTO chores(title, due_at, recurrence, status) "
-                    "VALUES ($1, $2, $3, 'pending')"
+                    "VALUES ($1, $2, $3, 'pending') "
+                    "RETURNING id, title, due_at, recurrence, status"
                 ),
                 row["title"],
                 next_due,
                 row["recurrence"],
             )
+    if new_row is not None:
+        await _publish_due_chore(
+            dict(new_row), capability="chores_complete", reason="recurrence_due"
+        )
     return {"ok": True, "next_due": next_due.isoformat() if next_due else None}
 
 

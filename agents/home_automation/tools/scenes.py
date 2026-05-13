@@ -3,6 +3,7 @@ from __future__ import annotations
 from home_agents_sdk.tools import tool
 
 from .ha_client import get_ha_client
+from .notify_helper import publish_notification
 
 
 @tool("list_scenes")
@@ -36,6 +37,14 @@ async def set_scene(scene_name: str) -> dict:
     name = match.get("attributes", {}).get("friendly_name") or entity_id
     result = await client.call_service("scene", "turn_on", {"entity_id": entity_id})
     affected = [{"entity_id": entity_id, "name": name}]
+    await publish_notification(
+        f"Scene activated: {name}",
+        severity="info",
+        topic="home.scene",
+        capability="set_scene",
+        scene=entity_id,
+        affected_entities=affected,
+    )
     return {
         "ok": True,
         "scene": entity_id,

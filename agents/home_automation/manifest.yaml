@@ -87,6 +87,5 @@ capabilities:
 subscribes:
   - events.home
 publishes:
-  - events.home
+  # events.home is produced by ha_event_bridge; memory updates are owned by knowledge_notes.
   - notify.outbound
-  - memory.updates

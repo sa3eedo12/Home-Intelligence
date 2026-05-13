@@ -34,4 +34,4 @@ subscribes:
   - events.system
 publishes:
   - events.system
-  - notify.outbound
+  # Notifications are produced by reactive triggers from events.system breaches.

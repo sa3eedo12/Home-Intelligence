@@ -1,28 +1,16 @@
 from __future__ import annotations
 
 import base64
-import logging
 import os
 
 from home_agents_sdk import vision
-from home_agents_sdk.bus import EventBus
 from home_agents_sdk.llm import OllamaClient
 from home_agents_sdk.tools import tool
 
 from .ha_client import get_ha_client
+from .notify_helper import publish_notification
 
-_log = logging.getLogger(__name__)
-
-_bus: EventBus | None = None
 _llm: OllamaClient | None = None
-
-
-async def _get_bus() -> EventBus:
-    global _bus
-    if _bus is None:
-        _bus = EventBus(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
-        await _bus.connect()
-    return _bus
 
 
 def _get_llm() -> OllamaClient:
@@ -78,22 +66,14 @@ async def summarize_event(event_type: str, entity_id: str | None = None) -> dict
 
     severity = "high" if "person" in detection_labels else "info"
 
-    try:
-        chat_id_raw = os.getenv("TELEGRAM_CHAT_ID", "")
-        if not chat_id_raw:
-            _log.warning("TELEGRAM_CHAT_ID not set; skipping doorbell notification")
-        else:
-            bus = await _get_bus()
-            await bus.publish(
-                "notify.outbound",
-                {
-                    "chat_id": int(chat_id_raw),
-                    "text": f"🔔 {summary}",
-                    "severity": severity,
-                },
-            )
-    except Exception:
-        pass
+    await publish_notification(
+        f"🔔 {summary}",
+        severity=severity,
+        topic="doorbell.event",
+        capability="doorbell.summarize_event",
+        event_type=event_type,
+        entity_id=entity_id,
+    )
 
     return {"detections": detections, "summary": summary, "entity_id": entity_id}
 

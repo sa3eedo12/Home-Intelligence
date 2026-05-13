@@ -13,6 +13,8 @@ import psutil
 from home_agents_sdk import tool
 from redis.asyncio import Redis
 
+from . import publish_helper
+
 
 def _hwmon_temps() -> list[dict[str, Any]]:
     root = "/host/sys/class/hwmon"
@@ -36,6 +38,11 @@ def _container_client() -> docker.DockerClient | None:
         return docker.from_env()
     except Exception:
         return None
+
+
+def _redis_client() -> Redis:
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    return Redis.from_url(redis_url, decode_responses=True)
 
 
 @tool("top_processes")
@@ -207,34 +214,55 @@ def scan() -> dict[str, Any]:
     return {"metrics": payload, "summary": summary}
 
 
-def _zscore_anomaly(series: Sequence[float], value: float, threshold: float) -> bool:
+def _zscore(series: Sequence[float], value: float) -> float | None:
     # We require at least 4 historical samples to avoid unstable z-scores on tiny windows.
     if len(series) < 4:
-        return False
+        return None
     sigma = pstdev(series)
     if sigma == 0:
-        return False
+        return None
     score = abs((value - mean(series)) / sigma)
-    return bool(score > threshold and not math.isnan(score))
+    if math.isnan(score):
+        return None
+    return score
+
+
+def _zscore_anomaly(series: Sequence[float], value: float, threshold: float) -> bool:
+    score = _zscore(series, value)
+    return bool(score is not None and score > threshold)
 
 
 @tool("anomaly_check")
 async def anomaly_check(metric: str = "cpu_pct", threshold: float = 2.5) -> dict[str, Any]:
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    client = Redis.from_url(redis_url, decode_responses=True)
-    scan_result = scan()
-    current = float(scan_result["metrics"].get(metric, 0.0))
-    key = f"metrics:{metric}"
-    await client.rpush(key, current)
-    await client.ltrim(key, -96, -1)
-    values = [float(v) for v in await client.lrange(key, 0, -1)]
-    is_anomaly = _zscore_anomaly(values[:-1], current, threshold)
-    return {
-        "metric": metric,
-        "current": current,
-        "samples": len(values),
-        "is_anomaly": is_anomaly,
-    }
+    client = _redis_client()
+    try:
+        scan_result = scan()
+        current = float(scan_result["metrics"].get(metric, 0.0))
+        key = f"metrics:{metric}"
+        await client.rpush(key, current)
+        await client.ltrim(key, -96, -1)
+        values = [float(v) for v in await client.lrange(key, 0, -1)]
+        score = _zscore(values[:-1], current)
+        is_anomaly = bool(score is not None and score > threshold)
+        if is_anomaly:
+            await publish_helper.publish_metric_breach(
+                metric=metric,
+                value=round(score or 0.0, 2),
+                threshold=threshold,
+                severity="warn",
+                summary=f"{metric} anomaly score {score:.2f}; current value {current:.1f}.",
+                current=current,
+                samples=len(values),
+            )
+        return {
+            "metric": metric,
+            "current": current,
+            "samples": len(values),
+            "is_anomaly": is_anomaly,
+            "zscore": round(score, 2) if score is not None else None,
+        }
+    finally:
+        await client.aclose()
 
 
 @tool("suggest_optimizations")
