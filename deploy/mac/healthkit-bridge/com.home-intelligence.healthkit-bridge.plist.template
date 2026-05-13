@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.home-intelligence.healthkit-bridge</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>__BRIDGE_PATH__</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ORCHESTRATOR_URL</key>
+        <string>__ORCHESTRATOR_URL__</string>
+        <key>HEALTHKIT_TOKEN</key>
+        <string>__HEALTHKIT_TOKEN__</string>
+        <key>WATCH_DIR</key>
+        <string>__WATCH_DIR__</string>
+        <key>MEMBER_ID</key>
+        <string>__MEMBER_ID__</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/healthkit-bridge.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/healthkit-bridge.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

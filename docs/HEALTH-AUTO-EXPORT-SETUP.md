@@ -2,6 +2,13 @@
 
 Home Intelligence can ingest Apple HealthKit data from the iOS app **Health Auto Export** without sending health data outside your LAN.
 
+You have two options:
+
+1. **Direct push from iPhone → TrueNAS** — simplest, but requires the iPhone to be on home WiFi when the export runs.
+2. **iPhone → iCloud Drive → Mac bridge → TrueNAS** — exports go via iCloud and a tiny relay on your always-on Mac forwards to TrueNAS over the LAN. Use this when you don't want to expose TrueNAS to the public internet but you still want health data to flow when the phone is away from home. See [`deploy/mac/healthkit-bridge/README.md`](../deploy/mac/healthkit-bridge/README.md).
+
+Both paths hit the same `/admin/healthkit/sync` endpoint and use the same `HEALTHKIT_WEBHOOK_TOKEN`.
+
 ## 1. Install the app
 
 Install **Health Auto Export** from the iOS App Store and allow it to read the Health metrics you want Home Intelligence to use: sleep, wake time, workouts, weight, heart rate, mood, steps, and energy.
