@@ -84,3 +84,67 @@ async def test_system_severity_min_matching(tmp_path: Path) -> None:
 
     assert reactive._matches(trigger["match"], {"severity": "warn"}) is True
     assert reactive._matches(trigger["match"], {"severity": "info"}) is False
+
+
+@pytest.mark.asyncio
+async def test_observer_events_become_user_notifications(tmp_path: Path) -> None:
+    """The shipped reactive_triggers.yaml turns each observer event into a notification."""
+    repo_root = Path(__file__).resolve().parents[1]
+    triggers_path = repo_root / "reactive_triggers.yaml"
+
+    redis = FakeRedis(decode_responses=True)
+    registry = MagicMock()
+    registry.dispatch = AsyncMock()
+    reactive = Reactive(registry=registry, redis=redis, triggers_path=str(triggers_path))
+
+    import yaml as _yaml
+
+    triggers = _yaml.safe_load(triggers_path.read_text(encoding="utf-8"))["triggers"]
+    by_id = {t["id"]: t for t in triggers}
+
+    cases = [
+        ("appliance_cycle_completed", "appliance.cycle_completed", "Washer cycle completed for Bosch"),
+        ("cleaning_completed", "cleaning.completed", "Vacuum cleaning completed for Roomba"),
+        ("coffee_brewed", "coffee.brewed", "Coffee brewed by Espresso"),
+        ("sleep_likely_asleep", "sleep.likely_asleep", "Bedroom signals suggest everyone is likely asleep"),
+        ("sleep_likely_awake", "sleep.likely_awake", "Bedroom signals suggest someone is awake"),
+    ]
+    for trigger_id, kind, summary in cases:
+        assert trigger_id in by_id, f"missing reactive trigger {trigger_id}"
+        trigger = by_id[trigger_id]
+        assert trigger["stream"] == "events.observed"
+        assert trigger["match"]["kind"] == kind
+
+        await reactive.handle_event(
+            trigger,
+            {"agent": f"observer.{trigger_id}", "kind": kind, "summary": summary, "ts": "x"},
+        )
+
+    rows = await redis.xrange("notify.outbound")
+    assert len(rows) == len(cases)
+    summaries = [json.loads(row[1]["payload"])["text"] for row in rows]
+    for _, _, summary in cases:
+        assert any(summary in s for s in summaries), f"no notification with summary {summary!r}"
+
+
+@pytest.mark.asyncio
+async def test_observer_event_with_wrong_kind_is_ignored(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    triggers_path = repo_root / "reactive_triggers.yaml"
+
+    redis = FakeRedis(decode_responses=True)
+    registry = MagicMock()
+    registry.dispatch = AsyncMock()
+    reactive = Reactive(registry=registry, redis=redis, triggers_path=str(triggers_path))
+
+    import yaml as _yaml
+
+    triggers = _yaml.safe_load(triggers_path.read_text(encoding="utf-8"))["triggers"]
+    washer = next(t for t in triggers if t["id"] == "appliance_cycle_completed")
+
+    await reactive.handle_event(
+        washer,
+        {"agent": "observer.washer", "kind": "presence.changed", "summary": "Saeed left"},
+    )
+    rows = await redis.xrange("notify.outbound")
+    assert rows == []

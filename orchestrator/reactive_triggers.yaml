@@ -39,3 +39,51 @@ triggers:
       text_template: "{metric}={value} crossed threshold ({threshold}). Host: {host}."
       topic_template: "system.{metric}"
       severity_field: severity
+
+  # Observer-derived events. Observers (washer, vacuum, sleep, presence, coffee)
+  # publish summarized events into events.observed. Without these reactive
+  # triggers, those events never become user-facing notifications.
+  - id: appliance_cycle_completed
+    stream: events.observed
+    match:
+      kind: appliance.cycle_completed
+    notify_from_payload:
+      text_template: "🧺 {summary}. Want me to remind you to pull the laundry out?"
+      topic_template: "appliance.cycle_completed"
+      severity_field: severity
+
+  - id: cleaning_completed
+    stream: events.observed
+    match:
+      kind: cleaning.completed
+    notify_from_payload:
+      text_template: "🧹 {summary}."
+      topic_template: "cleaning.completed"
+      severity_field: severity
+
+  - id: coffee_brewed
+    stream: events.observed
+    match:
+      kind: coffee.brewed
+    notify_from_payload:
+      text_template: "☕ {summary}."
+      topic_template: "coffee.brewed"
+      severity_field: severity
+
+  - id: sleep_likely_asleep
+    stream: events.observed
+    match:
+      kind: sleep.likely_asleep
+    notify_from_payload:
+      text_template: "😴 {summary}."
+      topic_template: "sleep.likely_asleep"
+      severity_field: severity
+
+  - id: sleep_likely_awake
+    stream: events.observed
+    match:
+      kind: sleep.likely_awake
+    notify_from_payload:
+      text_template: "🌅 {summary}."
+      topic_template: "sleep.likely_awake"
+      severity_field: severity
