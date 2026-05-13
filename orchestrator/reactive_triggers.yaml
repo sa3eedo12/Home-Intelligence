@@ -96,3 +96,16 @@ triggers:
       text_template: "🌅 {summary}."
       topic_template: "sleep.likely_awake"
       severity_field: severity
+
+  # === auto-inference (chapter 12) ===
+  - id: auto_inference_on_observer_event
+    stream: events.observed
+    dispatch:
+      agent: personal_assistant
+      capability: auto_infer_observer_event
+      inputs_from: payload
+    notify_from_result:
+      text_field: summary
+      topic: auto_inference
+      severity: info
+      keyboard_field: keyboard

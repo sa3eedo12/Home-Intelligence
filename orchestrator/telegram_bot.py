@@ -462,6 +462,10 @@ def _make_callback(
             await _handle_cycle_callback(update, query, parts, router)
             return
 
+        if action == "infer":
+            await _handle_infer_callback(update, query, parts, router)
+            return
+
         if action not in {"confirm", "cancel"}:
             return
 
@@ -532,6 +536,49 @@ async def _handle_cycle_callback(
     inner = result.get("result") if isinstance(result, dict) else None
     if isinstance(inner, dict) and inner.get("ok"):
         await query.edit_message_text(f"✅ Saved: {label}")
+    else:
+        err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
+        await query.edit_message_text(f"Couldn't save: {err}")
+
+
+async def _handle_infer_callback(
+    update: Update,
+    query: Any,
+    parts: list[str],
+    router: Router,
+) -> None:
+    """Handle ``infer:<auto_inference_id>:<status>`` Telegram callbacks."""
+    if len(parts) < 3:
+        await query.edit_message_text("Auto-inference confirmation expired or invalid.")
+        return
+    try:
+        auto_inference_id = int(parts[1])
+    except ValueError:
+        await query.edit_message_text("Auto-inference confirmation has a bad id.")
+        return
+    status = parts[2]
+    if status not in {"confirmed", "rejected", "skipped"}:
+        await query.edit_message_text("Auto-inference confirmation has a bad status.")
+        return
+    chat_id = _chat_id(update)
+    try:
+        result = await router.dispatch(
+            "personal_assistant",
+            "confirm_auto_inference",
+            {"auto_inference_id": auto_inference_id, "status": status, "chat_id": chat_id},
+        )
+    except Exception as exc:
+        logger.warning("auto_infer_confirm_dispatch_failed", error=str(exc))
+        await query.edit_message_text(f"Couldn't save: {exc}")
+        return
+    inner = result.get("result") if isinstance(result, dict) else None
+    if isinstance(inner, dict) and inner.get("ok"):
+        if status == "confirmed":
+            await query.edit_message_text("✅ Logged.")
+        elif status == "rejected":
+            await query.edit_message_text("👌 Ignored.")
+        else:
+            await query.edit_message_text("👌 Skipped.")
     else:
         err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
         await query.edit_message_text(f"Couldn't save: {err}")
