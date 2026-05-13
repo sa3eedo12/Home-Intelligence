@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from home_agents_sdk.health_store import HealthStore
 from home_agents_sdk.reflection_store import ReflectionStore
 from home_agents_sdk.telemetry import get_logger
 
@@ -65,6 +67,137 @@ def _reflection_store(request: Request) -> Any:
     if store is not None:
         return store
     return ReflectionStore(getattr(request.app.state, "pool", None))
+
+
+def _health_store(request: Request) -> Any | None:
+    store = getattr(request.app.state, "health_store", None)
+    if store is not None:
+        return store
+    pool = getattr(request.app.state, "pool", None)
+    return HealthStore(pool) if pool is not None else None
+
+
+def _parse_dt(raw: Any) -> datetime | None:
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=UTC)
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _relative_age(raw: Any) -> str:
+    ts = _parse_dt(raw)
+    if ts is None:
+        return "never"
+    hours = max(0.0, (datetime.now(UTC) - ts.astimezone(UTC)).total_seconds() / 3600)
+    if hours < 1:
+        return f"{max(1, round(hours * 60))}m ago"
+    if hours < 48:
+        return f"{hours:.0f}h ago"
+    return f"{hours / 24:.0f}d ago"
+
+
+def _last_aggregate_value(rows: list[dict[str, Any]]) -> float | None:
+    if not rows:
+        return None
+    value = rows[-1].get("value")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sum_recent(rows: list[dict[str, Any]], metric: str) -> float:
+    total = 0.0
+    for row in rows:
+        if row.get("metric") != metric:
+            continue
+        try:
+            total += float(row.get("value") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return round(total, 1)
+
+
+async def _health_snapshot(request: Request) -> dict[str, Any]:
+    empty: dict[str, Any] = {
+        "configured": False,
+        "summary": {"total_metrics": 0, "last_received_at": None, "last_sync_label": "never"},
+        "tiles": {},
+        "sleep_breakdown": {},
+        "charts": {"steps": [], "sleep_asleep": [], "weight": [], "resting_heart_rate": []},
+    }
+    store = _health_store(request)
+    if store is None:
+        return empty
+    try:
+        summary_method = getattr(store, "summary", None)
+        summary = await summary_method() if callable(summary_method) else {}
+        (
+            recent_sleep,
+            steps_30,
+            sleep_30,
+            weight_30,
+            resting_30,
+            active_energy_1,
+            latest_weight,
+            latest_workout,
+            latest_resting,
+        ) = await asyncio.gather(
+            store.list_recent(hours=36),
+            store.aggregate_daily("steps", days=30),
+            store.aggregate_daily("sleep_asleep", days=30),
+            store.aggregate_daily("weight", days=30),
+            store.aggregate_daily("resting_heart_rate", days=30),
+            store.aggregate_daily("active_energy", days=1),
+            store.latest("weight"),
+            store.latest("workout"),
+            store.latest("resting_heart_rate"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("health_dashboard_snapshot_failed", error=str(exc))
+        return empty
+
+    sleep_breakdown = {
+        "asleep": _sum_recent(recent_sleep, "sleep_asleep"),
+        "deep": _sum_recent(recent_sleep, "sleep_deep"),
+        "rem": _sum_recent(recent_sleep, "sleep_rem"),
+        "core": _sum_recent(recent_sleep, "sleep_core"),
+        "awake": _sum_recent(recent_sleep, "sleep_awake"),
+        "inBed": _sum_recent(recent_sleep, "sleep_inBed"),
+    }
+    sleep_total = sleep_breakdown["asleep"] or sum(
+        sleep_breakdown[key] for key in ("deep", "rem", "core")
+    )
+    total_metrics = int(summary.get("total_metrics") or summary.get("count") or 0)
+    last_received = summary.get("last_received_at")
+    return {
+        "configured": True,
+        "summary": {
+            "total_metrics": total_metrics,
+            "last_received_at": last_received,
+            "last_sync_label": _relative_age(last_received),
+        },
+        "tiles": {
+            "sleep_minutes": round(sleep_total, 1),
+            "steps_today": _last_aggregate_value(steps_30),
+            "active_energy_today": _last_aggregate_value(active_energy_1),
+            "latest_weight": latest_weight,
+            "latest_workout": latest_workout,
+            "resting_heart_rate": latest_resting,
+        },
+        "sleep_breakdown": sleep_breakdown,
+        "charts": {
+            "steps": steps_30,
+            "sleep_asleep": sleep_30,
+            "weight": weight_30,
+            "resting_heart_rate": resting_30,
+        },
+    }
 
 
 async def _data_science_snapshot(request: Request) -> dict[str, Any]:
@@ -345,6 +478,15 @@ async def dashboard(request: Request) -> HTMLResponse:
         request=request,
         name="dashboard.html.j2",
         context={"status": await _status(request)},
+    )
+
+
+@router.get("/dashboard/health", response_class=HTMLResponse)
+async def health_dashboard(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request=request,
+        name="health.html.j2",
+        context={"health": await _health_snapshot(request)},
     )
 
 

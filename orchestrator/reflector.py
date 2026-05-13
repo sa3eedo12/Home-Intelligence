@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -21,6 +22,10 @@ USER_PROFILE_TEMPLATE: dict[str, str] = {
     "wake_time": "Usual wake-up time and day-to-day variance.",
     "sleep_time": "Usual sleep time and quiet-hours preference.",
     "work_hours": "Work schedule, meetings-heavy days, and commute windows.",
+    "wake_time_observed": "Observed wake-up time from Apple Health sleep data.",
+    "sleep_time_observed": "Observed sleep timing and duration from Apple Health sleep data.",
+    "daily_step_target": "Step goal or typical daily step baseline for nudges.",
+    "last_workout_at": "Most recent workout timestamp and workout type.",
     "allergies": "Any allergies relevant to meals, shopping, and reminders.",
     "dietary_restrictions": "Dietary restrictions, avoidances, or nutrition goals.",
     "household_members": "People in the household and how they prefer to be referenced.",
@@ -149,6 +154,7 @@ class NightlyReflector:
         self.reasoner_model = reasoner_model or os.environ.get("REASONER_MODEL", "qwen3.6:35b-a3b")
         self.fallback_model = fallback_model or os.environ.get("DEFAULT_MODEL", "qwen3:8b")
         self.store = ReflectionStore(pool)
+        self.health_store: Any | None = None
         # Live status surfaced through GET /admin/reflection/status so the
         # Morning Brief page can show a "running…" banner while the
         # nightly job (or a manual run) is mid-flight.
@@ -206,6 +212,8 @@ class NightlyReflector:
             patterns = await self._phase(
                 "pattern_mining", self._pattern_mining, errors, [], evidence
             )
+            self._status["phase"] = "health_summary"
+            health_summary = await self._phase("health_summary", self._health_summary, errors, {})
             self._status["phase"] = "generate_proposals"
             proposals = await self._phase(
                 "generate_proposals",
@@ -216,6 +224,7 @@ class NightlyReflector:
                 audit,
                 gaps,
                 patterns,
+                health_summary,
             )
             self._status["phase"] = "apply_auto_confirm_rules"
             applied = await self._phase(
@@ -226,7 +235,15 @@ class NightlyReflector:
                 proposals,
             )
             self._status["phase"] = "save_brief"
-            body = self._build_brief_body(evidence, audit, gaps, patterns, applied, errors)
+            body = self._build_brief_body(
+                evidence,
+                audit,
+                gaps,
+                patterns,
+                health_summary,
+                applied,
+                errors,
+            )
             brief_id = await self._phase("save_brief", self._save_brief, errors, 0, body)
             body["brief_id"] = brief_id
             body["ok"] = True
@@ -346,12 +363,30 @@ class NightlyReflector:
         patterns.sort(key=lambda row: row["count"], reverse=True)
         return patterns
 
+    async def _health_summary(self) -> dict[str, Any]:
+        store = getattr(self, "health_store", None)
+        if store is None:
+            return {}
+        try:
+            sleep_rows, step_rows = await asyncio.gather(
+                store.aggregate_daily("sleep_asleep", days=7),
+                store.aggregate_daily("steps", days=7),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reflection_health_summary_failed", error=str(exc))
+            return {}
+        return {
+            "sleep_asleep_7d": sleep_rows,
+            "steps_7d": step_rows,
+        }
+
     async def _generate_proposals(
         self,
         evidence: dict[str, Any],
         audit: dict[str, Any],
         gaps: list[dict[str, str]],
         patterns: list[dict[str, Any]],
+        health_summary: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         capabilities = []
         try:
@@ -365,6 +400,7 @@ class NightlyReflector:
             "self_audit": audit,
             "knowledge_gaps": gaps,
             "hourly_patterns": patterns,
+            "health_summary": health_summary or {},
             "capabilities": capabilities[:120],
         }
         response = await self._chat_with_fallback(
@@ -501,6 +537,7 @@ class NightlyReflector:
         audit: dict[str, Any],
         gaps: list[dict[str, str]],
         patterns: list[dict[str, Any]],
+        health_summary: dict[str, Any],
         proposals: list[dict[str, Any]],
         errors: list[dict[str, str]],
     ) -> dict[str, Any]:
@@ -545,6 +582,7 @@ class NightlyReflector:
             "self_audit": audit,
             "knowledge_gaps": gaps,
             "patterns": patterns,
+            "health_summary": health_summary,
             "errors": errors,
         }
 
