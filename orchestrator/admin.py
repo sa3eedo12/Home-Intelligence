@@ -1328,6 +1328,23 @@ async def ha_bridge_status(request: Request) -> dict[str, Any]:
     return status
 
 
+@router.post("/admin/ha-bridge/replay")
+async def ha_bridge_replay(request: Request) -> dict[str, Any]:
+    bridge = getattr(request.app.state, "ha_event_bridge", None)
+    if bridge is None:
+        raise HTTPException(status_code=503, detail="ha_event_bridge not started")
+    hours_raw = request.query_params.get("hours")
+    hours: int | None = None
+    if hours_raw is not None:
+        try:
+            hours = int(hours_raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="hours must be an integer") from None
+        if hours < 0:
+            raise HTTPException(status_code=400, detail="hours must be >= 0")
+    return await bridge.replay_history_now(hours=hours)
+
+
 @router.get("/admin/observations/recent")
 async def observations_recent(request: Request) -> dict[str, Any]:
     limit = _query_int(request, "limit", default=10, low=1, high=50) or 10

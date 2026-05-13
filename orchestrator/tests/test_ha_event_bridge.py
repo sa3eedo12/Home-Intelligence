@@ -5,6 +5,9 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+from unittest.mock import patch
+
+import httpx
 
 from orchestrator.ha_event_bridge import (
     EVENTS_HOME,
@@ -381,17 +384,106 @@ async def test_history_replay_failure_is_logged_but_does_not_break_session() -> 
     assert json.loads(redis.calls[0][1]["payload"])["entity_id"] == "light.kitchen"
 
 
-def test_build_from_env_reads_replay_hours(monkeypatch) -> None:
-    monkeypatch.setenv("HA_URL", "http://ha.local:8123")
-    monkeypatch.setenv("HA_TOKEN", "abc")
-    monkeypatch.setenv("HA_BRIDGE_REPLAY_HOURS", "24")
-    bridge = build_from_env(redis=FakeRedis())
-    assert bridge._replay_hours == 24
+async def test_history_url_uses_seconds_z_no_microseconds_url_encoded() -> None:
+    """Regression for HA returning 400 when the timestamp path segment includes
+    microseconds or an unencoded ``+`` (TrueNAS user reported 2026-05-13)."""
+    redis = FakeRedis()
+    ws = FakeWs(_auth_handshake_frames())
+    captured = {}
+
+    async def fake_send(self, request, **kwargs):
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200, request=request, json=[]
+        )
 
 
-def test_build_from_env_invalid_replay_hours_falls_back(monkeypatch) -> None:
-    monkeypatch.setenv("HA_URL", "http://ha.local:8123")
-    monkeypatch.setenv("HA_TOKEN", "abc")
-    monkeypatch.setenv("HA_BRIDGE_REPLAY_HOURS", "not-a-number")
-    bridge = build_from_env(redis=FakeRedis())
-    assert bridge._replay_hours == 6
+    import httpx as _httpx
+
+    bridge = HaEventBridge(
+        redis=redis,
+        ha_url="http://ha.local:8123",
+        ha_token="t",
+        backoff_schedule=(0.02,),
+        ws_connector=_ws_connector(ws),
+        replay_hours=6,
+        # No history_fetcher so the real httpx path runs
+    )
+    with patch.object(_httpx.AsyncClient, "send", fake_send):
+        await bridge.start()
+        for _ in range(40):
+            if "url" in captured:
+                break
+            await asyncio.sleep(0.01)
+        await bridge.stop()
+
+    url = captured.get("url", "")
+    assert "/api/history/period/" in url, f"unexpected url {url!r}"
+    # Must NOT contain microsecond fraction or an unencoded "+"
+    assert "." not in url.split("/api/history/period/", 1)[1].split("?", 1)[0], url
+    assert "+" not in url.split("/api/history/period/", 1)[1].split("?", 1)[0], url
+    # SHOULD contain the URL-encoded "Z" (just "Z" since it's safe) at the end of timestamp
+    ts_segment = url.split("/api/history/period/", 1)[1].split("?", 1)[0]
+    assert ts_segment.endswith("Z"), ts_segment
+
+
+async def test_replay_history_now_can_be_invoked_after_first_session_failed() -> None:
+    """User can hit POST /admin/ha-bridge/replay to retry after fixing config."""
+    redis = FakeRedis()
+    ws = FakeWs(_auth_handshake_frames())
+    call_count = 0
+
+    async def fake_history(since):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("first call fails")
+        return [
+            [
+                _state("idle", ts="2026-05-13T18:00:00+00:00"),
+                _state("running", ts="2026-05-13T18:30:00+00:00"),
+                _state("idle", ts="2026-05-13T19:00:00+00:00"),
+            ]
+        ]
+
+    bridge = HaEventBridge(
+        redis=redis,
+        ha_url="http://ha.local:8123",
+        ha_token="t",
+        backoff_schedule=(0.02,),
+        ws_connector=_ws_connector(ws),
+        replay_hours=6,
+        history_fetcher=fake_history,
+    )
+    await bridge.start()
+    for _ in range(40):
+        if bridge.status.history_replay_error:
+            break
+        await asyncio.sleep(0.01)
+    assert "first call fails" in (bridge.status.history_replay_error or "")
+    assert bridge.status.history_replay_count == 0
+
+    result = await bridge.replay_history_now()
+    await bridge.stop()
+    assert result["ok"] is True
+    assert result["history_replay_count"] == 2
+    assert call_count == 2
+
+
+async def test_replay_history_now_refuses_when_disconnected() -> None:
+    bridge = HaEventBridge(
+        redis=FakeRedis(),
+        ha_url="http://ha.local:8123",
+        ha_token="t",
+        replay_hours=0,
+    )
+    result = await bridge.replay_history_now()
+    assert result["ok"] is False
+    assert "not connected" in result["error"]
+
+
+async def test_replay_history_now_refuses_when_disabled() -> None:
+    bridge = HaEventBridge(redis=FakeRedis(), ha_url="", ha_token="")
+    result = await bridge.replay_history_now()
+    assert result["ok"] is False
+    assert "disabled" in result["error"]

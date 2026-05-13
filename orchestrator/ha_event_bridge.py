@@ -48,6 +48,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import httpx
 from home_agents_sdk.telemetry import get_logger
@@ -265,7 +266,13 @@ class HaEventBridge:
     async def _fetch_history(self, since: datetime) -> list[list[dict[str, Any]]]:
         if self._history_fetcher is not None:
             return await self._history_fetcher(since)
-        url = self._ha_url.rstrip("/") + "/api/history/period/" + since.isoformat()
+        # HA's /api/history/period/<timestamp> endpoint is fussy about the
+        # timestamp segment: microseconds and unencoded "+" cause 400 Bad Request
+        # on at least 2024.x+. Use whole seconds in UTC with a "Z" suffix and
+        # quote the path segment defensively.
+        ts = since.astimezone(UTC).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts_quoted = quote(ts, safe="")
+        url = self._ha_url.rstrip("/") + "/api/history/period/" + ts_quoted
         async with httpx.AsyncClient(timeout=REPLAY_HTTP_TIMEOUT) as client:
             resp = await client.get(
                 url,
@@ -280,6 +287,35 @@ class HaEventBridge:
         if not isinstance(data, list):
             return []
         return [item for item in data if isinstance(item, list)]
+
+    async def replay_history_now(self, *, hours: int | None = None) -> dict[str, Any]:
+        """Public entry point that re-runs history replay on demand.
+
+        Returns a status snapshot. Used by ``POST /admin/ha-bridge/replay``
+        so a user can backfill observers without restarting the orchestrator
+        (e.g., after fixing HA_TOKEN or installing the bridge for the first
+        time).
+        """
+        if not self.status.enabled:
+            return {"ok": False, "error": "ha_event_bridge disabled (HA_URL or HA_TOKEN missing)"}
+        if not self.status.connected:
+            return {"ok": False, "error": "ha_event_bridge not connected to HA"}
+        previous_hours = self._replay_hours
+        if hours is not None:
+            self._replay_hours = max(0, int(hours))
+        # Reset so `_replay_history` doesn't short-circuit on history_replayed flag
+        self.status.history_replay_error = None
+        self.status.history_replay_count = 0
+        self.status.history_replayed = False
+        try:
+            await self._replay_history()
+        finally:
+            self._replay_hours = previous_hours
+        return {
+            "ok": self.status.history_replay_error is None,
+            "history_replay_count": self.status.history_replay_count,
+            "history_replay_error": self.status.history_replay_error,
+        }
 
     async def _forward_replayed_pair(
         self, prev: dict[str, Any], curr: dict[str, Any]
