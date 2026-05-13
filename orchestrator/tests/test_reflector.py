@@ -10,6 +10,20 @@ import pytest
 from orchestrator.reflector import NightlyReflector
 
 
+class FakeHealthStore:
+    def __init__(self) -> None:
+        self.aggregate_daily = AsyncMock(side_effect=self._aggregate_daily)
+
+    async def _aggregate_daily(self, metric: str, days: int = 7) -> list[dict]:
+        return [
+            {
+                "metric": metric,
+                "day": "2026-05-13",
+                "value": 420 if metric == "sleep_asleep" else 9000,
+            }
+        ]
+
+
 class FakeStore:
     def __init__(self) -> None:
         self.events = [
@@ -108,6 +122,25 @@ async def test_run_once_executes_pipeline_and_requires_evidence_citations() -> N
     messages = llm.chat.await_args.kwargs["messages"]
     assert "Every proposal MUST cite" in messages[0]["content"]
     assert "knowledge-gap key" in messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_health_summary_is_included_in_prompt_context() -> None:
+    store = FakeStore()
+    health_store = FakeHealthStore()
+    llm = MagicMock()
+    llm.chat = AsyncMock(return_value=_response([]))
+    reflector = _reflector(store, llm)
+    reflector.health_store = health_store
+
+    await reflector.run_once()
+
+    prompt = json.loads(llm.chat.await_args.kwargs["messages"][1]["content"])
+    assert prompt["health_summary"] == {
+        "sleep_asleep_7d": [{"metric": "sleep_asleep", "day": "2026-05-13", "value": 420}],
+        "steps_7d": [{"metric": "steps", "day": "2026-05-13", "value": 9000}],
+    }
+    assert health_store.aggregate_daily.await_count == 2
 
 
 @pytest.mark.asyncio

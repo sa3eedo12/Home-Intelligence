@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import secrets
 from datetime import time
 from typing import Any
 
@@ -10,11 +12,14 @@ import httpx
 import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
+from home_agents_sdk.event_log import EventLogStore
+from home_agents_sdk.health_store import HealthStore
 from home_agents_sdk.reflection_store import ReflectionStore
 from home_agents_sdk.telemetry import get_logger
 
 from .data_science.common import current_embedding_model, decode_json
 from .github_client import GitHubClientError
+from .health import HealthAutoExportNormalizer
 from .safety import SafetyPolicy
 
 router = APIRouter(tags=["admin"])
@@ -31,6 +36,122 @@ def _reflection_store(request: Request):
     if store is not None:
         return store
     return ReflectionStore(getattr(request.app.state, "pool", None))
+
+
+_HEALTH_METRIC_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
+
+
+def _health_store(request: Request) -> HealthStore:
+    store = getattr(request.app.state, "health_store", None)
+    if store is not None:
+        return store
+    return HealthStore(getattr(request.app.state, "pool", None))
+
+
+def _validate_healthkit_token(request: Request) -> None:
+    expected = os.environ.get("HEALTHKIT_WEBHOOK_TOKEN")
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="HEALTHKIT_WEBHOOK_TOKEN is not configured; refusing Apple Health sync",
+        )
+    supplied = request.headers.get("x-health-token") or ""
+    if not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="invalid X-Health-Token")
+
+
+def _query_int(
+    request: Request,
+    key: str,
+    *,
+    default: int | None = None,
+    low: int = 1,
+    high: int = 10_000,
+) -> int | None:
+    raw = request.query_params.get(key)
+    if raw in (None, ""):
+        return default
+    try:
+        value = int(str(raw))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"{key} must be an integer") from exc
+    if value < low or value > high:
+        raise HTTPException(status_code=400, detail=f"{key} must be between {low} and {high}")
+    return value
+
+
+def _query_metric(request: Request, *, required: bool = False) -> str | None:
+    raw = request.query_params.get("metric")
+    metric = str(raw or "").strip()
+    if not metric:
+        if required:
+            raise HTTPException(status_code=400, detail="metric is required")
+        return None
+    if not _HEALTH_METRIC_RE.fullmatch(metric):
+        raise HTTPException(status_code=400, detail="metric has invalid characters")
+    return metric
+
+
+async def _default_health_member_id(request: Request) -> int | None:
+    graph = getattr(request.app.state, "knowledge_graph", None)
+    if graph is None:
+        return None
+    try:
+        members = await graph.list_members(include_pets=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("healthkit_member_resolution_failed", error=str(exc))
+        return None
+    for member in members:
+        if str(member.get("role") or "").casefold() == "adult":
+            try:
+                return int(member["id"])
+            except (KeyError, TypeError, ValueError):
+                return None
+    return None
+
+
+async def _record_health_sync_event(
+    request: Request,
+    *,
+    inserted: int,
+    skipped: int,
+    row_count: int,
+    member_id: int | None,
+    metrics: list[str],
+) -> None:
+    event_store = getattr(request.app.state, "event_log_store", None)
+    if event_store is None and getattr(request.app.state, "pool", None) is not None:
+        event_store = EventLogStore(pool=getattr(request.app.state, "pool"))
+    if event_store is None or not callable(getattr(event_store, "record_event", None)):
+        return
+    try:
+        await event_store.record_event(
+            agent="health.sync",
+            capability="healthkit_sync",
+            summary=f"Apple Health sync: {inserted} new rows",
+            payload={
+                "inserted": inserted,
+                "skipped": skipped,
+                "row_count": row_count,
+                "member_id": member_id,
+                "metrics": metrics,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("healthkit_event_log_failed", error=str(exc))
+
+
+async def _latest_health_values(store: Any, metrics: set[str]) -> dict[str, Any]:
+    latest: dict[str, Any] = {}
+    for metric in sorted(metrics)[:12]:
+        try:
+            row = await store.latest(metric)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("healthkit_latest_failed", metric=metric, error=str(exc))
+            continue
+        if row:
+            latest[metric] = row
+    return latest
 
 
 def _format_proposal_markdown(proposal: dict[str, Any]) -> str:
@@ -170,6 +291,51 @@ async def _json_object(request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be an object")
     return body
+
+
+@router.post("/admin/healthkit/sync")
+async def healthkit_sync(request: Request) -> dict[str, Any]:
+    _validate_healthkit_token(request)
+    payload = await _json_object(request)
+    member_id = _query_int(request, "member_id", default=None, low=1, high=2_000_000_000)
+    if member_id is None:
+        member_id = await _default_health_member_id(request)
+    try:
+        rows = HealthAutoExportNormalizer.normalize(payload, default_member_id=member_id)
+    except Exception as exc:  # noqa: BLE001
+        detail = f"invalid Health Auto Export payload: {exc}"
+        raise HTTPException(status_code=400, detail=detail) from exc
+    store = _health_store(request)
+    result = await store.upsert_metrics(rows)
+    inserted = int(result.get("inserted") or 0)
+    skipped = int(result.get("skipped") or 0)
+    metrics = {str(row.get("metric")) for row in rows if row.get("metric")}
+    latest = await _latest_health_values(store, metrics)
+    await _record_health_sync_event(
+        request,
+        inserted=inserted,
+        skipped=skipped,
+        row_count=len(rows),
+        member_id=member_id,
+        metrics=sorted(metrics),
+    )
+    return {"ok": True, "inserted": inserted, "skipped": skipped, "latest": latest}
+
+
+@router.get("/admin/healthkit/recent")
+async def healthkit_recent(request: Request) -> dict[str, Any]:
+    metric = _query_metric(request)
+    hours = _query_int(request, "hours", default=24, low=1, high=24 * 365) or 24
+    rows = await _health_store(request).list_recent(metric=metric, hours=hours)
+    return {"ok": True, "metric": metric, "hours": hours, "items": rows, "count": len(rows)}
+
+
+@router.get("/admin/healthkit/aggregate")
+async def healthkit_aggregate(request: Request) -> dict[str, Any]:
+    metric = _query_metric(request, required=True)
+    days = _query_int(request, "days", default=30, low=1, high=365) or 30
+    rows = await _health_store(request).aggregate_daily(str(metric), days=days)
+    return {"ok": True, "metric": metric, "days": days, "items": rows, "count": len(rows)}
 
 
 def _profile_value_present(value: Any) -> bool:

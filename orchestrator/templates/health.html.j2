@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Apple Health · Home Intelligence</title>
+  <link rel="stylesheet" href="/static/health.css">
+  <script src="/static/health.js" defer></script>
+</head>
+<body>
+  <header class="health-topbar">
+    <a href="/dashboard" class="back-link">← Dashboard</a>
+    <h1> Apple Health</h1>
+    <p>Local HealthKit signals for the nightly reflector.</p>
+  </header>
+
+  {% macro minutes_label(value) -%}
+    {% set mins = (value or 0) | float %}
+    {% if mins > 0 %}{{ (mins // 60) | int }}h {{ (mins % 60) | round(0, 'floor') | int }}m{% else %}—{% endif %}
+  {%- endmacro %}
+
+  {% set tiles = health.tiles or {} %}
+  {% set summary = health.summary or {} %}
+  {% set breakdown = health.sleep_breakdown or {} %}
+
+  <main class="health-shell">
+    <section class="status-card">
+      <div>
+        <p class="eyebrow">Sync status</p>
+        <h2>Last sync: {{ summary.last_sync_label or 'never' }} — {{ '{:,}'.format(summary.total_metrics or 0) }} metrics in store</h2>
+      </div>
+      <a class="setup-link" href="#setup">How to set up Health Auto Export →</a>
+    </section>
+
+    <section class="tile-grid" aria-label="Latest health metrics">
+      <article class="health-tile sleep-tile">
+        <p class="eyebrow">Last night</p>
+        <h2>{{ minutes_label(tiles.sleep_minutes) }}</h2>
+        <p>Sleep duration</p>
+        {% set sleep_total = (tiles.sleep_minutes or 0) | float %}
+        <div class="sleep-breakdown" aria-label="Sleep stage breakdown">
+          {% for key, label in [('deep', 'Deep'), ('rem', 'REM'), ('core', 'Core'), ('awake', 'Awake')] %}
+            {% set value = (breakdown.get(key) or 0) | float %}
+            {% set width = (value / sleep_total * 100) if sleep_total else 0 %}
+            <span class="stage stage-{{ key }}" style="width: {{ width }}%" title="{{ label }} {{ minutes_label(value) }}"></span>
+          {% endfor %}
+        </div>
+        <small>Deep {{ minutes_label(breakdown.deep) }} · REM {{ minutes_label(breakdown.rem) }} · Awake {{ minutes_label(breakdown.awake) }}</small>
+      </article>
+
+      <article class="health-tile ring-tile">
+        <p class="eyebrow">Today</p>
+        <h2>{{ '{:,.0f}'.format(tiles.steps_today or 0) }}</h2>
+        <p>Steps</p>
+        {% set step_pct = [((tiles.steps_today or 0) / 10000 * 100), 100] | min %}
+        <div class="ring" style="--pct: {{ step_pct }}"><span>{{ step_pct | round(0) | int }}%</span></div>
+      </article>
+
+      <article class="health-tile">
+        <p class="eyebrow">Latest</p>
+        <h2>{% if tiles.latest_weight %}{{ '%.1f' % (tiles.latest_weight.value or 0) }} {{ tiles.latest_weight.unit or 'kg' }}{% else %}—{% endif %}</h2>
+        <p>Weight</p>
+        <svg class="sparkline" data-chart="weight" viewBox="0 0 120 28" preserveAspectRatio="none"></svg>
+      </article>
+
+      <article class="health-tile">
+        <p class="eyebrow">Today</p>
+        <h2>{{ '{:,.0f}'.format(tiles.active_energy_today or 0) }} kcal</h2>
+        <p>Active energy</p>
+      </article>
+
+      <article class="health-tile">
+        <p class="eyebrow">Latest workout</p>
+        {% set workout = tiles.latest_workout or {} %}
+        <h2>{{ (workout.metadata or {}).workout_type or '—' }}</h2>
+        <p>{% if workout.value %}{{ minutes_label(workout.value) }}{% else %}No workout synced yet{% endif %}</p>
+      </article>
+
+      <article class="health-tile">
+        <p class="eyebrow">Resting HR</p>
+        {% set resting = tiles.resting_heart_rate or {} %}
+        <h2>{% if resting %}{{ '%.0f' % (resting.value or 0) }} {{ resting.unit or 'bpm' }}{% else %}—{% endif %}</h2>
+        <p>Latest resting heart rate</p>
+      </article>
+    </section>
+
+    <section class="chart-grid" aria-label="30 day health trends">
+      {% for metric, title in [('steps', 'Steps'), ('sleep_asleep', 'Sleep duration'), ('weight', 'Weight'), ('resting_heart_rate', 'Resting heart rate')] %}
+        <article class="chart-card">
+          <header>
+            <h2>{{ title }}</h2>
+            <small>Last 30 days</small>
+          </header>
+          <svg class="health-chart" data-chart="{{ metric }}" viewBox="0 0 320 120" preserveAspectRatio="none"></svg>
+        </article>
+      {% endfor %}
+    </section>
+
+    <details id="setup" class="setup-card">
+      <summary>How to set up Health Auto Export →</summary>
+      <ol>
+        <li>Install <strong>Health Auto Export</strong> from the iOS App Store.</li>
+        <li>Create an automation: <strong>HTTP REST</strong>, method <strong>POST</strong>.</li>
+        <li>URL: <code>http://&lt;truenas-ip&gt;:8080/admin/healthkit/sync</code>.</li>
+        <li>Headers: <code>Content-Type: application/json</code> and <code>X-Health-Token: &lt;your token&gt;</code>.</li>
+        <li>Payload: full export. Schedule hourly for ambient metrics and immediately after workouts.</li>
+      </ol>
+      <pre><code>curl -X POST http://&lt;truenas-ip&gt;:8080/admin/healthkit/sync \
+  -H 'Content-Type: application/json' \
+  -H 'X-Health-Token: &lt;your token&gt;' \
+  -d '{"data":{"metrics":[]}}'</code></pre>
+    </details>
+  </main>
+
+  <script type="application/json" id="health-data">{{ health | tojson }}</script>
+</body>
+</html>
