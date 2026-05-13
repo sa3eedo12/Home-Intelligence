@@ -199,8 +199,34 @@ def _infer(
         context = habit_context if habit_context in {"gym", "errands"} else "gym"
         confidence = 0.62 if habit_context == context else 0.55
         reasons.append("weekend 1-3 hour absence points to gym or errands")
+    # NEW: low-confidence fallbacks so we always make SOME guess and
+    # surface a meaningful question. "unknown" forever is useless.
+    elif away_minutes is not None and away_minutes <= 30:
+        context = "errands"
+        confidence = 0.35
+        reasons.append(f"short {away_minutes}-min absence — guessing errands")
+    elif away_minutes is not None and away_minutes >= 240:
+        if not is_weekend and hour >= 16:
+            context = "work"
+            confidence = 0.5
+            reasons.append(f"long {away_minutes // 60}h weekday return — likely work")
+        else:
+            context = "social"
+            confidence = 0.4
+            reasons.append(f"long {away_minutes // 60}h absence — guessing social")
+    elif 18 <= hour <= 23:
+        context = "social"
+        confidence = 0.35
+        reasons.append("evening return — guessing social outing")
+    elif 6 <= hour <= 10:
+        context = "commute"
+        confidence = 0.35
+        reasons.append("morning return — guessing commute/errand")
     else:
-        reasons.append("no duration/time heuristic matched")
+        # Truly nothing — keep unknown but lift confidence slightly
+        # so the keyboard still surfaces useful options.
+        confidence = 0.3
+        reasons.append("no duration/time heuristic matched — ask the user")
 
     if habit_context and habit_count >= 3:
         if context == habit_context:
