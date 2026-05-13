@@ -92,7 +92,12 @@ triggers:
     stream: events.observed
     match:
       kind: sleep.likely_awake
-    notify_from_payload:
-      text_template: "🌅 {summary}."
-      topic_template: "sleep.likely_awake"
-      severity_field: severity
+    dispatch:
+      agent: personal_assistant
+      capability: infer_sleep_summary
+      inputs_from: payload.payload
+    notify_from_result:
+      text_field: summary
+      topic: sleep.summary
+      severity: notice
+      keyboard_field: keyboard

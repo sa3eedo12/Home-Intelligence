@@ -13,9 +13,11 @@ def test_manifest_and_tools_consistent() -> None:
         sys.path.insert(0, str(agent_dir))
 
     import tools.core as _core
+    import tools.sleep_inference as _sleep_inference
 
     clear_tools()
     importlib.reload(_core)
+    importlib.reload(_sleep_inference)
     expected = {
         "add_reminder",
         "list_reminders",
@@ -26,5 +28,8 @@ def test_manifest_and_tools_consistent() -> None:
         "list_appointments",
         "morning_brief",
         "evening_recap",
+        "infer_sleep_summary",
+        "confirm_sleep_summary",
+        "late_bedtime_check",
     }
     assert expected.issubset(set(list_tools()))

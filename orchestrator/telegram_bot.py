@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -462,6 +463,10 @@ def _make_callback(
             await _handle_cycle_callback(update, query, parts, router)
             return
 
+        if action == "sleep":
+            await _handle_sleep_callback(update, query, parts, router)
+            return
+
         if action not in {"confirm", "cancel"}:
             return
 
@@ -535,6 +540,78 @@ async def _handle_cycle_callback(
     else:
         err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
         await query.edit_message_text(f"Couldn't save: {err}")
+
+
+async def _handle_sleep_callback(
+    update: Update,
+    query: Any,
+    parts: list[str],
+    router: Router,
+) -> None:
+    """Handle ``sleep:<sleep_summary_id>:<quality>`` Telegram callbacks."""
+    if len(parts) < 3:
+        await query.edit_message_text("Sleep confirmation expired or invalid.")
+        return
+    if parts[1] == "bedtime":
+        await _handle_bedtime_callback(query, parts[2], router)
+        return
+    try:
+        sleep_summary_id = int(parts[1])
+    except ValueError:
+        await query.edit_message_text("Sleep confirmation has a bad id.")
+        return
+    quality = parts[2]
+    chat_id = _chat_id(update)
+    if quality == "_skip":
+        await query.edit_message_text("👌 Skipped.")
+        return
+    try:
+        result = await router.dispatch(
+            "personal_assistant",
+            "confirm_sleep_summary",
+            {"sleep_summary_id": sleep_summary_id, "quality": quality, "chat_id": chat_id},
+        )
+    except Exception as exc:
+        logger.warning("sleep_confirm_dispatch_failed", error=str(exc))
+        await query.edit_message_text(f"Couldn't save: {exc}")
+        return
+    inner = result.get("result") if isinstance(result, dict) else None
+    if isinstance(inner, dict) and inner.get("ok"):
+        await query.edit_message_text(f"✅ Saved: {quality}")
+    else:
+        err = inner.get("error", "unknown error") if isinstance(inner, dict) else "unknown error"
+        await query.edit_message_text(f"Couldn't save: {err}")
+
+
+async def _handle_bedtime_callback(query: Any, choice: str, router: Router) -> None:
+    if choice == "_skip":
+        await query.edit_message_text("No problem — good night when you're ready.")
+        return
+    if choice != "wind_down":
+        await query.edit_message_text("Bedtime action expired or invalid.")
+        return
+    area = os.getenv("SLEEP_BEDROOM_AREA", "Bedroom")
+    try:
+        await router.dispatch(
+            "home_automation",
+            "call_service_in_area",
+            {
+                "area": area,
+                "domain": "light",
+                "service": "turn_on",
+                "data": {"brightness_pct": 15},
+            },
+        )
+        await router.dispatch(
+            "home_automation",
+            "call_service_in_area",
+            {"area": area, "domain": "media_player", "service": "turn_off", "data": {}},
+        )
+    except Exception as exc:
+        logger.warning("bedtime_wind_down_failed", error=str(exc))
+        await query.edit_message_text(f"Couldn't wind down the room: {exc}")
+        return
+    await query.edit_message_text("🌙 Dimming bedroom lights and turning off the TV.")
 
 
 async def _handle_pending_callback(

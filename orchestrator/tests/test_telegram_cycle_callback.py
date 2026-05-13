@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from orchestrator.telegram_bot import _handle_cycle_callback, _to_inline_keyboard
+from orchestrator.telegram_bot import (
+    _handle_cycle_callback,
+    _handle_sleep_callback,
+    _to_inline_keyboard,
+)
 
 
 def test_to_inline_keyboard_converts_list_of_dicts() -> None:
@@ -80,6 +84,40 @@ async def test_cycle_callback_skip_short_circuits() -> None:
 
     router.dispatch.assert_not_called()
     query.edit_message_text.assert_awaited_once_with("👌 Skipped.")
+
+
+@pytest.mark.asyncio
+async def test_sleep_callback_dispatches_confirm() -> None:
+    query = MagicMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.effective_chat = MagicMock()
+    update.effective_chat.id = 12345
+    router = MagicMock()
+    router.dispatch = AsyncMock(return_value={"ok": True, "result": {"ok": True}})
+
+    await _handle_sleep_callback(update, query, ["sleep", "42", "restless"], router)
+
+    router.dispatch.assert_awaited_once()
+    args = router.dispatch.call_args.args
+    assert args[0] == "personal_assistant"
+    assert args[1] == "confirm_sleep_summary"
+    assert args[2] == {"sleep_summary_id": 42, "quality": "restless", "chat_id": 12345}
+    query.edit_message_text.assert_awaited_once_with("✅ Saved: restless")
+
+
+@pytest.mark.asyncio
+async def test_sleep_bedtime_skip_short_circuits() -> None:
+    query = MagicMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    router = MagicMock()
+    router.dispatch = AsyncMock()
+
+    await _handle_sleep_callback(update, query, ["sleep", "bedtime", "_skip"], router)
+
+    router.dispatch.assert_not_called()
+    query.edit_message_text.assert_awaited_once_with("No problem — good night when you're ready.")
 
 
 @pytest.mark.asyncio

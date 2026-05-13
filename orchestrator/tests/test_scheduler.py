@@ -107,6 +107,53 @@ jobs:
 
 
 @pytest.mark.asyncio
+async def test_job_notify_can_use_text_field_keyboard_and_notify_flag(tmp_path: Path) -> None:
+    schedules = tmp_path / "schedules.yaml"
+    schedules.write_text(
+        """
+jobs:
+  - id: sleep
+    trigger: interval
+    interval: { minutes: 5 }
+    dispatch: { agent: personal_assistant, capability: infer_sleep_summary, inputs: {} }
+    notify:
+      severity: notice
+      topic: sleep.summary
+      text_field: summary
+      keyboard_field: keyboard
+  - id: quiet
+    trigger: interval
+    interval: { minutes: 5 }
+    dispatch: { agent: personal_assistant, capability: late_bedtime_check, inputs: {} }
+    notify: { severity: notice, topic: sleep.bedtime, text_field: summary }
+""",
+        encoding="utf-8",
+    )
+    redis = FakeRedis(decode_responses=True)
+    registry = MagicMock()
+    keyboard = [[{"text": "Decent", "callback": "sleep:1:decent"}]]
+    registry.dispatch = AsyncMock(
+        side_effect=[
+            {"ok": True, "result": {"summary": "slept well", "keyboard": keyboard}},
+            {"ok": True, "result": {"summary": "", "notify": False}},
+        ]
+    )
+
+    scheduler = Scheduler(registry=registry, redis=redis, schedules_path=str(schedules))
+    await scheduler.start()
+    try:
+        await scheduler.run_job_now("sleep")
+        await scheduler.run_job_now("quiet")
+        stream_rows = await redis.xrange("notify.outbound")
+        assert len(stream_rows) == 1
+        payload = json.loads(stream_rows[0][1]["payload"])
+        assert payload["text"] == "slept well"
+        assert payload["keyboard"] == keyboard
+    finally:
+        await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_job_execution_dispatches_and_emits_notify(tmp_path: Path) -> None:
     schedules = tmp_path / "schedules.yaml"
     schedules.write_text(

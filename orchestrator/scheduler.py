@@ -115,7 +115,8 @@ class Scheduler:
 
             if cfg.get("notify"):
                 payload = self._build_notify_payload(cfg, dispatch, result)
-                await self._redis.xadd("notify.outbound", {"payload": json.dumps(payload)})
+                if payload is not None:
+                    await self._redis.xadd("notify.outbound", {"payload": json.dumps(payload)})
 
             self._history[job_id]["last_status"] = "ok"
             return {"ok": True, "result": result}
@@ -129,20 +130,37 @@ class Scheduler:
         cfg: dict[str, Any],
         dispatch: dict[str, Any],
         result: dict[str, Any],
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         notify = cfg.get("notify", {})
-        output = result.get("result")
-        if isinstance(output, str):
+        output = result.get("result") if isinstance(result, dict) and "result" in result else result
+        keyboard = None
+        if isinstance(output, dict):
+            if output.get("notify") is False:
+                return None
+            text_field = notify.get("text_field")
+            if text_field:
+                text = str(output.get(text_field) or "")
+            else:
+                text = json.dumps(output, ensure_ascii=False, indent=2)[:1200]
+            keyboard_field = notify.get("keyboard_field")
+            if keyboard_field:
+                keyboard = output.get(keyboard_field)
+        elif isinstance(output, str):
             text = output
         else:
             text = json.dumps(output, ensure_ascii=False, indent=2)[:1200]
-        return {
+        if not text.strip():
+            return None
+        payload = {
             "text": text,
             "severity": notify.get("severity", "info"),
             "topic": notify.get("topic"),
             "agent": dispatch.get("agent"),
             "capability": dispatch.get("capability"),
         }
+        if keyboard:
+            payload["keyboard"] = keyboard
+        return payload
 
     async def _dispatch_internal(self, capability: str, inputs: dict[str, Any]) -> dict[str, Any]:
         callback = self._internal_callbacks.get(capability)

@@ -52,6 +52,21 @@ capabilities:
     description: Compose tomorrow's appointments, tonight's reminders, and recent alerts.
     side_effects: false
     cost: medium
+  - id: infer_sleep_summary
+    description: Infer last night's sleep quality from HealthKit sleep rows and bedroom observer events, then return a Telegram confirmation keyboard.
+    inputs: { member_id: "integer?", night_of: "string?", detected_at: "string?" }
+    side_effects: true
+    cost: low
+  - id: confirm_sleep_summary
+    description: Confirm or correct a sleep quality inference from a Telegram quick-reply.
+    inputs: { sleep_summary_id: integer, quality: string, chat_id: "integer?" }
+    side_effects: true
+    cost: low
+  - id: late_bedtime_check
+    description: Check whether bedroom observer signals are still active after the member's usual bedtime and suggest a wind-down action.
+    inputs: { member_id: "integer?", observed_at: "string?", grace_minutes: "integer?" }
+    side_effects: false
+    cost: low
   - id: infer
     description: Infer one conservative episodic memory from the user's context and recent events, returning a proposed action for confirmation.
     inputs: { context: string }
