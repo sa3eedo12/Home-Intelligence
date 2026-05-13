@@ -58,5 +58,5 @@ capabilities:
 subscribes:
   - events.home
 publishes:
-  - events.system
+  # Chore due events are user notifications, not system-health signals.
   - notify.outbound

@@ -8,6 +8,8 @@ from home_agents_sdk.telemetry import get_logger
 
 from tools.core import _pool
 
+from . import publish_helper
+
 logger = get_logger("knowledge_notes.registry")
 
 
@@ -54,6 +56,15 @@ async def put_thing(
         confidence=confidence,
         source=source,
     )
+    if thing is not None:
+        await publish_helper.publish_memory_update(
+            update_type="registry.thing.put",
+            capability="things.put",
+            entity_kind="thing",
+            action="put",
+            thing_id=thing.get("id") if isinstance(thing, dict) else None,
+            thing=thing,
+        )
     return {"ok": thing is not None, "thing": thing}
 
 
@@ -63,6 +74,14 @@ async def forget_thing(thing_id: int) -> dict[str, Any]:
     if store is None:
         return {"ok": False, "error": "knowledge_graph_unavailable"}
     deleted = await store.forget_thing(thing_id)
+    if deleted:
+        await publish_helper.publish_memory_update(
+            update_type="registry.thing.forget",
+            capability="things.forget",
+            entity_kind="thing",
+            action="forget",
+            thing_id=thing_id,
+        )
     return {"ok": True, "deleted": deleted, "thing_id": thing_id}
 
 
@@ -72,6 +91,15 @@ async def confirm_thing(thing_id: int) -> dict[str, Any]:
     if store is None:
         return {"ok": False, "error": "knowledge_graph_unavailable"}
     thing = await store.confirm_thing(thing_id)
+    if thing is not None:
+        await publish_helper.publish_memory_update(
+            update_type="registry.thing.confirm",
+            capability="things.confirm",
+            entity_kind="thing",
+            action="confirm",
+            thing_id=thing_id,
+            thing=thing,
+        )
     return {"ok": thing is not None, "thing": thing}
 
 
@@ -110,6 +138,15 @@ async def put_member(
         wake_time=wake_time,
         attributes=attributes,
     )
+    if member is not None:
+        await publish_helper.publish_memory_update(
+            update_type="registry.member.put",
+            capability="members.put",
+            entity_kind="member",
+            action="put",
+            member_id=member.get("id") if isinstance(member, dict) else None,
+            member=member,
+        )
     return {"ok": member is not None, "member": member}
 
 
@@ -119,6 +156,13 @@ async def forget_member(member_id: int) -> dict[str, Any]:
     if store is None:
         return {"ok": False, "error": "knowledge_graph_unavailable"}
     await store.forget_member(member_id)
+    await publish_helper.publish_memory_update(
+        update_type="registry.member.forget",
+        capability="members.forget",
+        entity_kind="member",
+        action="forget",
+        member_id=member_id,
+    )
     return {"ok": True, "member_id": member_id}
 
 

@@ -13,6 +13,8 @@ import psutil
 import yaml
 from home_agents_sdk import tool
 
+from . import publish_helper
+
 
 @tool("disk_usage")
 def disk_usage(threshold_pct: float = 85.0) -> dict[str, Any]:
@@ -126,8 +128,7 @@ def find_duplicates(path: str | None = None) -> dict[str, Any]:
     return {"groups": groups, "reclaimable_bytes": reclaimable}
 
 
-@tool("validate_backup")
-def validate_backup(config_path: str = "/etc/storage_backup/backup_targets.yaml") -> dict[str, Any]:
+def _validate_backup_config(config_path: str) -> dict[str, Any]:
     config_file = Path(config_path)
     if not config_file.exists():
         return {"ok": False, "error": f"missing config: {config_path}"}
@@ -139,7 +140,14 @@ def validate_backup(config_path: str = "/etc/storage_backup/backup_targets.yaml"
         max_age_hours = int(backup.get("max_age_hours", 36))
         globs = backup.get("expect_globs", [])
         if not bpath.exists() or not bpath.is_dir():
-            checks.append({"name": backup.get("name"), "ok": False, "error": "missing path"})
+            checks.append(
+                {
+                    "name": backup.get("name"),
+                    "path": str(bpath),
+                    "ok": False,
+                    "error": "missing path",
+                }
+            )
             all_ok = False
             continue
 
@@ -157,13 +165,93 @@ def validate_backup(config_path: str = "/etc/storage_backup/backup_targets.yaml"
         checks.append(
             {
                 "name": backup.get("name"),
+                "path": str(bpath),
                 "ok": ok,
                 "age_hours": round(age_hours, 2),
+                "max_age_hours": max_age_hours,
                 "entries": len(entries),
+                "glob_ok": glob_ok,
             }
         )
         all_ok = all_ok and ok
     return {"ok": all_ok, "checks": checks}
+
+
+def _backup_warning_events(result: dict[str, Any], config_path: str) -> list[dict[str, Any]]:
+    if result.get("ok"):
+        return []
+    if result.get("error"):
+        return [
+            {
+                "metric": "backup.config",
+                "value": "missing",
+                "threshold": "present",
+                "summary": str(result["error"]),
+                "config_path": config_path,
+            }
+        ]
+
+    events: list[dict[str, Any]] = []
+    for check in result.get("checks", []):
+        if check.get("ok"):
+            continue
+        name = check.get("name") or check.get("path") or "backup"
+        common = {"backup": name, "path": check.get("path"), "check": check}
+        if check.get("error") == "missing path":
+            events.append(
+                {
+                    **common,
+                    "metric": "backup.path",
+                    "value": "missing",
+                    "threshold": "present",
+                    "summary": f"Backup path missing for {name}.",
+                }
+            )
+        elif float(check.get("age_hours") or 0.0) > float(check.get("max_age_hours") or 0.0):
+            events.append(
+                {
+                    **common,
+                    "metric": "backup.age_hours",
+                    "value": check.get("age_hours"),
+                    "threshold": check.get("max_age_hours"),
+                    "summary": f"Backup {name} is {check.get('age_hours')} hours old.",
+                }
+            )
+        elif int(check.get("entries") or 0) == 0:
+            events.append(
+                {
+                    **common,
+                    "metric": "backup.entries",
+                    "value": 0,
+                    "threshold": ">0",
+                    "summary": f"Backup {name} has no files.",
+                }
+            )
+        elif check.get("glob_ok") is False:
+            events.append(
+                {
+                    **common,
+                    "metric": "backup.expected_globs",
+                    "value": "missing",
+                    "threshold": "present",
+                    "summary": f"Backup {name} is missing expected files.",
+                }
+            )
+    return events
+
+
+async def _publish_backup_warnings(result: dict[str, Any], config_path: str) -> None:
+    for event in _backup_warning_events(result, config_path):
+        await publish_helper.publish_metric_breach(severity="warn", **event)
+
+
+@tool("validate_backup")
+async def validate_backup(
+    config_path: str = "/etc/storage_backup/backup_targets.yaml",
+) -> dict[str, Any]:
+    result = _validate_backup_config(config_path)
+    await _publish_backup_warnings(result, config_path)
+    return result
 
 
 @tool("cleanup_suggestions")
@@ -186,11 +274,23 @@ def cleanup_suggestions(path: str | None = None) -> dict[str, Any]:
 
 
 @tool("summarize_storage")
-def summarize_storage() -> dict[str, str]:
-    usage = disk_usage()["items"]
+async def summarize_storage() -> dict[str, str]:
+    threshold_pct = 90.0
+    usage = disk_usage(threshold_pct=threshold_pct)["items"]
     high = [u for u in usage if u["is_high"]]
-    msg = f"Storage mounts: {len(usage)} total; {len(high)} above 85%."
+    msg = f"Storage mounts: {len(usage)} total; {len(high)} above {threshold_pct:.0f}%."
     if high:
         details = ", ".join(f"{u['mount']} {u['used_pct']:.1f}%" for u in high[:3])
         msg = f"{msg} High usage: {details}"
+        for item in high[:5]:
+            await publish_helper.publish_metric_breach(
+                metric="disk.used_pct",
+                value=round(float(item["used_pct"]), 1),
+                threshold=threshold_pct,
+                severity="warn",
+                summary=f"Disk {item['mount']} is {item['used_pct']:.1f}% full.",
+                mount=item["mount"],
+                free=item.get("free"),
+                total=item.get("total"),
+            )
     return {"summary": msg[:600]}

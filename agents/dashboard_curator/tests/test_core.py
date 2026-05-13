@@ -194,3 +194,22 @@ async def test_summarize_alerts_filters_by_severity_and_window(fake_redis, monke
     result = await summarize_alerts(window_minutes=30)
     assert result["alert_count"] == 1
     assert "1 alert" in result["narrative"]
+
+
+@pytest.mark.asyncio
+async def test_summarize_activity_publishes_dashboard_update(fake_redis, monkeypatch) -> None:
+    await _seed_activity(fake_redis, [_make_event("home_automation", "ok")])
+
+    async def _no_llm(_window, _agg):
+        return None
+
+    monkeypatch.setattr(core_module, "_llm_narrative", _no_llm)
+
+    await summarize_activity(window_minutes=15)
+
+    rows = await fake_redis.xrange(core_module.DASHBOARD_STREAM)
+    assert len(rows) == 1
+    payload = json.loads(rows[0][1]["payload"])
+    assert payload["type"] == "activity.summary"
+    assert payload["agent"] == "dashboard_curator"
+    assert payload["record"]["stats"]["total_events"] == 1

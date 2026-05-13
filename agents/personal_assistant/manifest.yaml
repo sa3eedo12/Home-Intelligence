@@ -62,5 +62,5 @@ subscribes:
   - events.system
   - events.home
 publishes:
+  # Personal reminder context emits notifications; system events are health/storage-owned.
   - notify.outbound
-  - events.system

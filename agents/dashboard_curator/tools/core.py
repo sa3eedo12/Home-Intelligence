@@ -14,6 +14,7 @@ from redis.asyncio import Redis
 logger = get_logger("dashboard_curator")
 
 ACTIVITY_STREAM = "events.activity"
+DASHBOARD_STREAM = "dashboard.updates"
 NOTIFY_HISTORY = "policy:recent"
 NARRATIVE_KEY = "dashboard:narrative"
 ALERT_NARRATIVE_KEY = "dashboard:alert_narrative"
@@ -67,6 +68,21 @@ async def _read_recent_notifications(client: Redis, limit: int = 50) -> list[dic
         except (TypeError, ValueError):
             continue
     return out
+
+
+async def _publish_dashboard_update(
+    client: Redis, update_type: str, record: dict[str, Any]
+) -> None:
+    payload = {
+        "type": update_type,
+        "agent": "dashboard_curator",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "record": record,
+    }
+    try:
+        await client.xadd(DASHBOARD_STREAM, {"payload": json.dumps(payload, default=str)})
+    except Exception as exc:
+        logger.warning("dashboard_update_publish_failed", error=str(exc), update_type=update_type)
 
 
 def _aggregate(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -173,6 +189,7 @@ async def summarize_activity(window_minutes: int = 15) -> dict[str, Any]:
             "stats": agg,
         }
         await client.set(NARRATIVE_KEY, json.dumps(record), ex=NARRATIVE_TTL_SECONDS)
+        await _publish_dashboard_update(client, "activity.summary", record)
         return record
     finally:
         await client.aclose()
@@ -242,6 +259,7 @@ async def summarize_alerts(window_minutes: int = 60) -> dict[str, Any]:
             "alert_count": len(relevant),
         }
         await client.set(ALERT_NARRATIVE_KEY, json.dumps(record), ex=NARRATIVE_TTL_SECONDS)
+        await _publish_dashboard_update(client, "alerts.summary", record)
         return record
     finally:
         await client.aclose()

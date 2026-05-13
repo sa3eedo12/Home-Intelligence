@@ -133,4 +133,4 @@ subscribes:
   - memory.updates
 publishes:
   - memory.updates
-  - notify.outbound
+  # User-facing notifications are orchestrated elsewhere, not emitted by registry writes.
