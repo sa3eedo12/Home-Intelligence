@@ -146,7 +146,25 @@ def test_recent_and_aggregate_validate_inputs() -> None:
 
     assert recent.status_code == 200
     assert recent.json()["count"] == 1
+    assert recent.json()["limit"] == 20
     app.state.health_store.list_recent.assert_awaited_once_with(metric="steps", hours=12)
     assert aggregate.status_code == 200
     app.state.health_store.aggregate_daily.assert_awaited_once_with("steps", days=7)
     assert bad.status_code == 400
+
+
+def test_recent_honors_limit_parameter() -> None:
+    app = _app()
+    app.state.health_store = SimpleNamespace(
+        list_recent=AsyncMock(
+            return_value=[{"metric": "steps", "value": 1}, {"metric": "weight", "value": 80}]
+        )
+    )
+
+    with TestClient(app) as client:
+        recent = client.get("/admin/healthkit/recent?limit=1")
+
+    assert recent.status_code == 200
+    assert recent.json()["limit"] == 1
+    assert recent.json()["count"] == 1
+    assert recent.json()["items"] == [{"metric": "steps", "value": 1}]

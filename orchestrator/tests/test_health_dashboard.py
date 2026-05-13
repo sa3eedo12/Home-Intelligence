@@ -67,5 +67,10 @@ def test_health_dashboard_renders_with_synthetic_data() -> None:
     assert "12,453 metrics in store" in resp.text
     assert "running" in resp.text
     assert "How to set up Health Auto Export" in resp.text
+    assert "Recent raw metrics" in resp.text
+    assert "7-day aggregates" in resp.text
+    assert "healthkit-test-btn" in resp.text
+    assert "No HealthKit data yet" not in resp.text  # rendered by JS when the API is empty
+    assert "/static/_app.js" in resp.text
     assert "/static/health.css" in resp.text
     assert "/static/health.js" in resp.text
