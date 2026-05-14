@@ -274,17 +274,42 @@ def _classify_device(
     """Given a device + all its child entity_ids, return (thing_type, primary_eid).
 
     Strategy:
-      1. Look for a "primary" entity by domain — climate.* / vacuum.* / lock.* /
+      1. Personal Apple/Android devices by HA manufacturer + model.
+      2. "Primary" entity by domain — climate.* / vacuum.* / lock.* /
          light.* / cover.* / camera.* control the device, so they're the
          natural primary.
-      2. Otherwise look for the appliance-state sensors used by observers.
-      3. Otherwise look for motion / occupancy / doorbell signals.
-      4. Fall back to per-entity classification with the first matching one.
+      3. Otherwise look for the appliance-state sensors used by observers.
+      4. Otherwise look for motion / occupancy / doorbell signals.
+      5. Fall back to per-entity classification with the first matching one.
     """
     by_domain: dict[str, list[str]] = {}
     for eid in entity_ids:
         domain = eid.split(".", 1)[0] if "." in eid else ""
         by_domain.setdefault(domain, []).append(eid)
+
+    # Tier 0: personal devices identified by HA manufacturer/model. Apple gives
+    # us "Apple" / "iPhone17,2" etc, so we can map confidently.
+    if device is not None:
+        mfr = (device.get("manufacturer") or "").lower()
+        model = (device.get("model") or "").lower()
+        name = (device.get("name") or device.get("name_by_user") or "").lower()
+        haystack = f"{mfr} {model} {name}"
+        if "iphone" in haystack:
+            primary = next(
+                (eid for eid in entity_ids if eid.startswith("device_tracker.")),
+                sorted(entity_ids)[0] if entity_ids else "",
+            )
+            return "device.phone", primary
+        if "ipad" in haystack:
+            primary = next(
+                (eid for eid in entity_ids if eid.startswith("device_tracker.")),
+                sorted(entity_ids)[0] if entity_ids else "",
+            )
+            return "device.tablet", primary
+        if "watch" in haystack and ("apple" in haystack or "samsung" in haystack):
+            return "device.watch", sorted(entity_ids)[0]
+        if "macbook" in haystack or "imac" in haystack:
+            return "device.laptop", sorted(entity_ids)[0]
 
     # Tier 1: domains that represent the device itself (controllable surfaces).
     DOMAIN_PRIORITY = (
