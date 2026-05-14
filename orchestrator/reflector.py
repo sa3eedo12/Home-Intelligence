@@ -41,6 +41,68 @@ USER_PROFILE_TEMPLATE: dict[str, str] = {
     "privacy_preferences": "Data the assistant should avoid storing or should forget quickly.",
 }
 
+# Conversational versions of the gap questions, used when the LLM hasn't generated
+# personalized questions. The mechanical "Should I learn your X?" felt robotic;
+# these phrasings invite a short reply.
+GAP_QUESTION_PHRASING: dict[str, str] = {
+    "wake_time": "What time do you usually wake up on weekdays?",
+    "sleep_time": "What time do you usually try to be asleep by?",
+    "work_hours": (
+        "What does your typical work week look like — when do you usually start and stop?"
+    ),
+    "wake_time_observed": (
+        "I don't have your sleep data from Apple Health yet. "
+        "Want to set up the Mac bridge so I can learn your real wake times?"
+    ),
+    "sleep_time_observed": (
+        "I'm not getting your Apple Health sleep data. "
+        "Once it's connected I can learn your actual sleep window."
+    ),
+    "daily_step_target": "Do you have a daily step goal you'd like me to nudge you toward?",
+    "last_workout_at": "When was your last workout, and what kind?",
+    "allergies": "Any allergies I should remember when I help with meals or shopping?",
+    "dietary_restrictions": "Any foods you avoid, or nutrition goals I should know about?",
+    "household_members": (
+        "Who else lives with you? I'd like to know their names so I can keep track."
+    ),
+    "household_size": "How many people (and pets) live in the household total?",
+    "pets": "Do you have any pets? Names and what they eat would help me with reminders.",
+    "favorite_cuisines": (
+        "What kinds of food do you usually like? I can use this for meal suggestions."
+    ),
+    "music_preferences": (
+        "Any music styles you usually want playing — and times you'd rather have it quiet?"
+    ),
+    "hvac_preferences": (
+        "What temperature do you like the house at? Different for day vs. night?"
+    ),
+    "lighting_preferences": (
+        "Any lighting preferences — bright in the morning, dim in the evening, scenes?"
+    ),
+    "notification_preferences": (
+        "Want to tell me which things deserve a Telegram ping "
+        "vs. just sitting on the dashboard?"
+    ),
+    "chores_routine": (
+        "Any chores you do on a regular schedule (laundry day, vacuum day, etc.)?"
+    ),
+    "shopping_preferences": (
+        "Which stores and brands do you prefer, and what should I auto-reorder?"
+    ),
+    "privacy_preferences": (
+        "Anything you'd rather I don't track, store, or surface in the dashboard?"
+    ),
+}
+
+
+def _phrase_gap_question(key: str, fallback: str | None = None) -> str:
+    return GAP_QUESTION_PHRASING.get(
+        key, f"Should I learn your {key.replace('_', ' ')}?" if not fallback else fallback
+    )
+
+
+
+
 SYSTEM_PROMPT = """You are the Home Intelligence nightly reflector.
 You audit a local-first multi-agent home assistant and propose small self-improvements.
 Return ONLY compact JSON as a list of proposal objects in this exact shape:
@@ -634,7 +696,7 @@ class NightlyReflector:
         if not questions:
             questions = [
                 {
-                    "title": f"Should I learn your {gap['key'].replace('_', ' ')}?",
+                    "title": _phrase_gap_question(gap["key"]),
                     "kind": "knowledge_gap",
                     "evidence_keys": [gap["key"]],
                     "rationale": gap["description"],
