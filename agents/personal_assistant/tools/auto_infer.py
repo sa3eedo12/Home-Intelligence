@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -20,7 +22,7 @@ SKIP_KINDS = {
     "cleaning.completed",
     "presence.changed",
 }
-MIN_CONFIDENCE = 0.6
+DEFAULT_MIN_CONFIDENCE = 0.5
 DEFAULT_HOURLY_CAP = 5
 UNUSUAL_TERMS = (
     "unusual",
@@ -39,6 +41,22 @@ UNUSUAL_TERMS = (
     "late",
     "early",
 )
+
+
+def _min_confidence() -> float:
+    """Floor for accepting an inference. Below this it's logged, not saved.
+
+    Was hardcoded to 0.6 before but the LLM prompt biases the model toward
+    sub-0.6 outputs ("Set confidence below 0.6 unless..."), so almost
+    everything was silently gated out. 0.5 default + env override gives
+    operators a way to tune without redeploying.
+    """
+    raw = os.getenv("AUTO_INFER_MIN_CONFIDENCE", str(DEFAULT_MIN_CONFIDENCE))
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MIN_CONFIDENCE
+    return max(0.0, min(value, 1.0))
 
 
 async def _auto_store() -> AutoInferencesStore:
@@ -153,6 +171,125 @@ def _summary_for(inference: str, envelope: dict[str, Any], reason: str) -> str:
     return f"🤔 Did you just {compact}? (auto-inferred from {source} signals)"
 
 
+# ── Rule-based inferences ────────────────────────────────────────────────
+#
+# The LLM path is unreliable for known observer kinds: the model's prompt
+# biases it toward sub-threshold confidences and even the responses we DO
+# get are vague paraphrases ("maybe someone went to bed"). For events whose
+# meaning is *deterministic* — TV left on for 6h means TV was left on, full
+# stop — skip the LLM entirely and emit a high-confidence inference straight
+# from the envelope. The LLM stays as the fallback for novel kinds.
+#
+# Each producer takes the envelope and returns ``(inference, confidence,
+# rule_id)`` if it can interpret the event, or ``None`` to defer to the LLM.
+
+RuleProducer = Callable[[dict[str, Any]], "tuple[str, float, str] | None"]
+
+
+def _hh_mm(ts: Any) -> str:
+    if not isinstance(ts, str):
+        return ""
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    return parsed.strftime("%H:%M")
+
+
+def _coerce_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _entertainment_left_on_rule(envelope: dict[str, Any]) -> tuple[str, float, str] | None:
+    payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+    name = (
+        payload.get("friendly_name")
+        or payload.get("entity_id")
+        or "the TV"
+    )
+    on_hours = _coerce_float(payload.get("on_hours"))
+    reason = str(payload.get("reason") or "").strip()
+    suffix = ""
+    if reason == "past_bedtime":
+        suffix = " past your usual bedtime"
+    elif reason == "nobody_home":
+        suffix = " while nobody was home"
+    if on_hours is not None and on_hours >= 1.0:
+        text = f"left {name} on for {on_hours:.1f}h{suffix}"
+    else:
+        text = f"left {name} on{suffix}"
+    return text, 0.85, "rule:entertainment.left_on"
+
+
+def _sleep_likely_asleep_rule(envelope: dict[str, Any]) -> tuple[str, float, str] | None:
+    when = _hh_mm(envelope.get("ts")) or "tonight"
+    return f"went to bed around {when}", 0.7, "rule:sleep.likely_asleep"
+
+
+def _sleep_likely_awake_rule(envelope: dict[str, Any]) -> tuple[str, float, str] | None:
+    when = _hh_mm(envelope.get("ts")) or "this morning"
+    return f"woke up around {when}", 0.7, "rule:sleep.likely_awake"
+
+
+def _anomaly_detected_rule(envelope: dict[str, Any]) -> tuple[str, float, str] | None:
+    summary = str(envelope.get("summary") or "").strip().rstrip(".")
+    if not summary:
+        return None
+    return f"saw something unusual: {summary}", 0.65, "rule:anomaly.detected"
+
+
+RULE_BASED_INFERENCES: dict[str, RuleProducer] = {
+    "entertainment.left_on": _entertainment_left_on_rule,
+    "sleep.likely_asleep": _sleep_likely_asleep_rule,
+    "sleep.likely_awake": _sleep_likely_awake_rule,
+    "anomaly.detected": _anomaly_detected_rule,
+}
+
+
+def _rule_based_inference(
+    envelope: dict[str, Any],
+) -> tuple[str, float, str] | None:
+    """Return the deterministic inference for ``envelope.kind``, if any."""
+    kind = str(envelope.get("kind") or "").strip()
+    producer = RULE_BASED_INFERENCES.get(kind)
+    if producer is None:
+        return None
+    try:
+        return producer(envelope)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("auto_infer_rule_failed", kind=kind, error=str(exc))
+        return None
+
+
+def _build_record_event_action(
+    inference: str, envelope: dict[str, Any], rule_id: str
+) -> dict[str, Any]:
+    """Build a `_safe_record_event_action`-compliant action for an inference.
+
+    The schema mirrors what the LLM is supposed to emit — keeping the same
+    downstream contract (`knowledge_notes.record_event`) means rule-based
+    and LLM-derived inferences flow through the same confirmation +
+    persistence path.
+    """
+    return {
+        "agent": "knowledge_notes",
+        "capability": "record_event",
+        "payload": {
+            "agent": "personal_assistant",
+            "capability": "inferred_event",
+            "summary": inference,
+            "payload": {
+                "source": rule_id,
+                "source_kind": str(envelope.get("kind") or "observer.unknown"),
+                "source_summary": str(envelope.get("summary") or "")[:300],
+            },
+        },
+    }
+
+
 def _keyboard_for(auto_inference_id: int) -> list[list[dict[str, str]]]:
     return [
         [
@@ -231,8 +368,12 @@ def _action_succeeded(result: dict[str, Any]) -> bool:
 
 @tool("auto_infer_observer_event", side_effects=True)
 async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
+    source_kind = str(envelope.get("kind") or "observer.unknown")
     should_run, reason = _worth_inferring(envelope)
     if not should_run:
+        logger.info(
+            "auto_infer_skipped", source_kind=source_kind, reason=reason, stage="worth_check"
+        )
         return {"ok": True, "skipped": True, "reason": reason}
 
     try:
@@ -244,25 +385,54 @@ async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
 
     cap = _hourly_cap()
     if cap == 0 or recent_count >= cap:
+        logger.info(
+            "auto_infer_skipped",
+            source_kind=source_kind,
+            reason="rate_limit",
+            recent_count=recent_count,
+            cap=cap,
+        )
         return {"ok": True, "skipped": True, "reason": "rate_limit"}
 
-    try:
-        inference_result = await infer_tool.infer(_context_for_infer(envelope, reason))
-    except Exception as exc:
-        logger.warning("auto_infer_infer_failed", error=str(exc))
-        return {"ok": True, "skipped": True, "reason": "infer_failed"}
+    # Try the deterministic rule path first; fall back to the LLM only for
+    # observer kinds we don't have a hand-coded interpretation for. This is
+    # what closes the auto_inferences=0 gap — the LLM's prompt is biased
+    # toward refusing every event, but for known kinds we don't need it at all.
+    rule = _rule_based_inference(envelope)
+    if rule is not None:
+        inference, confidence, rule_id = rule
+        proposed_action = _build_record_event_action(inference, envelope, rule_id)
+        inference_source = rule_id
+    else:
+        try:
+            inference_result = await infer_tool.infer(_context_for_infer(envelope, reason))
+        except Exception as exc:
+            logger.warning("auto_infer_infer_failed", error=str(exc))
+            return {"ok": True, "skipped": True, "reason": "infer_failed"}
+        try:
+            confidence = max(0.0, min(float(inference_result.get("confidence") or 0.0), 1.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        inference = str(inference_result.get("inference") or "").strip()
+        proposed_action = _normalize_action(inference_result.get("proposed_action"))
+        inference_source = "llm"
 
-    try:
-        confidence = max(0.0, min(float(inference_result.get("confidence") or 0.0), 1.0))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    inference = str(inference_result.get("inference") or "").strip()
-    proposed_action = _normalize_action(inference_result.get("proposed_action"))
+    min_conf = _min_confidence()
     if (
-        confidence < MIN_CONFIDENCE
+        confidence < min_conf
         or not inference
         or not _safe_record_event_action(proposed_action)
     ):
+        logger.info(
+            "auto_infer_skipped",
+            source_kind=source_kind,
+            reason="confidence_gate",
+            inference_source=inference_source,
+            confidence=confidence,
+            min_confidence=min_conf,
+            has_inference=bool(inference),
+            has_action=_safe_record_event_action(proposed_action),
+        )
         return {
             "ok": True,
             "skipped": True,
@@ -270,9 +440,8 @@ async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
             "confidence": confidence,
         }
 
-    source_kind = str(envelope.get("kind") or "observer.unknown")
     reasoning = (
-        f"auto-inference classifier reason={reason}; "
+        f"auto-inference source={inference_source} reason={reason}; "
         f"source_summary={str(envelope.get('summary') or '')[:300]}"
     )
     auto_inference_id = await store.insert(
@@ -284,8 +453,16 @@ async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
         proposed_action=proposed_action,
     )
     if auto_inference_id is None:
+        logger.warning("auto_infer_insert_failed", source_kind=source_kind)
         return {"ok": True, "skipped": True, "reason": "store_insert_failed"}
 
+    logger.info(
+        "auto_infer_persisted",
+        source_kind=source_kind,
+        inference_source=inference_source,
+        confidence=confidence,
+        auto_inference_id=auto_inference_id,
+    )
     return {
         "ok": True,
         "summary": _summary_for(inference, envelope, reason),
