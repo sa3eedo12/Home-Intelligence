@@ -21,6 +21,7 @@ MAX_TRACKED_ENTITIES = 256
 MAX_TRACKED_PRESENCE = 256
 DEFAULT_MAX_ON_HOURS = 6.0
 DEFAULT_COOLDOWN = timedelta(hours=6)
+DEFAULT_WAKE_TIME = time(7, 0)
 SLEEP_TIME_CACHE_TTL = timedelta(minutes=5)
 MEDIA_ON_STATES = {"on", "playing", "paused", "idle", "buffering"}
 DEVICE_ON_STATES = MEDIA_ON_STATES | {"active", "running"}
@@ -43,7 +44,8 @@ class TvObserver(Observer):
         *,
         max_on_hours: float | None = None,
         cooldown: timedelta | None = None,
-        sleep_times: list[time | str] | None = None,
+        sleep_times: list[time | str | tuple[time | str | None, time | str | None]]
+        | None = None,
     ) -> None:
         super().__init__()
         self.max_on_hours = (
@@ -56,8 +58,7 @@ class TvObserver(Observer):
         self._presence_states: OrderedDict[str, str] = OrderedDict()
         self._recent_completions: OrderedDict[str, datetime] = OrderedDict()
         self._static_sleep_times = sleep_times is not None
-        self._sleep_times = [_parse_time(value) for value in sleep_times or []]
-        self._sleep_times = [value for value in self._sleep_times if value is not None]
+        self._sleep_windows: list[tuple[time, time]] = _normalize_sleep_windows(sleep_times)
         self._sleep_times_loaded_at: datetime | None = None
 
     async def handle(self, payload: dict[str, Any]) -> None:
@@ -133,30 +134,30 @@ class TvObserver(Observer):
         )
 
     async def _past_bedtime(self, now: datetime) -> bool:
-        sleep_times = await self._load_sleep_times(now)
-        if not sleep_times:
+        windows = await self._load_sleep_times(now)
+        if not windows:
             return False
         local_now = now.astimezone(_local_tz()).time().replace(tzinfo=None)
-        return any(_time_is_past_bedtime(local_now, sleep_time) for sleep_time in sleep_times)
+        return any(_time_is_in_sleep_window(local_now, sleep, wake) for sleep, wake in windows)
 
-    async def _load_sleep_times(self, now: datetime) -> list[time]:
+    async def _load_sleep_times(self, now: datetime) -> list[tuple[time, time]]:
         if self._static_sleep_times:
-            return list(self._sleep_times)
+            return list(self._sleep_windows)
         if (
             self._sleep_times_loaded_at is not None
             and now - self._sleep_times_loaded_at < SLEEP_TIME_CACHE_TTL
         ):
-            return list(self._sleep_times)
+            return list(self._sleep_windows)
         pool = getattr(self.event_log_store, "pool", None)
         if pool is None:
-            self._sleep_times = []
+            self._sleep_windows = []
             self._sleep_times_loaded_at = now
             return []
         try:
             async with pool.acquire() as conn:
                 rows = await conn.fetch(
                     """
-                    SELECT sleep_time
+                    SELECT sleep_time, wake_time
                     FROM household_members
                     WHERE sleep_time IS NOT NULL
                       AND role <> 'pet'
@@ -164,17 +165,18 @@ class TvObserver(Observer):
                 )
         except Exception as exc:  # noqa: BLE001
             self.logger.warning("tv_sleep_times_query_failed", error=str(exc))
-            self._sleep_times = []
+            self._sleep_windows = []
             self._sleep_times_loaded_at = now
             return []
-        sleep_times: list[time] = []
+        windows: list[tuple[time, time]] = []
         for row in rows:
-            value = _parse_time(row["sleep_time"])
-            if value is not None:
-                sleep_times.append(value)
-        self._sleep_times = sleep_times
+            sleep = _parse_time(row["sleep_time"])
+            wake = _parse_time(row["wake_time"]) or DEFAULT_WAKE_TIME
+            if sleep is not None:
+                windows.append((sleep, wake))
+        self._sleep_windows = windows
         self._sleep_times_loaded_at = now
-        return list(self._sleep_times)
+        return list(self._sleep_windows)
 
     def _recently_completed(self, entity_id: str, now: datetime) -> bool:
         device = device_key_for(entity_id)
@@ -242,11 +244,46 @@ def _presence_state(state: str | None) -> str | None:
     return None
 
 
-def _time_is_past_bedtime(now_time: time, sleep_time: time) -> bool:
-    evening_bedtime = sleep_time >= time(18, 0)
-    if evening_bedtime:
-        return now_time >= sleep_time or now_time < time(6, 0)
-    return now_time >= sleep_time
+def _time_is_in_sleep_window(now_time: time, sleep_time: time, wake_time: time) -> bool:
+    """True if ``now_time`` falls inside the [sleep_time, wake_time) window.
+
+    Handles midnight crossings: a window like (23:00, 07:00) means "asleep
+    from 23:00 through 07:00 the next morning". A window like (00:30, 09:00)
+    (sleep < wake on the same clock face) means "asleep from 00:30 to 09:00";
+    the user is NOT considered "past bedtime" at, say, 18:42 of the previous
+    evening — bedtime is still hours away. The old code mistakenly treated
+    any sleep_time < 18:00 as a "morning bedtime" and triggered immediately
+    past that wall-clock time.
+    """
+    if sleep_time == wake_time:
+        return False
+    if sleep_time < wake_time:
+        return sleep_time <= now_time < wake_time
+    # sleep_time > wake_time: window crosses midnight (e.g. 23:00 → 07:00)
+    return now_time >= sleep_time or now_time < wake_time
+
+
+def _normalize_sleep_windows(
+    raw: list[time | str | tuple[time | str | None, time | str | None]] | None,
+) -> list[tuple[time, time]]:
+    """Accept the same shapes the constructor and DB row produce.
+
+    Each entry may be either a bedtime alone (legacy ``time`` / ISO string),
+    which is paired with the default wake time (``07:00``), or an explicit
+    ``(sleep_time, wake_time)`` tuple. Missing wake times default to
+    ``DEFAULT_WAKE_TIME``. Invalid entries are dropped.
+    """
+    windows: list[tuple[time, time]] = []
+    for entry in raw or []:
+        if isinstance(entry, tuple):
+            sleep = _parse_time(entry[0])
+            wake = _parse_time(entry[1]) or DEFAULT_WAKE_TIME
+        else:
+            sleep = _parse_time(entry)
+            wake = DEFAULT_WAKE_TIME
+        if sleep is not None:
+            windows.append((sleep, wake))
+    return windows
 
 
 def _parse_time(raw: time | str | None) -> time | None:
