@@ -1,34 +1,36 @@
 # Mac-side bridges → Home Intelligence
 
-Two paths for getting Apple Health data into the TrueNAS orchestrator
-without exposing it to the public internet. The free path lives in
-`../ios/healthkit-shortcut/` since macOS has no Health app — only iOS
-can read HealthKit directly.
+Three paths for getting Apple Health data into the TrueNAS orchestrator
+without exposing it to the public internet. Pick whichever fits your
+budget and tolerance for one-time setup.
 
-| Path                                                    | Cost            | Mac required | Where it runs              |
-|---------------------------------------------------------|-----------------|--------------|----------------------------|
-| [`../ios/healthkit-shortcut/`](../ios/healthkit-shortcut/) | **$0 (free)**   | No           | iOS Shortcut on iPhone     |
-| [`./healthkit-bridge/`](./healthkit-bridge/)            | ~$5 (iOS IAP)   | Yes          | Mac forwards iCloud files  |
+| Path                                                               | Cost                          | Apple Dev acc. | Mac required |
+|--------------------------------------------------------------------|-------------------------------|----------------|--------------|
+| [`./healthkit-native/`](./healthkit-native/)                       | $0 (free Personal Team)       | **Required**   | Yes          |
+| [`../ios/healthkit-shortcut/`](../ios/healthkit-shortcut/)         | **$0 (free)**                 | No             | No           |
+| [`./healthkit-bridge/`](./healthkit-bridge/)                       | ~$5 (one-time iOS IAP)        | No             | Yes          |
 
-You can run **both** simultaneously — they POST to the same
+You can run **any combination** simultaneously — they all POST to the same
 `/admin/healthkit/sync` endpoint and the orchestrator dedupes by
 `(metric, timestamp, member_id)`.
 
 ## How they differ
 
+`./healthkit-native/` is a **signed macOS app** built once in Xcode that
+uses the HealthKit framework directly to read iCloud-synced health data
+on the Mac. Most reliable for background scheduling. Requires an Apple
+Developer account (free Personal Team is enough) and Xcode.
+
 `../ios/healthkit-shortcut/` is an **iOS Shortcut** you build once on
-your iPhone. It reads HealthKit, builds JSON, and POSTs directly to
-TrueNAS over your home WiFi via a Personal Automation that fires on
-schedule. No Mac involvement.
+your iPhone. Reads HealthKit, builds JSON, and POSTs directly to TrueNAS
+over your home WiFi via a Personal Automation. No Mac, no Xcode.
 
-`./healthkit-bridge/` is a Mac-side relay: the paid "Health Auto
-Export — JSON+CSV" iOS app dumps JSON files into iCloud Drive, and a
-launchd-scheduled Python script on an always-on Mac forwards those
-files to TrueNAS. Useful if you've already paid for Health Auto Export
-or if your iPhone is rarely on home WiFi (because the Mac queues via
-iCloud).
+`./healthkit-bridge/` is a Mac-side **iCloud Drive relay**: the paid
+"Health Auto Export — JSON+CSV" iOS app dumps JSON files into iCloud
+Drive, and a launchd-scheduled Python script on an always-on Mac
+forwards them to TrueNAS.
 
-## Common prerequisites (both paths)
+## Common prerequisites (all paths)
 
 - TrueNAS orchestrator reachable on your LAN at `http://<truenas>:8080`
 - `HEALTHKIT_WEBHOOK_TOKEN` set on TrueNAS — see step 2 in
