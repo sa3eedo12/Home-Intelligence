@@ -598,3 +598,35 @@ async def morning_brief(request: Request) -> HTMLResponse:
             "reflection_state": reflection_state,
         },
     )
+
+
+@router.get("/dashboard/proposals", response_class=HTMLResponse)
+async def proposals_page(
+    request: Request, status: str | None = None
+) -> HTMLResponse:
+    """Focused 'needs your decision' view of all proposals. Shows pending
+    cards by default with checkboxes + bulk Accept / Dismiss controls so
+    the user can clear the backlog in one round-trip."""
+    store = _reflection_store(request)
+    # Pull a wide window so the JS can client-side filter without a refetch.
+    proposals = await store.list_proposals(limit=500)
+    counts = {
+        "pending": 0,
+        "accepted": 0,
+        "dismissed": 0,
+        "auto_confirmed": 0,
+        "expired": 0,
+    }
+    for p in proposals:
+        s = str(p.get("status") or "")
+        if s in counts:
+            counts[s] += 1
+    return templates.TemplateResponse(
+        request=request,
+        name="proposals.html.j2",
+        context={
+            "proposals": proposals,
+            "counts": counts,
+            "initial_status_filter": status or "pending",
+        },
+    )

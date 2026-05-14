@@ -733,3 +733,131 @@ def test_profile_skip_writes_sentinel() -> None:
     _, kwargs = app.state.reflection_store.upsert_profile.call_args
     assert kwargs["source"] == "user_skipped"
     assert kwargs["confidence"] == 0.0
+
+
+# ── Proposal accept / dismiss endpoints ──────────────────────────────────
+
+
+def _proposals_app(initial_proposals: list[dict]) -> tuple[FastAPI, AsyncMock]:
+    """Build a minimal app with a stubbed reflection store that tracks
+    update_proposal_status calls."""
+    app = FastAPI()
+    app.include_router(router)
+    update_mock = AsyncMock()
+    app.state.reflection_store = SimpleNamespace(
+        list_proposals=AsyncMock(return_value=initial_proposals),
+        update_proposal_status=update_mock,
+        record_delivery=AsyncMock(),
+    )
+    return app, update_mock
+
+
+def test_accept_proposal_marks_pending_as_accepted() -> None:
+    app, update = _proposals_app(
+        [{"id": 11, "kind": "cleanup_action", "status": "pending"}]
+    )
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/11/accept")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload == {"ok": True, "proposal_id": 11, "status": "accepted"}
+    update.assert_awaited_once_with(11, "accepted", channel="dashboard")
+
+
+def test_accept_proposal_idempotent_when_already_accepted() -> None:
+    app, update = _proposals_app(
+        [{"id": 11, "kind": "cleanup_action", "status": "accepted"}]
+    )
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/11/accept")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "accepted"
+    update.assert_not_awaited()  # no update needed
+
+
+def test_accept_proposal_404_for_unknown_id() -> None:
+    app, _ = _proposals_app([])
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/99/accept")
+    assert resp.status_code == 404
+
+
+def test_dismiss_proposal_marks_pending_as_dismissed() -> None:
+    app, update = _proposals_app(
+        [{"id": 12, "kind": "code_change", "status": "pending"}]
+    )
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/12/dismiss")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "dismissed"
+    update.assert_awaited_once_with(12, "dismissed", channel="dashboard")
+
+
+def test_bulk_accept_processes_each_id_and_skips_already_accepted() -> None:
+    app, update = _proposals_app(
+        [
+            {"id": 1, "kind": "cleanup_action", "status": "pending"},
+            {"id": 2, "kind": "cleanup_action", "status": "accepted"},
+            {"id": 3, "kind": "cleanup_action", "status": "pending"},
+        ]
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/admin/proposals/bulk-accept", json={"ids": [1, 2, 3]}
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["accepted"] == 2  # 1 + 3 actually updated; 2 was skipped
+    assert update.await_count == 2
+    # Verify the right ids were updated
+    updated_ids = sorted(call.args[0] for call in update.await_args_list)
+    assert updated_ids == [1, 3]
+
+
+def test_bulk_accept_reports_per_id_errors_for_missing_ids() -> None:
+    app, _ = _proposals_app([{"id": 1, "kind": "cleanup_action", "status": "pending"}])
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/bulk-accept", json={"ids": [1, 99]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["accepted"] == 1
+    by_id = {r["id"]: r for r in body["results"]}
+    assert by_id[1]["ok"] is True
+    assert by_id[99]["ok"] is False
+    assert "Unknown proposal" in by_id[99]["error"]
+
+
+def test_bulk_dismiss_marks_all_pending_as_dismissed() -> None:
+    app, update = _proposals_app(
+        [
+            {"id": 4, "kind": "code_change", "status": "pending"},
+            {"id": 5, "kind": "code_change", "status": "pending"},
+        ]
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/admin/proposals/bulk-dismiss", json={"ids": [4, 5]}
+        )
+    assert resp.status_code == 200
+    assert resp.json()["dismissed"] == 2
+    assert update.await_count == 2
+    for call in update.await_args_list:
+        assert call.args[1] == "dismissed"
+        assert call.kwargs == {"channel": "dashboard"}
+
+
+def test_bulk_accept_400_on_empty_ids_list() -> None:
+    app, _ = _proposals_app([])
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/bulk-accept", json={"ids": []})
+    assert resp.status_code == 400
+
+
+def test_bulk_accept_400_on_non_integer_ids() -> None:
+    app, _ = _proposals_app([])
+    with TestClient(app) as client:
+        resp = client.post(
+            "/admin/proposals/bulk-accept", json={"ids": ["not-an-int"]}
+        )
+    assert resp.status_code == 400

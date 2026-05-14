@@ -1607,6 +1607,89 @@ async def dispatch_to_copilot(proposal_id: int, request: Request) -> dict:
     }
 
 
+@router.post("/admin/proposals/{proposal_id}/accept")
+async def accept_proposal(proposal_id: int, request: Request) -> dict:
+    """Mark a single proposal as user-accepted. Used by the proposals
+    dashboard for cleanup_action / routine_inference cards that the user
+    can confirm without opening an issue."""
+    store = _reflection_store(request)
+    proposal = await _find_proposal(store, proposal_id)
+    if proposal.get("status") in {"accepted", "auto_confirmed"}:
+        return {"ok": True, "proposal_id": proposal_id, "status": proposal["status"]}
+    await store.update_proposal_status(proposal_id, "accepted", channel="dashboard")
+    return {"ok": True, "proposal_id": proposal_id, "status": "accepted"}
+
+
+@router.post("/admin/proposals/{proposal_id}/dismiss")
+async def dismiss_proposal(proposal_id: int, request: Request) -> dict:
+    """Mark a single proposal as user-dismissed."""
+    store = _reflection_store(request)
+    proposal = await _find_proposal(store, proposal_id)
+    if proposal.get("status") == "dismissed":
+        return {"ok": True, "proposal_id": proposal_id, "status": "dismissed"}
+    await store.update_proposal_status(proposal_id, "dismissed", channel="dashboard")
+    return {"ok": True, "proposal_id": proposal_id, "status": "dismissed"}
+
+
+def _bulk_proposal_ids(payload: Any) -> list[int]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    raw = payload.get("ids")
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(status_code=400, detail="'ids' must be a non-empty list of ints")
+    cleaned: list[int] = []
+    for item in raw:
+        try:
+            cleaned.append(int(item))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"invalid id: {item!r}") from exc
+    return cleaned
+
+
+@router.post("/admin/proposals/bulk-accept")
+async def bulk_accept_proposals(request: Request) -> dict:
+    """Accept many proposals in one round-trip. Skips already-resolved ones
+    silently (returns the count anyway). Returns per-id results so the UI
+    can show toast messages."""
+    body = await request.json()
+    ids = _bulk_proposal_ids(body)
+    store = _reflection_store(request)
+    results: list[dict[str, Any]] = []
+    for proposal_id in ids:
+        try:
+            proposal = await _find_proposal(store, proposal_id)
+            if proposal.get("status") in {"accepted", "auto_confirmed"}:
+                results.append({"id": proposal_id, "ok": True, "skipped": True})
+                continue
+            await store.update_proposal_status(proposal_id, "accepted", channel="dashboard")
+            results.append({"id": proposal_id, "ok": True, "skipped": False})
+        except HTTPException as exc:
+            results.append({"id": proposal_id, "ok": False, "error": exc.detail})
+    accepted = sum(1 for r in results if r["ok"] and not r.get("skipped"))
+    return {"ok": True, "accepted": accepted, "results": results}
+
+
+@router.post("/admin/proposals/bulk-dismiss")
+async def bulk_dismiss_proposals(request: Request) -> dict:
+    """Dismiss many proposals in one round-trip."""
+    body = await request.json()
+    ids = _bulk_proposal_ids(body)
+    store = _reflection_store(request)
+    results: list[dict[str, Any]] = []
+    for proposal_id in ids:
+        try:
+            proposal = await _find_proposal(store, proposal_id)
+            if proposal.get("status") == "dismissed":
+                results.append({"id": proposal_id, "ok": True, "skipped": True})
+                continue
+            await store.update_proposal_status(proposal_id, "dismissed", channel="dashboard")
+            results.append({"id": proposal_id, "ok": True, "skipped": False})
+        except HTTPException as exc:
+            results.append({"id": proposal_id, "ok": False, "error": exc.detail})
+    dismissed = sum(1 for r in results if r["ok"] and not r.get("skipped"))
+    return {"ok": True, "dismissed": dismissed, "results": results}
+
+
 @router.get("/admin/policies")
 async def get_policies(request: Request) -> dict:
     return request.app.state.policy_engine.policies

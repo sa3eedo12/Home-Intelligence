@@ -1,0 +1,26 @@
+.proposals-controls { display: flex; flex-wrap: wrap; gap: var(--space-3); justify-content: space-between; align-items: center; }
+.status-pills { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.status-pill { padding: 0.35rem 0.85rem; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-primary); cursor: pointer; font-size: var(--font-size-sm); display: inline-flex; gap: var(--space-2); align-items: center; transition: background var(--transition-fast), border-color var(--transition-fast); }
+.status-pill:hover { background: color-mix(in srgb, var(--info) 14%, var(--surface-2)); }
+.status-pill.active { background: color-mix(in srgb, var(--info) 26%, var(--surface-2)); border-color: color-mix(in srgb, var(--info) 60%, var(--border)); }
+.pill-count { background: color-mix(in srgb, var(--info) 28%, var(--surface)); border-radius: 999px; padding: 0.05rem 0.5rem; font-size: var(--font-size-xs); font-weight: 600; }
+.kind-filter select { min-width: 12rem; }
+.bulk-actions { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; position: sticky; top: 0; z-index: 10; box-shadow: var(--shadow-md); }
+.bulk-summary { font-size: var(--font-size-sm); }
+.proposal-card { grid-template-columns: auto minmax(0, 1fr) minmax(8rem, auto); }
+.proposal-checkbox-wrap { display: flex; align-items: flex-start; padding-top: var(--space-1); }
+.proposal-checkbox { width: 1.1rem; height: 1.1rem; cursor: pointer; }
+.select-all-wrap { display: flex; align-items: center; gap: var(--space-2); }
+.select-all-label { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; font-size: var(--font-size-sm); color: var(--text-muted); }
+.proposal-age { font-size: var(--font-size-xs); }
+.proposal-rationale { margin: var(--space-2) 0; }
+.resolved-marker { font-size: var(--font-size-sm); }
+.proposal-row.is-resolving { opacity: 0.4; transition: opacity var(--transition-fast); }
+.proposal-row.is-removed { display: none; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+@media (max-width: 720px) {
+  .proposals-controls { flex-direction: column; align-items: stretch; }
+  .proposal-card { grid-template-columns: auto minmax(0, 1fr); }
+  .proposal-actions { grid-column: 1 / -1; flex-direction: row; }
+  .proposal-actions .btn { flex: 1; }
+}

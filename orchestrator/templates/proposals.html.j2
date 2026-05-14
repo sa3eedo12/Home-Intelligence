@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Proposals · Home Intelligence</title>
+  <link rel="stylesheet" href="/static/_design.css">
+  <link rel="stylesheet" href="/static/morning_brief.css">
+  <link rel="stylesheet" href="/static/proposals.css">
+  <script src="/static/_app.js" defer></script>
+  <script src="/static/proposals.js" defer></script>
+</head>
+<body class="page-body proposals-body">
+  <header class="brief-topbar">
+    <a href="/dashboard" class="back-link">← Dashboard</a>
+    <h1>📋 Proposals</h1>
+    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
+  </header>
+
+  <main class="brief-shell">
+    <section class="proposals-controls card">
+      <div class="status-pills" role="tablist" aria-label="Filter by status" data-initial-status="{{ initial_status_filter }}">
+        <button type="button" class="status-pill" data-status="pending" role="tab">Pending <span class="pill-count">{{ counts.pending }}</span></button>
+        <button type="button" class="status-pill" data-status="accepted" role="tab">Accepted <span class="pill-count">{{ counts.accepted }}</span></button>
+        <button type="button" class="status-pill" data-status="auto_confirmed" role="tab">Auto-confirmed <span class="pill-count">{{ counts.auto_confirmed }}</span></button>
+        <button type="button" class="status-pill" data-status="dismissed" role="tab">Dismissed <span class="pill-count">{{ counts.dismissed }}</span></button>
+        <button type="button" class="status-pill" data-status="all" role="tab">All</button>
+      </div>
+      <div class="kind-filter">
+        <label for="proposals-kind-filter" class="visually-hidden">Filter by kind</label>
+        <select id="proposals-kind-filter" class="input">
+          <option value="">All kinds</option>
+          <option value="cleanup_action">Cleanup actions</option>
+          <option value="habit_inference">Habit inferences</option>
+          <option value="preference_inference">Preference inferences</option>
+          <option value="routine_inference">Routine inferences</option>
+          <option value="code_change">Code changes</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="bulk-actions card" id="bulk-actions" hidden>
+      <span class="bulk-summary"><strong id="selected-count">0</strong> selected</span>
+      <button type="button" class="btn btn-primary" id="bulk-accept-btn">Accept selected</button>
+      <button type="button" class="btn btn-secondary" id="bulk-dismiss-btn">Dismiss selected</button>
+      <button type="button" class="btn btn-ghost btn-sm" id="select-clear-btn">Clear</button>
+    </section>
+
+    <section class="brief-section card">
+      <div class="section-header">
+        <div>
+          <h2>Decisions waiting on you</h2>
+          <p class="muted">Tick a row and use the bulk bar above, or accept/dismiss individually. Auto-confirmed cards are kept for context.</p>
+        </div>
+        <div class="select-all-wrap">
+          <label class="select-all-label">
+            <input type="checkbox" id="select-all-checkbox">
+            <span>Select all visible</span>
+          </label>
+        </div>
+      </div>
+      <div class="proposal-list" id="proposal-list">
+        {% for proposal in proposals %}
+          <article class="proposal-card card-hover proposal-row"
+                   data-proposal-id="{{ proposal.id }}"
+                   data-status="{{ proposal.status }}"
+                   data-kind="{{ proposal.kind }}">
+            <div class="proposal-checkbox-wrap">
+              <input type="checkbox" class="proposal-checkbox" aria-label="Select proposal {{ proposal.id }}">
+            </div>
+            <div class="proposal-content">
+              <p class="proposal-meta">
+                <span class="badge badge-info">{{ proposal.kind }}</span>
+                <span class="badge badge-muted status-badge">{{ proposal.status }}</span>
+                <span class="badge badge-success">{{ '%.0f' % ((proposal.confidence or 0) * 100) }}%</span>
+                {% if proposal.created_at %}<span class="proposal-age muted">{{ proposal.created_at }}</span>{% endif %}
+              </p>
+              <h3>{{ proposal.title }}</h3>
+              {% if proposal.rationale %}<p class="proposal-rationale">{{ proposal.rationale }}</p>{% endif %}
+              {% if proposal.evidence_event_ids %}<p class="evidence muted">Evidence: events {{ proposal.evidence_event_ids|join(', ') }}</p>{% endif %}
+            </div>
+            <div class="proposal-actions">
+              {% if proposal.status == 'pending' %}
+                <button type="button" class="btn btn-primary btn-sm proposal-accept">Accept</button>
+                <button type="button" class="btn btn-secondary btn-sm proposal-dismiss">Dismiss</button>
+              {% else %}
+                <span class="muted resolved-marker">Resolved</span>
+              {% endif %}
+            </div>
+          </article>
+        {% else %}
+          <div class="empty-state">
+            <div class="empty-state-icon">🎉</div>
+            <h3>No proposals yet</h3>
+            <p>The reflector hasn't surfaced any decisions for you. New ones appear after each nightly run.</p>
+          </div>
+        {% endfor %}
+      </div>
+      <div class="empty-state filtered-empty" id="filtered-empty" hidden>
+        <div class="empty-state-icon">✨</div>
+        <h3>Nothing matching</h3>
+        <p>No proposals match the current filters.</p>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite" aria-atomic="false"></div>
+</body>
+</html>
