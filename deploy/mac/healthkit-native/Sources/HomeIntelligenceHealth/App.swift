@@ -1,6 +1,10 @@
 // HomeIntelligenceHealth — read recent HealthKit samples on macOS and POST
 // them to the Home Intelligence orchestrator on TrueNAS.
 //
+// File is named App.swift (not main.swift) on purpose: when a Swift file is
+// named main.swift, Swift treats it as a top-level script and rejects the
+// @main attribute. Any other filename lets @main fire normally.
+//
 // Designed as a one-shot CLI-style app (read → post → exit), driven by a
 // LaunchAgent on a fixed interval. The app *bundle* exists so we can carry
 // the HealthKit entitlement (HKHealthStore is gated behind that
