@@ -29,6 +29,7 @@ class OllamaClient:
         model: str | None = None,
         temperature: float = 0.2,
         response_format: str | None = None,
+        think: bool | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
@@ -38,6 +39,11 @@ class OllamaClient:
         }
         if response_format is not None:
             payload["format"] = response_format
+        # Qwen3 family: setting think=False skips the <thinking> trace,
+        # which can save 30-90s on a 35B model when the task is purely
+        # structured-JSON generation that doesn't benefit from chain-of-thought.
+        if think is not None:
+            payload["think"] = think
         async with httpx.AsyncClient(timeout=_ollama_timeout()) as client:
             resp = await client.post(f"{self.base_url}/api/chat", json=payload)
             resp.raise_for_status()
@@ -49,6 +55,7 @@ class OllamaClient:
         model: str | None = None,
         temperature: float = 0.2,
         response_format: str | None = None,
+        think: bool | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
@@ -58,6 +65,8 @@ class OllamaClient:
         }
         if response_format is not None:
             payload["format"] = response_format
+        if think is not None:
+            payload["think"] = think
         async with httpx.AsyncClient(timeout=_ollama_timeout()) as client:
             resp = await client.post(f"{self.base_url}/api/generate", json=payload)
             resp.raise_for_status()

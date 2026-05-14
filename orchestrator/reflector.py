@@ -550,6 +550,7 @@ class NightlyReflector:
                 model=fallback_model,
                 temperature=0.1,
                 response_format="json",
+                think=False,
             )
 
         # If reasoner == fallback, no point retrying — short-circuit so we
@@ -560,6 +561,7 @@ class NightlyReflector:
                 model=reasoner_model,
                 temperature=0.1,
                 response_format="json",
+                think=False,
             )
 
         try:
@@ -568,19 +570,21 @@ class NightlyReflector:
                 model=reasoner_model,
                 temperature=0.1,
                 response_format="json",
+                think=False,
             )
         except httpx.HTTPError as exc:
             logger.warning(
                 "reflection_reasoner_unavailable",
                 model=reasoner_model,
                 fallback=fallback_model,
-                error=str(exc),
+                error=f"{type(exc).__name__}: {exc!s}",
             )
             return await self.llm.chat(
                 messages=messages,
                 model=fallback_model,
                 temperature=0.1,
                 response_format="json",
+                think=False,
             )
         except Exception as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
