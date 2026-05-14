@@ -97,6 +97,20 @@ def _coerce_int(raw: Any) -> int | None:
     return value if value >= 0 else None
 
 
+def _merge_payload(payload: dict[str, Any] | None, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Reconcile the two ways the SDK can hand us a tool payload.
+
+    The orchestrator's reactive engine passes the observer envelope through
+    ``inputs_from: payload.payload`` so the cycle's fields (``appliance``,
+    ``entity_id``, ``duration_seconds``, etc.) arrive as kwargs. Direct
+    callers (tests, the dispatch helper) pass them as a single ``payload``
+    dict. Accepting both keeps the tool callable from either path.
+    """
+    merged = dict(payload) if isinstance(payload, dict) else {}
+    merged.update(kwargs)
+    return merged
+
+
 def _bucket_for_duration(seconds: int | None) -> tuple[str | None, str]:
     """Map a cycle duration to a likely label + a human-readable note."""
     if seconds is None or seconds <= 0:
@@ -201,7 +215,9 @@ def _keyboard_for(cycle_load_id: int, guessed: str) -> list[list[dict[str, str]]
 
 
 @tool("infer_cycle_load", side_effects=True)
-async def infer_cycle_load(payload: dict[str, Any]) -> dict[str, Any]:
+async def infer_cycle_load(
+    payload: dict[str, Any] | None = None, **kwargs: Any
+) -> dict[str, Any]:
     """Guess what kind of laundry just finished + persist for confirmation.
 
     Inputs (observer event payload, all optional):
@@ -210,19 +226,20 @@ async def infer_cycle_load(payload: dict[str, Any]) -> dict[str, Any]:
 
     Output: ``{ok, summary, label, confidence, reasoning, cycle_load_id, keyboard}``
     """
-    appliance = str(payload.get("appliance") or "washer")
-    entity_id = payload.get("entity_id")
-    program_raw = payload.get("program")
+    data = _merge_payload(payload, kwargs)
+    appliance = str(data.get("appliance") or "washer")
+    entity_id = data.get("entity_id")
+    program_raw = data.get("program")
     program = str(program_raw) if program_raw not in (None, "") else None
-    brand_raw = payload.get("brand")
+    brand_raw = data.get("brand")
     brand = str(brand_raw) if brand_raw not in (None, "") else None
-    duration_seconds = _coerce_int(payload.get("duration_seconds"))
-    started_at = _parse_iso(payload.get("started_at"))
-    ended_at = _parse_iso(payload.get("ended_at")) or datetime.now(UTC)
-    attributes_at_finish = payload.get("attributes_at_finish")
+    duration_seconds = _coerce_int(data.get("duration_seconds"))
+    started_at = _parse_iso(data.get("started_at"))
+    ended_at = _parse_iso(data.get("ended_at")) or datetime.now(UTC)
+    attributes_at_finish = data.get("attributes_at_finish")
     if not isinstance(attributes_at_finish, dict):
         attributes_at_finish = {}
-    event_log_id = _coerce_int(payload.get("event_log_id"))
+    event_log_id = _coerce_int(data.get("event_log_id"))
 
     store = CycleLoadsStore(await _pool())
     history = await store.confirmed_label_history(appliance=appliance, limit=15)
