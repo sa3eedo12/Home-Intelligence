@@ -113,8 +113,10 @@ async def _reflection_status(app: FastAPI) -> dict[str, Any]:
 async def _people_home(app: FastAPI) -> list[str]:
     """Compute the list of household members currently at home.
 
-    Reads the most recent ``presence.changed`` event per entity from the
-    event_log and returns the friendly names whose latest state is ``home``.
+    Reads the most recent ``presence.changed`` event per entity and returns
+    the friendly names whose latest state is ``home``. Only entries that
+    were explicitly linked to a household_member are considered — this avoids
+    showing Aqara hubs, smart appliances, or guest devices in the card.
     Returns an empty list when no presence events have ever been observed
     (the dashboard then falls back to the "Presence learning" placeholder).
     """
@@ -129,11 +131,13 @@ async def _people_home(app: FastAPI) -> list[str]:
                     payload->>'entity_id' AS entity_id,
                     payload->>'state'     AS state,
                     payload->>'person'    AS person,
+                    coalesce(payload->>'household_member_linked', 'false')
+                                          AS linked,
                     ts
                 FROM event_log
                 WHERE capability = 'presence.changed'
                   AND payload ? 'state'
-                  AND ts > now() - interval '7 days'
+                  AND ts > now() - interval '24 hours'
                 ORDER BY payload->>'entity_id', ts DESC
                 """
             )
@@ -142,10 +146,19 @@ async def _people_home(app: FastAPI) -> list[str]:
         return []
     home: list[str] = []
     for row in rows:
-        if str(row.get("state") or "").lower() == "home":
-            name = str(row.get("person") or row.get("entity_id") or "").strip()
-            if name and name not in home:
-                home.append(name)
+        if str(row.get("state") or "").lower() != "home":
+            continue
+        # Skip entries that are not explicitly tied to a household member —
+        # this filters out Aqara hubs, gateways, smart appliances, etc that
+        # HA exposes as device_tracker.* but aren't people.
+        entity_id = str(row.get("entity_id") or "")
+        is_linked = str(row.get("linked") or "false").lower() == "true"
+        is_person_domain = entity_id.startswith("person.")
+        if not (is_linked or is_person_domain):
+            continue
+        name = str(row.get("person") or entity_id).strip()
+        if name and name not in home:
+            home.append(name)
     return home
 
 

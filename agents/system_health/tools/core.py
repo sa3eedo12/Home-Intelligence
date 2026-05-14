@@ -233,7 +233,25 @@ def _zscore_anomaly(series: Sequence[float], value: float, threshold: float) -> 
 
 
 @tool("anomaly_check")
-async def anomaly_check(metric: str = "cpu_pct", threshold: float = 2.5) -> dict[str, Any]:
+async def anomaly_check(
+    metric: str = "cpu_pct",
+    threshold: float = 2.5,
+    *,
+    absolute_floor: float | None = None,
+) -> dict[str, Any]:
+    """Detect statistical anomalies in a system metric.
+
+    `threshold` is a z-score (standard deviations from baseline mean).
+    `absolute_floor` suppresses alerts when the raw value is below this number,
+    preventing tiny deviations on a near-idle baseline from waking the user.
+    Defaults: cpu_pct floor 30%, ram_pct floor 70%, others no floor.
+    """
+    if absolute_floor is None:
+        # Sensible defaults so a near-idle host doesn't page on 3% CPU.
+        absolute_floor = {
+            "cpu_pct": 30.0,
+            "ram_pct": 70.0,
+        }.get(metric, 0.0)
     client = _redis_client()
     try:
         scan_result = scan()
@@ -243,15 +261,22 @@ async def anomaly_check(metric: str = "cpu_pct", threshold: float = 2.5) -> dict
         await client.ltrim(key, -96, -1)
         values = [float(v) for v in await client.lrange(key, 0, -1)]
         score = _zscore(values[:-1], current)
-        is_anomaly = bool(score is not None and score > threshold)
+        is_anomaly = bool(
+            score is not None
+            and score > threshold
+            and current >= absolute_floor
+        )
         if is_anomaly:
             await publish_helper.publish_metric_breach(
                 metric=metric,
-                value=round(score or 0.0, 2),
-                threshold=threshold,
+                value=round(current, 1),
+                threshold=round(threshold, 2),
                 severity="warn",
-                summary=f"{metric} anomaly score {score:.2f}; current value {current:.1f}.",
-                current=current,
+                summary=(
+                    f"{metric} spiked to {current:.1f} "
+                    f"({score:.1f}σ above its recent baseline)."
+                ),
+                zscore=round(score or 0.0, 2),
                 samples=len(values),
             )
         return {
@@ -260,6 +285,7 @@ async def anomaly_check(metric: str = "cpu_pct", threshold: float = 2.5) -> dict
             "samples": len(values),
             "is_anomaly": is_anomaly,
             "zscore": round(score, 2) if score is not None else None,
+            "absolute_floor": absolute_floor,
         }
     finally:
         await client.aclose()

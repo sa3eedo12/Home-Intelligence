@@ -153,9 +153,16 @@ class Reactive:
 
         notify_from_payload = trigger.get("notify_from_payload")
         if notify_from_payload:
+            text_field = notify_from_payload.get("text_field")
             template = notify_from_payload.get("text_template", "{payload}")
             topic_template = notify_from_payload.get("topic_template", "events.system")
-            text = template.format(**payload)
+            # Prefer the publisher-supplied text (e.g. agent's `summary`) when
+            # available; fall back to a templated rendering otherwise.
+            text_value = payload.get(text_field) if text_field else None
+            if text_value:
+                text = str(text_value)
+            else:
+                text = template.format(**payload)
             topic = topic_template.format(**payload)
             severity = payload.get(notify_from_payload.get("severity_field", "severity"), "info")
             keyboard_field = notify_from_payload.get("keyboard_field")

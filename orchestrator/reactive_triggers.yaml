@@ -36,6 +36,10 @@ triggers:
     match:
       severity_min: warn
     notify_from_payload:
+      # Prefer the agent-provided 'summary' (e.g. "cpu_pct spiked to 92.0
+      # (3.4σ above its recent baseline)."). Falls back to a templated line
+      # if the publisher didn't include one.
+      text_field: summary
       text_template: "{metric}={value} crossed threshold ({threshold}). Host: {host}."
       topic_template: "system.{metric}"
       severity_field: severity
