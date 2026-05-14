@@ -12,6 +12,26 @@ from .utils import domain_of, extract_state_change, normalized_state, remember_b
 MAX_TRACKED_ENTITIES = 256
 MEMBER_LINK_TTL_SECONDS = 60.0
 
+# Substrings that indicate an entity is unambiguously a non-person device
+# (a PC, laptop, desktop, etc.). These are HARD-BLOCKED — they never fire
+# `presence.changed` regardless of whether they're in a member's tracker
+# allowlist. This is stronger than the heuristic NON_PERSON_KEYWORDS list
+# below because PCs and laptops genuinely DO move "home/away" as they go to
+# sleep + WiFi flaps, but reporting that as a person event creates noisy
+# downstream inferences ("👋 Welcome home, Saeed-PC"). If you really want
+# Saeed's PC tracked, do it at the inference layer, not in presence.
+HARD_NON_PERSON_SUBSTRINGS: tuple[str, ...] = (
+    "_pc",
+    "_laptop",
+    "_macbook",
+    "_imac",
+    "_desktop",
+    "_workstation",
+    "judes_laptop",  # explicit legacy match for already-named entities
+    "saeed_pc",
+    "saeed-pc",
+)
+
 # Substrings that indicate an entity_id/friendly_name is NOT a person, even
 # though it lives in the device_tracker.* domain. Used as a SECONDARY filter
 # (only when no member-linked or env allowlist is configured) to suppress
@@ -159,6 +179,13 @@ class PresenceObserver(Observer):
         )
 
     def _is_person(self, entity_id: str, friendly_name: str, domain: str) -> bool:
+        # HARD BLOCK first — PCs, laptops, desktops, etc. are NEVER people,
+        # no matter what the allowlist says. Their WiFi flaps as they sleep
+        # generate enormous noise downstream (presence_returns full of
+        # "Saeed-PC came home", LLM auto-inferences burning cycles).
+        haystack = (entity_id + " " + (friendly_name or "")).casefold()
+        if any(kw in haystack for kw in HARD_NON_PERSON_SUBSTRINGS):
+            return False
         # person.* domain entries are always considered people (HA spec).
         if domain == "person":
             return True
@@ -176,7 +203,6 @@ class PresenceObserver(Observer):
         # Otherwise: heuristic safety net for users who haven't linked
         # anything. Filter out the obvious non-people keywords so we're not
         # spamming "Aqara_Hub_E1 is now home".
-        haystack = (entity_id + " " + (friendly_name or "")).casefold()
         return not any(kw in haystack for kw in NON_PERSON_KEYWORDS)
 
 

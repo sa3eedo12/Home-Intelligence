@@ -73,11 +73,13 @@ async def test_presence_filters_non_person_devices() -> None:
 
 @pytest.mark.asyncio
 async def test_presence_keeps_real_people() -> None:
-    """Phones/laptops/watches without non-person keywords should still fire."""
+    """Phones/watches without non-person keywords should still fire.
+    Note: PCs / laptops / desktops are NEVER people (HARD_NON_PERSON_SUBSTRINGS),
+    even when they appear in device_tracker.* — see hard-block test below."""
     observer = _CapturePresence()
     real = [
         ("device_tracker.saeeds_iphone", "Saeed's iPhone"),
-        ("device_tracker.judes_laptop", "Judes-Laptop"),
+        ("device_tracker.judiths_phone", "Judith's Phone"),
         ("device_tracker.iphone_8", "iPhone"),
         ("person.saeed", "Saeed"),
     ]
@@ -98,12 +100,12 @@ async def test_presence_explicit_allowlist_via_env(monkeypatch) -> None:
     """When PRESENCE_ALLOWLIST is set, only those entities fire."""
     monkeypatch.setenv(
         "PRESENCE_ALLOWLIST",
-        "device_tracker.saeed_phone,device_tracker.judes_laptop",
+        "device_tracker.saeed_phone,device_tracker.judiths_phone",
     )
     observer = _CapturePresence()
     for eid in [
         "device_tracker.saeed_phone",
-        "device_tracker.judes_laptop",
+        "device_tracker.judiths_phone",
         "device_tracker.random_other_phone",  # not in allowlist
     ]:
         await observer.handle({
@@ -112,7 +114,7 @@ async def test_presence_explicit_allowlist_via_env(monkeypatch) -> None:
             "attributes": {"friendly_name": eid.split(".")[1]},
         })
     fired = {e[1]["entity_id"] for e in observer.emitted}
-    assert fired == {"device_tracker.saeed_phone", "device_tracker.judes_laptop"}
+    assert fired == {"device_tracker.saeed_phone", "device_tracker.judiths_phone"}
 
 
 @pytest.mark.asyncio
@@ -122,7 +124,6 @@ async def test_presence_strict_when_at_least_one_member_linked(monkeypatch) -> N
     even if other entities would have passed the keyword heuristic."""
     monkeypatch.delenv("PRESENCE_ALLOWLIST", raising=False)
     observer = _CapturePresence()
-    # Simulate a member-link cache populated from the DB
     observer._member_links = {"device_tracker.saeeds_iphone": "Saeed"}
     observer._member_links_ts = 9e18  # never expires for this test
     base_attrs = {"friendly_name": "Some Device"}
@@ -133,26 +134,53 @@ async def test_presence_strict_when_at_least_one_member_linked(monkeypatch) -> N
         "old_state": "not_home", "state": "home", "ts": "x",
         "attributes": base_attrs,
     })
-    # Unlinked entity that WOULD have passed the keyword heuristic: blocked
+    # Unlinked phone that would normally pass: blocked by strict mode
     await observer.handle({
-        "entity_id": "device_tracker.judes_laptop",
+        "entity_id": "device_tracker.guests_phone",
         "old_state": "not_home", "state": "home", "ts": "y",
         "attributes": base_attrs,
     })
     fired = [(e[1]["entity_id"], e[1]["person"]) for e in observer.emitted]
     assert fired == [("device_tracker.saeeds_iphone", "Saeed")]
-    # Person field should come from the linked household_member.name, not friendly
     assert observer.emitted[0][1]["household_member_linked"] is True
 
 
 @pytest.mark.asyncio
 async def test_presence_uses_member_name_not_device_name(monkeypatch) -> None:
     observer = _CapturePresence()
-    observer._member_links = {"device_tracker.judes_laptop": "Judith"}
+    observer._member_links = {"device_tracker.judiths_phone": "Judith"}
     observer._member_links_ts = 9e18
     await observer.handle({
-        "entity_id": "device_tracker.judes_laptop",
+        "entity_id": "device_tracker.judiths_phone",
         "old_state": "not_home", "state": "home", "ts": "z",
-        "attributes": {"friendly_name": "Judes-Laptop"},
+        "attributes": {"friendly_name": "Judith's Phone"},
     })
     assert observer.emitted[0][1]["person"] == "Judith"
+
+
+@pytest.mark.asyncio
+async def test_presence_hard_blocks_pcs_and_laptops_even_in_allowlist(monkeypatch) -> None:
+    """Regression: PCs/laptops/desktops fire 'home/away' as their WiFi
+    flaps when sleeping, polluting presence. They must NEVER count as
+    people, even when added to a household_member's tracker_entity_ids
+    (because users do this thinking it'll help) or to the env allowlist."""
+    monkeypatch.setenv("PRESENCE_ALLOWLIST", "device_tracker.judes_laptop")
+    observer = _CapturePresence()
+    # Also link it as a member tracker — the user might try this
+    observer._member_links = {"device_tracker.judes_laptop": "Judith"}
+    observer._member_links_ts = 9e18
+    for eid in [
+        "device_tracker.saeed_pc",
+        "device_tracker.judes_laptop",
+        "device_tracker.someone_macbook",
+        "device_tracker.host_imac",
+        "device_tracker.workstation_desktop",
+    ]:
+        await observer.handle({
+            "entity_id": eid, "old_state": "not_home", "state": "home",
+            "ts": "x", "attributes": {"friendly_name": eid.split(".")[1]},
+        })
+    assert observer.emitted == [], (
+        f"PC/laptop entities should be hard-blocked: got "
+        f"{[e[1]['entity_id'] for e in observer.emitted]}"
+    )

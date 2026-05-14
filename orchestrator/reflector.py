@@ -638,15 +638,15 @@ class NightlyReflector:
             )
             # Auto-confirm safe inferences with reasonable backing. Tightened
             # in 2026-05: was habit_inference only, threshold 0.95 + 5
-            # evidence — too strict (nothing ever qualified). Now: any
-            # inference kind with confidence >= 0.85 and >= 3 evidence.
-            # Habits/preferences/routines also get promoted to their typed
-            # tables in _write_auto_confirmed_profile so the dashboard sees
-            # them.
+            # evidence — too strict (nothing ever qualified). Then 0.85 + 3
+            # — but the LLM tends to land at 0.80 which leaves real
+            # inferences on the floor. Now: 0.75 + 3, which auto-promotes
+            # the typical "User likely watches TV around 20:30" kind of
+            # signal while still gating obvious guesses (< 0.75).
             kind = proposal.get("kind") or ""
             auto_confirm = (
                 kind in {"habit_inference", "preference_inference", "routine_inference"}
-                and float(proposal.get("confidence") or 0.0) >= 0.85
+                and float(proposal.get("confidence") or 0.0) >= 0.75
                 and evidence_count >= 3
             )
             status = "auto_confirmed" if auto_confirm else "pending"
