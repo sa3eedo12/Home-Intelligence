@@ -45,6 +45,14 @@ def _brief_lines(brief: dict[str, Any]) -> list[str]:
         for line in learned[:8]:
             lines.append(f"- {line}")
 
+    # Cross-source correlations the night uncovered (HR drift vs sleep,
+    # late-TV → bad sleep, coffee→HR, step trends, wake drift).
+    correlations = _correlations_section(brief)
+    if correlations:
+        lines.extend(["", "*🔍 I noticed*"])
+        for line in correlations[:6]:
+            lines.append(f"- {line}")
+
     # Anomalies the night detected (vacuum overdue, etc.)
     anomalies = _anomalies_24h(brief)
     if anomalies:
@@ -123,6 +131,26 @@ def _anomalies_24h(brief: dict[str, Any]) -> list[str]:
             kind = str(payload.get("anomaly_type") or "anomaly")
             summary = str(ev.get("summary") or kind)
             out.append(summary)
+    return out
+
+
+def _correlations_section(brief: dict[str, Any]) -> list[str]:
+    """Render the cross-source correlation insights produced by the
+    correlations phase. Each entry is `{headline, detail?, confidence}`."""
+    body = brief.get("body_json") or {}
+    items = body.get("correlations") or []
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        headline = str(item.get("headline") or "").strip()
+        if not headline:
+            continue
+        detail = item.get("detail")
+        if detail:
+            out.append(f"{headline} — {str(detail)[:160]}")
+        else:
+            out.append(headline[:200])
     return out
 
 

@@ -105,3 +105,56 @@ async def test_brief_omits_empty_sections() -> None:
     assert "What I noticed" not in text
     assert "Yesterday" not in text
     assert "Code wishlist" not in text
+    assert "I noticed" not in text  # cross-source correlations section
+
+
+@pytest.mark.asyncio
+async def test_brief_renders_correlations_section() -> None:
+    bot = SimpleNamespace(send_message=AsyncMock())
+    tg_app = SimpleNamespace(bot=bot)
+    brief = {
+        "summary": "Reflection complete.",
+        "body_json": {
+            "correlations": [
+                {
+                    "id": "resting_hr_drift",
+                    "headline": "Resting HR trended up 7 bpm this week.",
+                    "detail": "Could indicate illness or sleep debt.",
+                    "confidence": 0.85,
+                },
+                {
+                    "id": "step_trend",
+                    "headline": "Daily steps ↓ 30% this week.",
+                    "detail": None,
+                    "confidence": 0.75,
+                },
+            ],
+        },
+    }
+    await send_morning_brief(tg_app, brief, 123)
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "🔍 I noticed" in text
+    assert "Resting HR trended up 7 bpm" in text
+    assert "Could indicate illness" in text  # detail is rendered when present
+    assert "Daily steps ↓ 30%" in text
+
+
+@pytest.mark.asyncio
+async def test_brief_correlations_section_skips_malformed_entries() -> None:
+    bot = SimpleNamespace(send_message=AsyncMock())
+    tg_app = SimpleNamespace(bot=bot)
+    brief = {
+        "summary": "Reflection complete.",
+        "body_json": {
+            "correlations": [
+                {"headline": ""},  # empty headline → skipped
+                "not a dict",      # wrong type → skipped
+                {"headline": "Real insight here.", "confidence": 0.7},
+            ],
+        },
+    }
+    await send_morning_brief(tg_app, brief, 123)
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "Real insight here" in text
+    # Should still render the section header since at least one entry was valid
+    assert "🔍 I noticed" in text

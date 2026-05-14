@@ -286,6 +286,8 @@ class NightlyReflector:
             )
             self._status["phase"] = "health_summary"
             health_summary = await self._phase("health_summary", self._health_summary, errors, {})
+            self._status["phase"] = "correlations"
+            correlations = await self._phase("correlations", self._correlations, errors, [])
             self._status["phase"] = "generate_proposals"
             proposals = await self._phase(
                 "generate_proposals",
@@ -315,6 +317,7 @@ class NightlyReflector:
                 health_summary,
                 applied,
                 errors,
+                correlations=correlations,
             )
             brief_id = await self._phase("save_brief", self._save_brief, errors, 0, body)
             body["brief_id"] = brief_id
@@ -460,6 +463,24 @@ class NightlyReflector:
             "sleep_asleep_7d": sleep_rows,
             "steps_7d": step_rows,
         }
+
+    async def _correlations(self) -> list[dict[str, Any]]:
+        """Run the cross-source correlation engine. Each insight joins data
+        across HealthKit + presence + appliances to produce a "I noticed:"
+        line for the morning brief. Pool may be absent in tests — skip
+        silently."""
+        pool = getattr(self, "pool", None)
+        if pool is None:
+            return []
+        try:
+            from .correlations import correlate_recent
+            return await correlate_recent(pool, lookback_days=14)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "reflection_correlations_failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return []
 
     async def _generate_proposals(
         self,
@@ -747,6 +768,8 @@ class NightlyReflector:
         health_summary: dict[str, Any],
         proposals: list[dict[str, Any]],
         errors: list[dict[str, str]],
+        *,
+        correlations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         yesterday = [
             {"id": row.get("id"), "ts": row.get("ts"), "summary": row.get("summary")}
@@ -790,6 +813,7 @@ class NightlyReflector:
             "knowledge_gaps": gaps,
             "patterns": patterns,
             "health_summary": health_summary,
+            "correlations": list(correlations or []),
             "errors": errors,
         }
 
