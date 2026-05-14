@@ -113,52 +113,117 @@ async def _reflection_status(app: FastAPI) -> dict[str, Any]:
 async def _people_home(app: FastAPI) -> list[str]:
     """Compute the list of household members currently at home.
 
-    Reads the most recent ``presence.changed`` event per entity and returns
-    the friendly names whose latest state is ``home``. Only entries that
-    were explicitly linked to a household_member are considered — this avoids
-    showing Aqara hubs, smart appliances, or guest devices in the card.
-    Returns an empty list when no presence events have ever been observed
+    Reads the most recent ``presence.changed`` event per entity. Only entries
+    that were explicitly linked to a household_member are considered — this
+    avoids showing Aqara hubs, smart appliances, or guest devices in the card.
+
+    Falls back to a direct HA ``/api/states`` query if no recent events match,
+    because HA only fires ``state_changed`` on transitions: a phone that's
+    been "home" for hours will not produce any events even though the user IS
+    home. The HA query checks ``person.*`` plus every entity listed in
+    ``household_members.attributes.tracker_entity_ids``.
+
+    Returns an empty list when no presence info is available anywhere
     (the dashboard then falls back to the "Presence learning" placeholder).
     """
     pool = getattr(app.state, "pool", None)
-    if pool is None:
-        return []
-    try:
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT DISTINCT ON (payload->>'entity_id')
-                    payload->>'entity_id' AS entity_id,
-                    payload->>'state'     AS state,
-                    payload->>'person'    AS person,
-                    coalesce(payload->>'household_member_linked', 'false')
-                                          AS linked,
-                    ts
-                FROM event_log
-                WHERE capability = 'presence.changed'
-                  AND payload ? 'state'
-                  AND ts > now() - interval '24 hours'
-                ORDER BY payload->>'entity_id', ts DESC
-                """
-            )
-    except Exception as exc:
-        logger.warning("people_home_query_failed", error=str(exc))
-        return []
     home: list[str] = []
-    for row in rows:
-        if str(row.get("state") or "").lower() != "home":
-            continue
-        # Skip entries that are not explicitly tied to a household member —
-        # this filters out Aqara hubs, gateways, smart appliances, etc that
-        # HA exposes as device_tracker.* but aren't people.
-        entity_id = str(row.get("entity_id") or "")
-        is_linked = str(row.get("linked") or "false").lower() == "true"
-        is_person_domain = entity_id.startswith("person.")
-        if not (is_linked or is_person_domain):
-            continue
-        name = str(row.get("person") or entity_id).strip()
-        if name and name not in home:
-            home.append(name)
+    person_to_member: dict[str, str] = {}
+    if pool is not None:
+        # Pull each linked tracker's owner so HA "person.saeed = home" can map
+        # to the household_member.name "Saeed" instead of the raw entity id.
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT name, attributes FROM household_members"
+                )
+            for row in rows:
+                attrs = row["attributes"] or {}
+                if isinstance(attrs, str):
+                    try:
+                        attrs = json.loads(attrs)
+                    except Exception:
+                        attrs = {}
+                trackers: list[str] = []
+                raw = attrs.get("tracker_entity_ids") if isinstance(attrs, dict) else None
+                if isinstance(raw, list):
+                    trackers = [str(x) for x in raw if x]
+                for tracker in trackers:
+                    person_to_member[tracker] = row["name"]
+        except Exception as exc:
+            logger.warning("people_home_member_lookup_failed", error=str(exc))
+
+    if pool is not None:
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT DISTINCT ON (payload->>'entity_id')
+                        payload->>'entity_id' AS entity_id,
+                        payload->>'state'     AS state,
+                        payload->>'person'    AS person,
+                        coalesce(payload->>'household_member_linked', 'false')
+                                              AS linked,
+                        ts
+                    FROM event_log
+                    WHERE capability = 'presence.changed'
+                      AND payload ? 'state'
+                      AND ts > now() - interval '24 hours'
+                    ORDER BY payload->>'entity_id', ts DESC
+                    """
+                )
+            for row in rows:
+                if str(row.get("state") or "").lower() != "home":
+                    continue
+                entity_id = str(row.get("entity_id") or "")
+                is_linked = str(row.get("linked") or "false").lower() == "true"
+                is_person_domain = entity_id.startswith("person.")
+                if not (is_linked or is_person_domain):
+                    continue
+                name = str(
+                    person_to_member.get(entity_id) or row.get("person") or entity_id
+                ).strip()
+                if name and name not in home:
+                    home.append(name)
+        except Exception as exc:
+            logger.warning("people_home_query_failed", error=str(exc))
+
+    # Fall back to (or augment with) HA's current state. This catches the
+    # very common case where a phone has been "home" for hours and so has
+    # not produced any state_changed events for our event_log to pick up.
+    ha_url = os.environ.get("HA_URL", "").strip()
+    ha_token = os.environ.get("HA_TOKEN", "").strip()
+    if ha_url and ha_token and person_to_member is not None:
+        try:
+            import httpx as _httpx
+
+            interesting = set(person_to_member.keys())
+            async with _httpx.AsyncClient(
+                timeout=5.0,
+                headers={"Authorization": f"Bearer {ha_token}"},
+            ) as client:
+                resp = await client.get(ha_url.rstrip("/") + "/api/states")
+                resp.raise_for_status()
+                states = resp.json() if resp.status_code == 200 else []
+            if isinstance(states, list):
+                for state in states:
+                    if not isinstance(state, dict):
+                        continue
+                    eid = str(state.get("entity_id") or "")
+                    if not (eid.startswith("person.") or eid in interesting):
+                        continue
+                    if str(state.get("state") or "").lower() != "home":
+                        continue
+                    name = (
+                        person_to_member.get(eid)
+                        or (state.get("attributes") or {}).get("friendly_name")
+                        or eid
+                    )
+                    name = str(name).strip()
+                    if name and name not in home:
+                        home.append(name)
+        except Exception as exc:
+            logger.warning("people_home_ha_query_failed", error=str(exc))
     return home
 
 
