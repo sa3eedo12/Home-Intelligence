@@ -80,8 +80,8 @@
             </div>
           </article>
         {% else %}
-          <div class="empty-state">
-            <div class="empty-state-icon">📱</div>
+          <div class="empty-state-card">
+            <span class="empty-state-icon">📱</span>
             <h3>No personal devices yet</h3>
             <p>Open <a href="/dashboard/devices">Devices</a>, click any device, and assign it to {{ current.name or 'you' }}.</p>
           </div>
@@ -102,7 +102,7 @@
             {{ actions('habits', item.id) }}
           </article>
         {% else %}
-          <div class="empty-state"><div class="empty-state-icon">☕</div><h3>No habits learned yet</h3><p>Morning briefs will surface patterns once observers collect enough evidence.</p></div>
+          <div class="empty-state-card"><span class="empty-state-icon">☕</span><h3>No habits learned yet</h3><p>Morning briefs will surface patterns once observers collect enough evidence. High-confidence inferences land here automatically.</p></div>
         {% endfor %}
       </div>
     </section>
@@ -120,7 +120,7 @@
             {{ actions('preferences', item.key) }}
           </article>
         {% else %}
-          <div class="empty-state"><div class="empty-state-icon">✨</div><h3>No preferences learned yet</h3><p>Answer questions in Morning Brief or Onboarding to teach your defaults.</p></div>
+          <div class="empty-state-card"><span class="empty-state-icon">✨</span><h3>No preferences learned yet</h3><p>Answer questions in Morning Brief or Onboarding to teach your defaults.</p></div>
         {% endfor %}
       </div>
     </section>
@@ -138,7 +138,7 @@
             {{ actions('routines', item.id) }}
           </article>
         {% else %}
-          <div class="empty-state"><div class="empty-state-icon">🪜</div><h3>No routines learned yet</h3><p>Complete onboarding to seed the first household routines.</p><a class="btn btn-primary btn-sm" href="/dashboard/onboarding">Open Onboarding</a></div>
+          <div class="empty-state-card"><span class="empty-state-icon">🪜</span><h3>No routines learned yet</h3><p>Complete onboarding to seed the first household routines.</p><a class="btn btn-primary btn-sm" href="/dashboard/onboarding">Open Onboarding</a></div>
         {% endfor %}
       </div>
     </section>
