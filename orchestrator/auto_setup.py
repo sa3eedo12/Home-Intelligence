@@ -634,6 +634,7 @@ async def consolidate_by_device(*, knowledge_graph: Any) -> dict[str, Any]:
 
         try:
             await knowledge_graph.put_thing(
+                thing_id=int(keeper.get("id")) if keeper.get("id") is not None else None,
                 type=str(keeper.get("type") or ""),
                 friendly_name=str(keeper_name),
                 attributes=keeper_attrs,
