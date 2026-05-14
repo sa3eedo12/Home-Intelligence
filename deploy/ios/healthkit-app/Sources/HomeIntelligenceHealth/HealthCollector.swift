@@ -143,18 +143,37 @@ struct HealthCollector {
             store.execute(q)
         }
 
-        // Sum durations of "asleep"-class stages. iOS 16+ split sleep into
-        // core/deep/REM/asleepUnspecified — all count toward "asleep".
+        // Sum durations of "asleep"-class samples — but be careful about
+        // double-counting: watchOS 9+ emits BOTH a legacy `.asleep` sample
+        // covering the whole sleep period AND fine-grained per-stage samples
+        // (`.asleepCore`, `.asleepDeep`, `.asleepREM`) for the SAME period.
+        // Naively summing them all reports ~2x the real sleep time.
+        //
+        // Strategy: if any stage-specific sample exists in the window, ignore
+        // the legacy `.asleep` value entirely (the stages cover the same
+        // ground in finer detail). Otherwise count `.asleep` (older devices /
+        // manually-logged sleep without a watch).
+        let hasStagedSamples = samples.contains { sample in
+            guard let v = HKCategoryValueSleepAnalysis(rawValue: sample.value) else { return false }
+            switch v {
+            case .asleepCore, .asleepDeep, .asleepREM, .asleepUnspecified:
+                return true
+            default:
+                return false
+            }
+        }
         var asleepSeconds: TimeInterval = 0
         var earliest: Date?
         var latest: Date?
         for s in samples {
             guard let value = HKCategoryValueSleepAnalysis(rawValue: s.value) else { continue }
-            if isAsleepStage(value) {
-                asleepSeconds += s.endDate.timeIntervalSince(s.startDate)
-                if earliest == nil || s.startDate < earliest! { earliest = s.startDate }
-                if latest == nil   || s.endDate   > latest!   { latest   = s.endDate }
-            }
+            if !isAsleepStage(value) { continue }
+            // Skip the legacy bucket if we have staged data — the stages
+            // already account for the same minutes more precisely.
+            if value == .asleep && hasStagedSamples { continue }
+            asleepSeconds += s.endDate.timeIntervalSince(s.startDate)
+            if earliest == nil || s.startDate < earliest! { earliest = s.startDate }
+            if latest == nil   || s.endDate   > latest!   { latest   = s.endDate }
         }
         let minutes = asleepSeconds / 60.0
         if minutes <= 0 { return (nil, nil) }
