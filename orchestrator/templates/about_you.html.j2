@@ -58,35 +58,57 @@
 
     <!-- Devices tab -->
     <section class="ay-pane is-active" data-pane="devices">
-      <div class="card-grid devices-pane">
-        {% for item in knowledge.personal_devices %}
-          {% set attrs = (item.attributes or {}) %}
-          <article class="dev-card device-card" data-thing-id="{{ item.id }}" tabindex="0">
-            <div class="dev-card-icon">
-              {% set t = item.type or '' %}
-              {% if t == 'device.phone' %}📱
-              {% elif t == 'device.tablet' %}📱
-              {% elif t == 'device.watch' %}⌚
-              {% elif t == 'device.laptop' %}💻
-              {% elif t == 'device.monitor' %}🖥️
-              {% else %}🔌{% endif %}
-            </div>
-            <p class="dev-card-name">{{ item.friendly_name }}</p>
-            <div class="dev-card-meta">
-              {% if attrs.manufacturer or attrs.model %}
-                <span class="dev-card-pill">{{ (attrs.manufacturer or '') ~ ' ' ~ (attrs.model or '') }}</span>
-              {% endif %}
-              <span class="dev-card-pill">{{ (item.ha_entity_ids or []) | length }} properties</span>
-            </div>
-          </article>
-        {% else %}
-          <div class="empty-state-card">
-            <span class="empty-state-icon">📱</span>
-            <h3>No personal devices yet</h3>
-            <p>Open <a href="/dashboard/devices">Devices</a>, click any device, and assign it to {{ current.name or 'you' }}.</p>
-          </div>
-        {% endfor %}
-      </div>
+      {% set _type_labels = {
+        'device.phone': ('📱', 'Phones'),
+        'device.tablet': ('📱', 'Tablets'),
+        'device.watch': ('⌚', 'Watches'),
+        'device.laptop': ('💻', 'Laptops'),
+        'device.monitor': ('🖥️', 'Monitors'),
+        'device.other': ('🔌', 'Other'),
+      } %}
+      {% set _grouped = {} %}
+      {% for item in knowledge.personal_devices %}
+        {% set _t = item.type or 'device.other' %}
+        {% if _t not in _grouped %}{% set _ = _grouped.update({_t: []}) %}{% endif %}
+        {% set _ = _grouped[_t].append(item) %}
+      {% endfor %}
+
+      {% if _grouped %}
+        <div class="stack">
+          {% for type_key in (_grouped.keys() | sort) %}
+            {% set _meta = _type_labels.get(type_key, ('🔌', type_key)) %}
+            <details class="dev-area" open>
+              <summary>
+                <span class="category-icon">{{ _meta[0] }}</span>
+                <span class="dev-area-header">{{ _meta[1] }}</span>
+                <span class="dev-area-count">{{ _grouped[type_key]|length }}</span>
+              </summary>
+              <div class="dev-area-grid">
+                {% for item in _grouped[type_key] %}
+                  {% set attrs = (item.attributes or {}) %}
+                  <article class="dev-card device-card" data-thing-id="{{ item.id }}" tabindex="0">
+                    <div class="dev-card-icon">{{ _meta[0] }}</div>
+                    <p class="dev-card-name">{{ item.friendly_name }}</p>
+                    <div class="dev-card-meta">
+                      {% if attrs.manufacturer or attrs.model %}
+                        <span class="dev-card-pill">{{ (attrs.manufacturer or '') ~ ' ' ~ (attrs.model or '') }}</span>
+                      {% endif %}
+                      <span class="dev-card-pill">{{ (item.ha_entity_ids or []) | length }} properties</span>
+                      {% if attrs.area %}<span class="dev-card-pill">📍 {{ attrs.area }}</span>{% endif %}
+                    </div>
+                  </article>
+                {% endfor %}
+              </div>
+            </details>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="empty-state-card">
+          <span class="empty-state-icon">📱</span>
+          <h3>No personal devices yet</h3>
+          <p>Open <a href="/dashboard/devices">Devices</a>, click any device, and assign it to {{ current.name or 'you' }}.</p>
+        </div>
+      {% endif %}
     </section>
 
     <!-- Habits tab -->
