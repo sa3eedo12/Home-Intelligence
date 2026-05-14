@@ -141,11 +141,13 @@ async def _ha_states() -> list[dict[str, Any]]:
 
 
 async def _ha_registries() -> dict[str, list[dict[str, Any]]]:
-    """Pull HA's device + entity registries via WebSocket.
+    """Pull HA's device + entity + area registries via WebSocket.
 
-    Returns ``{"devices": [...], "entities": [...]}``. Each entity row has a
-    ``device_id`` linking back to a device row, which is how we group the
-    "12 entities for one Aqara thermostat" mess into a single thing.
+    Returns ``{"devices": [...], "entities": [...], "areas": [...]}``. Each
+    entity row has a ``device_id`` linking back to a device row, which is
+    how we group the "12 entities for one Aqara thermostat" mess into a
+    single thing. Devices and entities can also have ``area_id`` linking to
+    an area row (e.g. "Living Room", "Bedroom").
 
     Failures (no HA, bad token, HA too old to expose registries) return
     empty lists so the caller can fall back to per-entity classification
@@ -154,24 +156,21 @@ async def _ha_registries() -> dict[str, list[dict[str, Any]]]:
     ha_url = os.environ.get("HA_URL", "").rstrip("/")
     ha_token = os.environ.get("HA_TOKEN", "")
     if not ha_url or not ha_token:
-        return {"devices": [], "entities": []}
+        return {"devices": [], "entities": [], "areas": []}
     try:
-        # WebSocket-based registry fetch: open, auth, query both registries,
-        # close. Borrows the connector + auth pattern from ha_event_bridge.
         ws_url = _ws_url_for(ha_url)
         async with _default_ws_connector(ws_url) as ws:
-            # Auth handshake
             first = json.loads(await ws.recv())
             if first.get("type") != "auth_required":
                 logger.warning("ha_registry_fetch_no_auth_required", got=first.get("type"))
-                return {"devices": [], "entities": []}
+                return {"devices": [], "entities": [], "areas": []}
             await ws.send(json.dumps({"type": "auth", "access_token": ha_token}))
             second = json.loads(await ws.recv())
             if second.get("type") != "auth_ok":
                 logger.warning(
                     "ha_registry_fetch_auth_failed", message=second.get("message")
                 )
-                return {"devices": [], "entities": []}
+                return {"devices": [], "entities": [], "areas": []}
 
             async def fetch(req_id: int, kind: str) -> list[dict[str, Any]]:
                 await ws.send(json.dumps({"id": req_id, "type": f"config/{kind}/list"}))
@@ -193,10 +192,69 @@ async def _ha_registries() -> dict[str, list[dict[str, Any]]]:
 
             devices = await fetch(1, "device_registry")
             entities = await fetch(2, "entity_registry")
-            return {"devices": devices, "entities": entities}
+            areas = await fetch(3, "area_registry")
+            return {"devices": devices, "entities": entities, "areas": areas}
     except Exception as exc:  # noqa: BLE001
         logger.warning("ha_registry_fetch_failed", error=f"{type(exc).__name__}: {exc}")
-        return {"devices": [], "entities": []}
+        return {"devices": [], "entities": [], "areas": []}
+
+
+# Heuristics for device scope. A device is "personal" if it belongs to a
+# specific household_member (phone, watch, laptop, ear-buds), and "home" if
+# it's a shared appliance / fixture (TV, washer, lights, locks, climate).
+PERSONAL_TYPE_PREFIXES = ("device.phone", "device.tablet", "device.laptop", "device.watch")
+HOME_TYPES = {
+    "device.tv", "device.monitor", "device.climate", "device.light",
+    "device.cover", "device.lock", "device.camera", "device.vacuum",
+    "device.doorbell", "appliance.washer", "appliance.dryer",
+    "appliance.dishwasher", "appliance.vacuum", "sensor.motion",
+}
+PERSONAL_KEYWORDS = (
+    "iphone", "ipad", "macbook", "watch", "airpods", "phone", "tablet",
+    "laptop", "_pc", "saeed_pc", "judes_laptop",
+)
+
+
+def _scope_for_thing(
+    thing_type: str,
+    entity_ids: list[str],
+    friendly_name: str,
+    manufacturer: str | None = None,
+) -> str:
+    """Returns 'personal' or 'home'. Heuristic — can be overridden via
+    POST /admin/devices/{id}/owner which writes a definitive owner."""
+    haystack = (friendly_name + " " + " ".join(entity_ids) + " " + (manufacturer or "")).lower()
+    if any(kw in haystack for kw in PERSONAL_KEYWORDS):
+        return "personal"
+    if any(thing_type.startswith(p) for p in PERSONAL_TYPE_PREFIXES):
+        return "personal"
+    if thing_type in HOME_TYPES:
+        return "home"
+    if any(eid.startswith("device_tracker.") or eid.startswith("person.") for eid in entity_ids):
+        return "personal"
+    # Default: shared/home.
+    return "home"
+
+
+def _guess_owner(
+    friendly_name: str,
+    entity_ids: list[str],
+    members: list[dict[str, Any]],
+) -> int | None:
+    """Match a device to a household_member by name overlap. Returns the
+    member's id, or None if nothing confidently matches."""
+    haystack = (friendly_name + " " + " ".join(entity_ids)).lower()
+    best: tuple[int, int | None] = (0, None)  # (score, member_id)
+    for m in members:
+        name = str(m.get("name") or "").lower().strip()
+        if not name:
+            continue
+        norm = _normalize_name(name)
+        if norm in haystack or name in haystack:
+            score = 2 if name in haystack else 1
+            if score > best[0]:
+                best = (score, m.get("id"))
+    return best[1]
 
 
 def _device_friendly_name(device: dict[str, Any], fallback_entity_id: str) -> str:
@@ -323,10 +381,9 @@ async def discover_proposal(*, knowledge_graph: Any) -> dict[str, Any]:
             deviceless_entities.append(eid)
 
     # ── Path 1: HA device registry available → group by device_id ──────────
+    areas_by_id = {a.get("area_id", ""): a for a in registries["areas"] if a.get("area_id")}
     if entities_by_device:
         for device_id, child_eids in entities_by_device.items():
-            # Skip the whole device if any of its entities is already adopted —
-            # rely on the user to merge manually if they actually want the rest.
             if any(c in adopted_eids for c in child_eids):
                 continue
             device = devices_by_id[device_id]
@@ -334,6 +391,15 @@ async def discover_proposal(*, knowledge_graph: Any) -> dict[str, Any]:
             if thing_type is None or not primary_eid:
                 continue
             extras = sorted(c for c in child_eids if c != primary_eid)
+            area_id = device.get("area_id") or next(
+                (
+                    e.get("area_id")
+                    for e in registries["entities"]
+                    if e.get("device_id") == device_id and e.get("area_id")
+                ),
+                None,
+            )
+            area_name = areas_by_id.get(area_id or "", {}).get("name") if area_id else None
             things_to_adopt.append({
                 "entity_id": primary_eid,
                 "type": thing_type,
@@ -341,6 +407,8 @@ async def discover_proposal(*, knowledge_graph: Any) -> dict[str, Any]:
                 "device_id": device_id,
                 "manufacturer": device.get("manufacturer"),
                 "model": device.get("model"),
+                "area": area_name,
+                "area_id": area_id,
                 "extra_entity_ids": extras,
                 "child_count": len(child_eids),
             })
@@ -458,6 +526,7 @@ async def apply_proposal(
 
     if knowledge_graph is not None:
         existing_things = await knowledge_graph.list_things()
+        members_for_scope = await knowledge_graph.list_members(include_pets=False) or []
         existing_eids: set[str] = set()
         for t in existing_things or []:
             attrs = t.get("attributes") or {}
@@ -474,8 +543,6 @@ async def apply_proposal(
                 continue
             extras_raw = thing.get("extra_entity_ids") or []
             extras = [str(e).strip() for e in extras_raw if isinstance(e, str) and e.strip()]
-            # All entity_ids that belong to this device — primary first so
-            # match-by-first-id heuristics behave predictably downstream.
             all_entity_ids = [eid] + [e for e in extras if e != eid]
             attrs: dict[str, Any] = {
                 "entity_id": eid,
@@ -487,6 +554,25 @@ async def apply_proposal(
                 attrs["manufacturer"] = thing["manufacturer"]
             if thing.get("model"):
                 attrs["model"] = thing["model"]
+            if thing.get("area"):
+                attrs["area"] = thing["area"]
+            if thing.get("area_id"):
+                attrs["area_id"] = thing["area_id"]
+            scope = _scope_for_thing(
+                thing_type=str(thing.get("type") or ""),
+                entity_ids=all_entity_ids,
+                friendly_name=str(thing.get("friendly_name") or ""),
+                manufacturer=thing.get("manufacturer"),
+            )
+            attrs["scope"] = scope
+            if scope == "personal":
+                guess = _guess_owner(
+                    friendly_name=str(thing.get("friendly_name") or ""),
+                    entity_ids=all_entity_ids,
+                    members=members_for_scope,
+                )
+                if guess is not None:
+                    attrs["owner_member_id"] = int(guess)
             try:
                 await knowledge_graph.put_thing(
                     type=str(thing.get("type") or ""),
@@ -569,6 +655,7 @@ async def consolidate_by_device(*, knowledge_graph: Any) -> dict[str, Any]:
             eid_to_device[eid] = device_id
 
     devices_by_id = {d.get("id", ""): d for d in registries["devices"] if d.get("id")}
+    areas_by_id = {a.get("area_id", ""): a for a in registries["areas"] if a.get("area_id")}
 
     # device_id → all of its entity_ids (HA's view, not ours)
     device_to_eids: dict[str, list[str]] = {}
@@ -576,6 +663,7 @@ async def consolidate_by_device(*, knowledge_graph: Any) -> dict[str, Any]:
         device_to_eids.setdefault(device_id, []).append(eid)
 
     things = await knowledge_graph.list_things() or []
+    members = await knowledge_graph.list_members(include_pets=False) or []
 
     # First pass: bucket existing things by their device_id (if discoverable).
     things_by_device: dict[str, list[dict[str, Any]]] = {}
@@ -628,9 +716,38 @@ async def consolidate_by_device(*, knowledge_graph: Any) -> dict[str, Any]:
             keeper_attrs["manufacturer"] = device["manufacturer"]
         if device.get("model"):
             keeper_attrs["model"] = device["model"]
+        # Area: prefer the device's area, fall back to any entity's area.
+        area_id = device.get("area_id") or next(
+            (
+                e.get("area_id")
+                for e in registries["entities"]
+                if e.get("device_id") == device_id and e.get("area_id")
+            ),
+            None,
+        )
+        if area_id and area_id in areas_by_id:
+            keeper_attrs["area_id"] = area_id
+            keeper_attrs["area"] = areas_by_id[area_id].get("name", "")
+        # Personal vs home + best-guess owner. Existing owner_member_id wins
+        # so a user who manually re-assigned via the dashboard isn't undone.
+        keeper_attrs["scope"] = _scope_for_thing(
+            thing_type=str(keeper.get("type") or ""),
+            entity_ids=all_ha_eids,
+            friendly_name=str(keeper.get("friendly_name") or ""),
+            manufacturer=device.get("manufacturer"),
+        )
         keeper_name = _device_friendly_name(
             device, str(keeper.get("friendly_name") or "")
         ) or keeper.get("friendly_name") or "device"
+        owner_member_id = keeper.get("owner_member_id")
+        if owner_member_id is None and keeper_attrs["scope"] == "personal":
+            owner_member_id = _guess_owner(
+                friendly_name=str(keeper_name),
+                entity_ids=all_ha_eids,
+                members=members,
+            )
+        if owner_member_id is not None:
+            keeper_attrs["owner_member_id"] = int(owner_member_id)
 
         try:
             await knowledge_graph.put_thing(
@@ -648,6 +765,9 @@ async def consolidate_by_device(*, knowledge_graph: Any) -> dict[str, Any]:
                 "name": keeper_name,
                 "primary": keeper_attrs.get("entity_id"),
                 "entity_count": len(all_ha_eids),
+                "scope": keeper_attrs.get("scope"),
+                "area": keeper_attrs.get("area"),
+                "owner_member_id": owner_member_id,
             })
         except Exception as exc:  # noqa: BLE001
             logger.warning(

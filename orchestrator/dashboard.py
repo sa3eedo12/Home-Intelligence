@@ -521,6 +521,16 @@ async def discovery(request: Request) -> HTMLResponse:
     )
 
 
+@router.get("/dashboard/devices", response_class=HTMLResponse)
+async def devices_page(request: Request) -> HTMLResponse:
+    """Personal vs Home devices, grouped by area, with drill-down."""
+    return templates.TemplateResponse(
+        request=request,
+        name="devices.html.j2",
+        context={},
+    )
+
+
 @router.get("/dashboard/onboarding", response_class=HTMLResponse)
 async def onboarding(request: Request, stage: int | None = None) -> HTMLResponse:
     state = await build_onboarding_state(request, override_stage=stage)

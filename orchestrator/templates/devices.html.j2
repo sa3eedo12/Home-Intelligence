@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Devices · Home Intelligence</title>
+  <link rel="stylesheet" href="/static/_design.css">
+  <link rel="stylesheet" href="/static/devices.css">
+  <script src="/static/_app.js" defer></script>
+  <script src="/static/devices.js" defer></script>
+</head>
+<body>
+  <header class="dev-topbar">
+    <a href="/dashboard" class="back-link">← Dashboard</a>
+    <div>
+      <h1>Devices</h1>
+      <p>Everything Home Intelligence is tracking, grouped the way HA grouped them.</p>
+    </div>
+    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
+  </header>
+
+  <main class="dev-shell">
+    <div class="dev-tabs">
+      <button class="dev-tab is-active" data-scope="home">
+        <span class="dev-tab-label">🏠 Home</span>
+        <span class="dev-tab-count" data-count="home">…</span>
+      </button>
+      <button class="dev-tab" data-scope="personal">
+        <span class="dev-tab-label">👤 Personal</span>
+        <span class="dev-tab-count" data-count="personal">…</span>
+      </button>
+    </div>
+
+    <div class="dev-toolbar">
+      <input type="search" id="dev-filter" placeholder="Filter by name, area, manufacturer…" autocomplete="off">
+    </div>
+
+    <section id="dev-list" class="dev-list" aria-live="polite">
+      <p class="muted dev-empty">Loading devices…</p>
+    </section>
+  </main>
+
+  <!-- Drill-down panel: hidden until a card is clicked -->
+  <aside id="dev-detail" class="dev-detail" hidden aria-label="Device detail">
+    <div class="dev-detail-inner">
+      <button id="dev-detail-close" class="btn btn-secondary btn-icon" aria-label="Close">✕</button>
+      <header class="dev-detail-header">
+        <h2 id="dd-name">…</h2>
+        <p id="dd-meta" class="muted">…</p>
+      </header>
+
+      <section class="dev-detail-section">
+        <h3>Owner</h3>
+        <div class="owner-row">
+          <select id="dd-owner-select"></select>
+          <button id="dd-owner-save" class="btn btn-primary">Save</button>
+          <span id="dd-owner-status" class="muted"></span>
+        </div>
+      </section>
+
+      <section class="dev-detail-section">
+        <h3>Entities <small id="dd-entity-count" class="muted"></small></h3>
+        <p class="muted dev-detail-hint">Live state from Home Assistant. The device knows about each of these properties.</p>
+        <ul id="dd-entities" class="entity-list"></ul>
+      </section>
+    </div>
+  </aside>
+</body>
+</html>

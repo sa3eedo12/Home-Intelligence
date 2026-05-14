@@ -1082,6 +1082,212 @@ async def setup_consolidate_by_device(request: Request) -> dict[str, Any]:
     return await consolidate_by_device(knowledge_graph=graph)
 
 
+@router.get("/admin/devices")
+async def list_devices(request: Request) -> dict[str, Any]:
+    """List adopted things with their device-level metadata grouped by scope.
+
+    Optional query params:
+      scope   "personal" or "home" — filters the returned list
+      area    case-insensitive substring match on the area name
+
+    Returns ``{"home": [...], "personal": [...]}`` (or just the requested
+    scope if filtered). Each device entry includes the entity_ids it owns,
+    the area, manufacturer, model, owner, and an entity_count.
+    """
+    graph = _knowledge_graph(request)
+    things = await graph.list_things() or []
+    scope_filter = (request.query_params.get("scope") or "").strip().lower() or None
+    area_filter = (request.query_params.get("area") or "").strip().lower() or None
+    members = await graph.list_members(include_pets=True) or []
+    members_by_id = {int(m.get("id")): m for m in members if m.get("id") is not None}
+
+    by_scope: dict[str, list[dict[str, Any]]] = {"home": [], "personal": []}
+    for t in things:
+        attrs = t.get("attributes") or {}
+        scope = str(attrs.get("scope") or "home").lower()
+        if scope not in by_scope:
+            scope = "home"
+        if scope_filter and scope != scope_filter:
+            continue
+        area = attrs.get("area")
+        if area_filter and area_filter not in (area or "").lower():
+            continue
+        owner_id = attrs.get("owner_member_id") or t.get("owner_member_id")
+        owner_name = None
+        if owner_id is not None:
+            try:
+                owner_name = (members_by_id.get(int(owner_id)) or {}).get("name")
+            except (TypeError, ValueError):
+                owner_name = None
+        by_scope[scope].append({
+            "id": t.get("id"),
+            "type": t.get("type"),
+            "friendly_name": t.get("friendly_name"),
+            "area": area,
+            "manufacturer": attrs.get("manufacturer"),
+            "model": attrs.get("model"),
+            "ha_device_id": attrs.get("ha_device_id"),
+            "primary_entity_id": attrs.get("entity_id"),
+            "entity_ids": list(t.get("ha_entity_ids") or []),
+            "entity_count": len(t.get("ha_entity_ids") or []),
+            "owner_member_id": owner_id,
+            "owner_name": owner_name,
+            "confidence": t.get("confidence"),
+            "scope": scope,
+        })
+
+    # Sort each list: by area, then by name.
+    for scope in by_scope:
+        by_scope[scope].sort(key=lambda r: (
+            (r.get("area") or "zzz").lower(),
+            (r.get("friendly_name") or "").lower(),
+        ))
+
+    return {"ok": True, "counts": {k: len(v) for k, v in by_scope.items()}, **by_scope}
+
+
+@router.get("/admin/devices/{thing_id}")
+async def device_detail(thing_id: int, request: Request) -> dict[str, Any]:
+    """Drill-down view: thing metadata + live state of every entity in HA."""
+    import os as _os
+
+    import httpx as _httpx
+
+    graph = _knowledge_graph(request)
+    things = await graph.list_things() or []
+    thing = next((t for t in things if int(t.get("id") or 0) == thing_id), None)
+    if thing is None:
+        raise HTTPException(status_code=404, detail="thing not found")
+
+    attrs = thing.get("attributes") or {}
+    entity_ids: list[str] = list(thing.get("ha_entity_ids") or [])
+
+    # Pull live state from HA. Single /api/states call, then filter — cheaper
+    # than one call per entity and covers our typical 12-entity device.
+    ha_url = _os.environ.get("HA_URL", "").rstrip("/")
+    ha_token = _os.environ.get("HA_TOKEN", "")
+    states_by_eid: dict[str, dict[str, Any]] = {}
+    if ha_url and ha_token and entity_ids:
+        try:
+            async with _httpx.AsyncClient(
+                timeout=10.0,
+                headers={"Authorization": f"Bearer {ha_token}"},
+            ) as client:
+                resp = await client.get(f"{ha_url}/api/states")
+                resp.raise_for_status()
+                for s in resp.json():
+                    if not isinstance(s, dict):
+                        continue
+                    eid = s.get("entity_id")
+                    if eid in entity_ids:
+                        states_by_eid[eid] = s
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("device_detail_ha_states_failed", error=str(exc))
+
+    entities = []
+    for eid in entity_ids:
+        st = states_by_eid.get(eid) or {}
+        sa = st.get("attributes") or {}
+        entities.append({
+            "entity_id": eid,
+            "domain": eid.split(".", 1)[0] if "." in eid else "",
+            "state": st.get("state"),
+            "friendly_name": sa.get("friendly_name"),
+            "unit": sa.get("unit_of_measurement"),
+            "device_class": sa.get("device_class"),
+            "icon": sa.get("icon"),
+            "last_changed": st.get("last_changed"),
+            "last_updated": st.get("last_updated"),
+            # The full attribute bag is sometimes HUGE (battery histograms,
+            # zone polygons). Trim to the keys the dashboard actually shows.
+            "attributes": {
+                k: v for k, v in sa.items()
+                if k in {
+                    "battery_level", "temperature", "humidity",
+                    "current_temperature", "target_temp_high",
+                    "target_temp_low", "hvac_action", "fan_mode",
+                    "preset_mode", "brightness", "color_temp", "rgb_color",
+                    "media_title", "media_artist", "media_position",
+                    "source", "options", "supported_features",
+                }
+            },
+        })
+
+    owner_id = attrs.get("owner_member_id") or thing.get("owner_member_id")
+    return {
+        "ok": True,
+        "id": thing.get("id"),
+        "type": thing.get("type"),
+        "friendly_name": thing.get("friendly_name"),
+        "scope": attrs.get("scope") or "home",
+        "area": attrs.get("area"),
+        "area_id": attrs.get("area_id"),
+        "manufacturer": attrs.get("manufacturer"),
+        "model": attrs.get("model"),
+        "ha_device_id": attrs.get("ha_device_id"),
+        "owner_member_id": owner_id,
+        "primary_entity_id": attrs.get("entity_id"),
+        "entity_count": len(entity_ids),
+        "ha_states_available": bool(states_by_eid),
+        "entities": entities,
+    }
+
+
+@router.post("/admin/devices/{thing_id}/owner")
+async def set_device_owner(thing_id: int, request: Request) -> dict[str, Any]:
+    """Set or clear the owner_member_id for a thing.
+
+    Body: ``{"owner_member_id": 2}`` to assign, or ``{"owner_member_id": null}``
+    to clear (which also flips scope back to "home" unless overridden).
+    Optional: ``{"scope": "personal"}`` or ``{"scope": "home"}`` to override
+    the heuristic.
+    """
+    body = await _json_object(request)
+    graph = _knowledge_graph(request)
+    things = await graph.list_things() or []
+    thing = next((t for t in things if int(t.get("id") or 0) == thing_id), None)
+    if thing is None:
+        raise HTTPException(status_code=404, detail="thing not found")
+
+    attrs = dict(thing.get("attributes") or {})
+    raw_owner = body.get("owner_member_id")
+    if raw_owner is None or raw_owner == "":
+        attrs.pop("owner_member_id", None)
+    else:
+        try:
+            attrs["owner_member_id"] = int(raw_owner)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"owner_member_id must be an integer or null: {raw_owner!r}",
+            ) from exc
+
+    new_scope = body.get("scope")
+    if new_scope in ("personal", "home"):
+        attrs["scope"] = new_scope
+    elif "owner_member_id" in attrs and attrs.get("scope") != "personal":
+        attrs["scope"] = "personal"
+    elif "owner_member_id" not in attrs and attrs.get("scope") == "personal":
+        attrs["scope"] = "home"
+
+    await graph.put_thing(
+        thing_id=thing_id,
+        type=str(thing.get("type") or ""),
+        friendly_name=str(thing.get("friendly_name") or ""),
+        attributes=attrs,
+        ha_entity_ids=list(thing.get("ha_entity_ids") or []),
+        photo_path=thing.get("photo_path"),
+        confidence=float(thing.get("confidence") or 0.9),
+        source=str(thing.get("source") or "user"),
+    )
+    return {
+        "ok": True,
+        "id": thing_id,
+        "scope": attrs.get("scope"),
+        "owner_member_id": attrs.get("owner_member_id"),
+    }
+
+
 @router.post("/admin/safety/explain")
 async def explain_safety(request: Request) -> dict[str, Any]:
     body = await request.json()
