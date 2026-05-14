@@ -39,15 +39,18 @@
   }
 
   async function fetchMembers() {
-    // No dedicated /admin/members endpoint — devices endpoint already
-    // resolved owner_name for us. For the dropdown we do need the list
-    // though, so query the household graph via the about-you data path.
+    // /admin/household/list returns {items: [...], count: N} — earlier code
+    // tried data.members which doesn't exist on this endpoint, so members
+    // ended up being the whole {items:...} object and `.map` blew up.
     try {
       const resp = await fetch('/admin/household/list');
       if (resp.ok) {
         const data = await resp.json();
-        members = data.members || data || [];
-        return;
+        const candidate = data.items || data.members || data;
+        if (Array.isArray(candidate)) {
+          members = candidate;
+          return;
+        }
       }
     } catch (_) { /* falls through */ }
     // Fallback: synthesize from owner names we already saw on devices.
@@ -88,16 +91,26 @@
 
     const groups = Array.from(byGroup.entries()).sort(([a], [b]) => a.localeCompare(b));
     container.innerHTML = groups.map(([groupName, devs]) => `
-      <section class="dev-area">
-        <h3 class="dev-area-header">${escapeHtml(groupName)} <span class="muted">(${devs.length})</span></h3>
+      <details class="dev-area" open>
+        <summary>
+          <span class="dev-area-header">${escapeHtml(groupName)}</span>
+          <span class="dev-area-count">${devs.length}</span>
+        </summary>
         <div class="dev-area-grid">
           ${devs.map(deviceCard).join('')}
         </div>
-      </section>
+      </details>
     `).join('');
 
     container.querySelectorAll('.dev-card').forEach(card => {
       card.addEventListener('click', () => openDetail(parseInt(card.dataset.id, 10)));
+      card.addEventListener('keydown', evt => {
+        if (evt.key === 'Enter' || evt.key === ' ') {
+          evt.preventDefault();
+          openDetail(parseInt(card.dataset.id, 10));
+        }
+      });
+      card.tabIndex = 0;
     });
   }
 
@@ -107,16 +120,15 @@
     if (d.manufacturer) meta.push(d.manufacturer);
     if (d.model) meta.push(d.model);
     return `
-      <div class="dev-card" data-id="${d.id}">
+      <article class="dev-card" data-id="${d.id}">
         <div class="dev-card-icon">${icon}</div>
         <p class="dev-card-name">${escapeHtml(d.friendly_name || d.primary_entity_id || 'Unnamed')}</p>
         <div class="dev-card-meta">
-          <span class="dev-card-pill">${escapeHtml(d.type || '')}</span>
-          ${d.entity_count ? `<span class="dev-card-pill">${d.entity_count} entities</span>` : ''}
+          ${d.entity_count ? `<span class="dev-card-pill">${d.entity_count} props</span>` : ''}
           ${meta.length ? `<span class="dev-card-pill">${escapeHtml(meta.join(' '))}</span>` : ''}
           ${d.owner_name && activeScope === 'home' ? `<span class="dev-card-pill">👤 ${escapeHtml(d.owner_name)}</span>` : ''}
         </div>
-      </div>
+      </article>
     `;
   }
 
@@ -167,20 +179,22 @@
       ul.innerHTML = `<li class="muted">No entities to show.</li>`;
       return;
     }
-    ul.innerHTML = groups.map(group => `
-      <li class="category-block">
-        <div class="category-header">
-          <span class="category-icon">${group.icon}</span>
-          <h4>${escapeHtml(group.name)}</h4>
-          <span class="muted">${group.entities.length}</span>
-        </div>
-        <div class="property-grid">
-          ${group.entities.map(propertyRow).join('')}
-        </div>
+    ul.innerHTML = groups.map((group, idx) => `
+      <li>
+        <details class="category-block" ${idx < 2 ? 'open' : ''}>
+          <summary>
+            <span class="category-icon">${group.icon}</span>
+            <span class="category-name">${escapeHtml(group.name)}</span>
+            <span class="category-count">${group.entities.length}</span>
+          </summary>
+          <div class="property-grid">
+            ${group.entities.map(propertyRow).join('')}
+          </div>
+        </details>
       </li>
     `).join('') + `
       <li class="tech-toggle-row">
-        <button type="button" id="dd-tech-toggle" class="btn btn-ghost btn-sm linklike">Show technical details</button>
+        <button type="button" id="dd-tech-toggle" class="btn btn-ghost btn-sm linklike" data-shown="no">Show technical details</button>
       </li>
     `;
 
@@ -188,16 +202,17 @@
   }
 
   function propertyRow(e) {
-    const value = (e.value == null || e.value === '') ? '—' : e.value;
-    const ts = e.last_changed ? `<span class="prop-when muted">${escapeHtml(formatRelative(e.last_changed))}</span>` : '';
-    const eid = `<span class="prop-eid muted" hidden>${escapeHtml(e.entity_id)}</span>`;
+    const value = (e.value == null || e.value === '' || e.value === '—') ? '—' : e.value;
+    const isEmpty = value === '—';
+    const ts = e.last_changed ? `<span class="prop-when">${escapeHtml(formatRelative(e.last_changed))}</span>` : '';
+    const eid = `<span class="prop-eid" hidden>${escapeHtml(e.entity_id)}</span>`;
     return `
       <div class="property-row">
         <div class="property-label">
           <span>${escapeHtml(e.property_label || e.entity_id)}</span>
           ${ts}
         </div>
-        <div class="property-value">${escapeHtml(String(value))}</div>
+        <div class="property-value${isEmpty ? ' is-empty' : ''}">${escapeHtml(String(value))}</div>
         ${eid}
       </div>
     `;

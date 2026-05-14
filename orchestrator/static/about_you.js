@@ -197,14 +197,16 @@
         ul.innerHTML = `<li class="muted">No properties to show.</li>`;
         return;
       }
-      ul.innerHTML = groups.map(g => `
-        <li class="category-block">
-          <div class="category-header">
-            <span class="category-icon">${g.icon}</span>
-            <h4>${escapeHtml(g.name)}</h4>
-            <span class="muted">${g.entities.length}</span>
-          </div>
-          <div class="property-grid">${g.entities.map(propertyRow).join('')}</div>
+      ul.innerHTML = groups.map((g, idx) => `
+        <li>
+          <details class="category-block" ${idx < 2 ? 'open' : ''}>
+            <summary>
+              <span class="category-icon">${g.icon}</span>
+              <span class="category-name">${escapeHtml(g.name)}</span>
+              <span class="category-count">${g.entities.length}</span>
+            </summary>
+            <div class="property-grid">${g.entities.map(propertyRow).join('')}</div>
+          </details>
         </li>`).join('') + `
         <li class="tech-toggle-row">
           <button type="button" id="dd-tech-toggle" class="btn btn-ghost btn-sm linklike" data-shown="no">Show technical details</button>

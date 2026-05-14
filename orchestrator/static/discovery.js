@@ -10,6 +10,26 @@
   const summaryLine = document.getElementById('summary-line');
   const allCards = container ? Array.from(container.querySelectorAll('.entity-card')) : [];
 
+  // Persist filters across reloads — adopt/ignore both reload the page, and
+  // it's annoying to retype the search query and re-pick a grouping every
+  // time. Restored before the first render() so the user sees their state.
+  const STATE_KEY = 'discovery.filters.v1';
+  function loadState() {
+    try { return JSON.parse(localStorage.getItem(STATE_KEY) || '{}'); }
+    catch (_) { return {}; }
+  }
+  function saveState() {
+    try {
+      localStorage.setItem(STATE_KEY, JSON.stringify({
+        q: search?.value || '',
+        groupBy: groupBy?.value || '',
+      }));
+    } catch (_) { /* localStorage may be disabled */ }
+  }
+  const initial = loadState();
+  if (search && initial.q) search.value = initial.q;
+  if (groupBy && initial.groupBy) groupBy.value = initial.groupBy;
+
   function groupKey(card, mode) {
     if (mode === 'area') return card.dataset.area || 'Unassigned';
     if (mode === 'domain') return card.dataset.domain || 'unknown';
@@ -31,6 +51,7 @@
     if (!container) return;
     const mode = groupBy ? groupBy.value : 'type';
     const q = (search?.value || '').toLowerCase().trim();
+    saveState();
     allCards.forEach((card) => card.remove());
     container.querySelectorAll('.group-section').forEach((s) => s.remove());
     container.querySelector('.search-empty')?.remove();

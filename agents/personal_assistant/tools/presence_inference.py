@@ -329,6 +329,21 @@ async def infer_presence_return(
     if away_minutes is None and left_at is not None:
         away_minutes = max(0, int((returned_at - left_at.astimezone(UTC)).total_seconds() // 60))
 
+    # Suppress brief WiFi blips and walking-out-of-range fluctuations. Without
+    # this, a phone that loses + regains the home network for 30 seconds
+    # triggers a "👋 Welcome home" notification even though the user never
+    # actually left. Threshold is intentionally generous (15 min) — any real
+    # trip — coffee run, gym, school pickup — is well over that.
+    MIN_AWAY_MINUTES_FOR_WELCOME = int(os.environ.get("PRESENCE_MIN_AWAY_MIN", "15"))
+    if away_minutes is not None and away_minutes < MIN_AWAY_MINUTES_FOR_WELCOME:
+        return {
+            "ok": True,
+            "ignored": True,
+            "reason": f"away_only_{away_minutes}_min",
+            "summary": "",
+            "keyboard": [],
+        }
+
     history = await store.confirmed_context_history(person, limit_days=30)
     context, confidence, reasoning = _infer(
         away_minutes=away_minutes,
