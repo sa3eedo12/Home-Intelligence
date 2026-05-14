@@ -59,6 +59,68 @@ def _min_confidence() -> float:
     return max(0.0, min(value, 1.0))
 
 
+# ── User-correction memory ───────────────────────────────────────────────
+#
+# The auto_inferences table records the outcome of every proposed
+# inference: confirmed / rejected / skipped / proposed / expired. We treat
+# rejected+skipped as user corrections — when the user keeps saying "no"
+# to the same source_kind, the system should back off. When the user
+# keeps saying "yes", the floor should loosen so we surface them more.
+#
+# This is the start of "the system actually learns from feedback" rather
+# than "every event is a clean slate."
+
+DEFAULT_BACKOFF_REJECTIONS = 3        # ≥ this many in window → mute
+DEFAULT_BACKOFF_DAYS = 7              # rolling window for both directions
+DEFAULT_REINFORCE_CONFIRMS = 3        # ≥ this many → loosen floor
+DEFAULT_REINFORCE_BONUS = 0.1         # how much to lower floor when reinforced
+
+
+def _backoff_rejections() -> int:
+    raw = os.getenv("AUTO_INFER_BACKOFF_REJECTIONS", str(DEFAULT_BACKOFF_REJECTIONS))
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_BACKOFF_REJECTIONS
+
+
+def _backoff_days() -> int:
+    raw = os.getenv("AUTO_INFER_BACKOFF_DAYS", str(DEFAULT_BACKOFF_DAYS))
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_BACKOFF_DAYS
+
+
+def _reinforce_confirms() -> int:
+    raw = os.getenv("AUTO_INFER_REINFORCE_CONFIRMS", str(DEFAULT_REINFORCE_CONFIRMS))
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_REINFORCE_CONFIRMS
+
+
+def _adjusted_min_confidence(corrections: dict[str, int]) -> float:
+    """Apply correction memory to the global confidence floor.
+
+    Heavy confirmations of a kind → loosen floor. Heavy rejections are
+    handled separately (a hard mute, not a floor adjustment) because by
+    the time we got here we've already DECIDED to propose; the user
+    saying "no" 3 times means we shouldn't even propose, not that we
+    should propose with stricter gates.
+    """
+    base = _min_confidence()
+    if corrections.get("confirmed", 0) >= _reinforce_confirms():
+        return max(0.0, base - DEFAULT_REINFORCE_BONUS)
+    return base
+
+
+def _should_back_off(corrections: dict[str, int]) -> bool:
+    """True if user has corrected enough times that we should stop proposing."""
+    rejected = corrections.get("rejected", 0) + corrections.get("skipped", 0)
+    return rejected >= _backoff_rejections()
+
+
 async def _auto_store() -> AutoInferencesStore:
     return AutoInferencesStore(await _pool())
 
@@ -394,6 +456,32 @@ async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
         )
         return {"ok": True, "skipped": True, "reason": "rate_limit"}
 
+    # User-correction memory: if you've rejected/skipped this same source_kind
+    # repeatedly in the last 7 days, mute it entirely. This is the start of
+    # closing the observe -> infer -> CORRECT -> learn loop. Confirmations
+    # in the same window unlock a slightly looser confidence floor.
+    try:
+        corrections = await store.correction_counts(
+            source_kind=source_kind, days=_backoff_days()
+        )
+    except Exception as exc:
+        logger.warning("auto_infer_correction_lookup_failed", error=str(exc))
+        corrections = {"confirmed": 0, "rejected": 0, "skipped": 0}
+
+    if _should_back_off(corrections):
+        logger.info(
+            "auto_infer_skipped",
+            source_kind=source_kind,
+            reason="user_corrections",
+            corrections=corrections,
+        )
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "user_corrections",
+            "corrections": corrections,
+        }
+
     # Try the deterministic rule path first; fall back to the LLM only for
     # observer kinds we don't have a hand-coded interpretation for. This is
     # what closes the auto_inferences=0 gap — the LLM's prompt is biased
@@ -417,7 +505,7 @@ async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
         proposed_action = _normalize_action(inference_result.get("proposed_action"))
         inference_source = "llm"
 
-    min_conf = _min_confidence()
+    min_conf = _adjusted_min_confidence(corrections)
     if (
         confidence < min_conf
         or not inference
@@ -432,6 +520,7 @@ async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
             min_confidence=min_conf,
             has_inference=bool(inference),
             has_action=_safe_record_event_action(proposed_action),
+            corrections=corrections,
         )
         return {
             "ok": True,
@@ -442,6 +531,7 @@ async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
 
     reasoning = (
         f"auto-inference source={inference_source} reason={reason}; "
+        f"corrections={corrections}; "
         f"source_summary={str(envelope.get('summary') or '')[:300]}"
     )
     auto_inference_id = await store.insert(
@@ -462,6 +552,7 @@ async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
         inference_source=inference_source,
         confidence=confidence,
         auto_inference_id=auto_inference_id,
+        corrections=corrections,
     )
     return {
         "ok": True,

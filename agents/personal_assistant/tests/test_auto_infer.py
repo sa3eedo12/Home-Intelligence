@@ -8,11 +8,17 @@ from tools import auto_infer
 
 
 class _FakeStore:
-    def __init__(self, count: int = 0) -> None:
+    def __init__(
+        self,
+        count: int = 0,
+        corrections: dict[str, int] | None = None,
+    ) -> None:
         self.count = count
+        self._corrections = corrections or {"confirmed": 0, "rejected": 0, "skipped": 0}
         self.insert_calls: list[dict[str, Any]] = []
         self.confirm_calls: list[dict[str, Any]] = []
         self.reject_calls: list[dict[str, Any]] = []
+        self.correction_lookups: list[dict[str, Any]] = []
         self.record: dict[str, Any] | None = {
             "id": 7,
             "status": "proposed",
@@ -31,6 +37,12 @@ class _FakeStore:
     async def recent_count_in_window(self, *, hours: int = 1) -> int:
         assert hours == 1
         return self.count
+
+    async def correction_counts(
+        self, *, source_kind: str, days: int = 7
+    ) -> dict[str, int]:
+        self.correction_lookups.append({"source_kind": source_kind, "days": days})
+        return dict(self._corrections)
 
     async def insert(self, **kwargs: Any) -> int:
         self.insert_calls.append(kwargs)
@@ -409,3 +421,151 @@ async def test_min_confidence_is_env_configurable(monkeypatch) -> None:
 def test_rule_based_inference_unknown_kind_returns_none() -> None:
     assert auto_infer._rule_based_inference({"kind": "garage.opened"}) is None
     assert auto_infer._rule_based_inference({}) is None
+
+
+# ── User-correction memory ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_back_off_after_repeated_user_rejections(monkeypatch) -> None:
+    """If the user has rejected/skipped this kind 3+ times in 7 days,
+    the system stops proposing — the start of the 'actually learns from
+    feedback' loop."""
+    store = _FakeStore(count=0, corrections={"confirmed": 0, "rejected": 3, "skipped": 0})
+
+    async def _store() -> _FakeStore:
+        return store
+
+    async def _fail_infer(_context: str) -> dict[str, Any]:
+        raise AssertionError("LLM must NOT be called when backed off")
+
+    monkeypatch.setattr(auto_infer, "_auto_store", _store)
+    monkeypatch.setattr(auto_infer.infer_tool, "infer", _fail_infer)
+
+    result = await auto_infer.auto_infer_observer_event(
+        kind="entertainment.left_on",
+        ts="2026-05-14T22:00:00+00:00",
+        payload={"on_hours": 6.0, "friendly_name": "TV"},
+    )
+
+    assert result["ok"] is True
+    assert result["skipped"] is True
+    assert result["reason"] == "user_corrections"
+    assert result["corrections"] == {"confirmed": 0, "rejected": 3, "skipped": 0}
+    assert store.insert_calls == []
+    # The lookup happened with the right kind + default 7-day window
+    assert store.correction_lookups[0]["source_kind"] == "entertainment.left_on"
+    assert store.correction_lookups[0]["days"] == 7
+
+
+@pytest.mark.asyncio
+async def test_back_off_counts_skips_as_corrections(monkeypatch) -> None:
+    """User clicking 'Skip' on the inline keyboard is also a 'no' signal —
+    it shouldn't take three explicit rejections + three skips to mute."""
+    store = _FakeStore(count=0, corrections={"confirmed": 0, "rejected": 1, "skipped": 2})
+
+    async def _store() -> _FakeStore:
+        return store
+
+    monkeypatch.setattr(auto_infer, "_auto_store", _store)
+
+    result = await auto_infer.auto_infer_observer_event(
+        kind="entertainment.left_on",
+        ts="2026-05-14T22:00:00+00:00",
+        payload={"on_hours": 6.0, "friendly_name": "TV"},
+    )
+
+    assert result["skipped"] is True
+    assert result["reason"] == "user_corrections"
+
+
+@pytest.mark.asyncio
+async def test_corrections_below_threshold_still_proposes(monkeypatch) -> None:
+    """Two rejections in a week is normal noise — don't mute prematurely."""
+    store = _FakeStore(count=0, corrections={"confirmed": 1, "rejected": 2, "skipped": 0})
+
+    async def _store() -> _FakeStore:
+        return store
+
+    monkeypatch.setattr(auto_infer, "_auto_store", _store)
+
+    result = await auto_infer.auto_infer_observer_event(
+        kind="entertainment.left_on",
+        ts="2026-05-14T22:00:00+00:00",
+        payload={"on_hours": 6.0, "friendly_name": "TV"},
+    )
+
+    assert result["ok"] is True
+    assert result.get("skipped") is not True
+    assert result["auto_inference_id"] == 77
+
+
+@pytest.mark.asyncio
+async def test_repeated_confirms_lower_confidence_floor(monkeypatch) -> None:
+    """If the user has confirmed this kind 3+ times recently, lower the
+    floor so borderline-confidence inferences from the LLM still surface.
+    This is the 'system learns what you DO want' half of the loop."""
+    store = _FakeStore(count=0, corrections={"confirmed": 3, "rejected": 0, "skipped": 0})
+
+    async def _store() -> _FakeStore:
+        return store
+
+    # An LLM result that would normally fail the 0.5 floor (returns 0.45)
+    # but with reinforcement the floor drops to 0.4 so it passes.
+    action = {
+        "agent": "knowledge_notes",
+        "capability": "record_event",
+        "payload": {
+            "agent": "personal_assistant",
+            "capability": "inferred_event",
+            "summary": "Reinforced inference",
+            "payload": {"source": "infer"},
+        },
+    }
+
+    async def _infer(_context: str) -> dict[str, Any]:
+        return {
+            "inference": "Reinforced inference",
+            "confidence": 0.45,
+            "proposed_action": action,
+        }
+
+    monkeypatch.setattr(auto_infer, "_auto_store", _store)
+    monkeypatch.setattr(auto_infer.infer_tool, "infer", _infer)
+
+    result = await auto_infer.auto_infer_observer_event(
+        kind="garage.opened_unexpectedly",
+        summary="Garage opened",
+        payload={},
+    )
+
+    assert result["ok"] is True
+    assert result.get("skipped") is not True
+    assert result["confidence"] == pytest.approx(0.45)
+    assert store.insert_calls[0]["source_kind"] == "garage.opened_unexpectedly"
+
+
+@pytest.mark.asyncio
+async def test_correction_lookup_failure_does_not_block_inference(monkeypatch) -> None:
+    """A flaky DB on the correction-counts query must not break inference —
+    we treat it as 'no corrections known' and let the inference proceed."""
+    class _ExplodingStore(_FakeStore):
+        async def correction_counts(self, *, source_kind: str, days: int = 7):
+            raise Exception("connection lost")
+
+    store = _ExplodingStore(count=0)
+
+    async def _store() -> _ExplodingStore:
+        return store
+
+    monkeypatch.setattr(auto_infer, "_auto_store", _store)
+
+    result = await auto_infer.auto_infer_observer_event(
+        kind="entertainment.left_on",
+        ts="2026-05-14T22:00:00+00:00",
+        payload={"on_hours": 6.0, "friendly_name": "TV"},
+    )
+
+    assert result["ok"] is True
+    assert result.get("skipped") is not True
+    assert result["auto_inference_id"] == 77

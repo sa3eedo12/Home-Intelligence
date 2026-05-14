@@ -111,3 +111,76 @@ async def test_auto_inferences_store_recent_count_and_recent() -> None:
     assert pool.conn.fetchval_args == (1,)
     assert pool.conn.fetch_args == ("proposed", 5)
     assert recent[0]["proposed_action"] == {"agent": "knowledge_notes"}
+
+
+class _CorrectionConn:
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+        self.fetch_args = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def fetch(self, _query, *args):
+        self.fetch_args = args
+        return self._rows
+
+
+class _CorrectionPool:
+    def __init__(self, rows: list[dict]) -> None:
+        self.conn = _CorrectionConn(rows)
+
+    def acquire(self):
+        return self.conn
+
+
+@pytest.mark.asyncio
+async def test_correction_counts_returns_per_status_breakdown() -> None:
+    pool = _CorrectionPool(
+        [
+            {"status": "confirmed", "n": 3},
+            {"status": "rejected", "n": 1},
+            {"status": "skipped", "n": 2},
+        ]
+    )
+    store = AutoInferencesStore(pool=pool)
+
+    counts = await store.correction_counts(source_kind="entertainment.left_on", days=14)
+
+    assert counts == {"confirmed": 3, "rejected": 1, "skipped": 2}
+    # Args carried through: (kind, days)
+    assert pool.conn.fetch_args == ("entertainment.left_on", 14)
+
+
+@pytest.mark.asyncio
+async def test_correction_counts_returns_zeros_when_no_history() -> None:
+    pool = _CorrectionPool([])
+    store = AutoInferencesStore(pool=pool)
+
+    counts = await store.correction_counts(source_kind="sleep.likely_asleep")
+
+    assert counts == {"confirmed": 0, "rejected": 0, "skipped": 0}
+
+
+@pytest.mark.asyncio
+async def test_correction_counts_returns_zeros_when_no_pool() -> None:
+    store = AutoInferencesStore(pool=None)
+
+    counts = await store.correction_counts(source_kind="anything")
+
+    assert counts == {"confirmed": 0, "rejected": 0, "skipped": 0}
+
+
+@pytest.mark.asyncio
+async def test_correction_counts_returns_zeros_for_empty_kind() -> None:
+    pool = _CorrectionPool([{"status": "confirmed", "n": 99}])
+    store = AutoInferencesStore(pool=pool)
+
+    counts = await store.correction_counts(source_kind="   ")
+
+    # Empty kind is malformed input; return empty without hitting the DB
+    assert counts == {"confirmed": 0, "rejected": 0, "skipped": 0}
+    assert pool.conn.fetch_args is None

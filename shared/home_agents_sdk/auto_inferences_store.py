@@ -167,6 +167,45 @@ class AutoInferencesStore:
             )
         return int(value or 0)
 
+    async def correction_counts(
+        self, *, source_kind: str, days: int = 7
+    ) -> dict[str, int]:
+        """Return how many recent inferences of ``source_kind`` the user
+        confirmed/rejected/skipped — the raw signal for back-off logic.
+
+        Empty/all-zero on a missing pool so callers can treat the dict as
+        a plain feature vector without defensive checks. Used by the
+        auto_infer back-off rule: if the user has rejected the same kind
+        N times in M days, mute it; if they've confirmed it M times,
+        loosen the confidence floor.
+        """
+        empty = {"confirmed": 0, "rejected": 0, "skipped": 0}
+        if not self._ready or self.pool is None:
+            return dict(empty)
+        clean_kind = (source_kind or "").strip()
+        if not clean_kind:
+            return dict(empty)
+        bounded_days = _bounded_int(days, default=7, low=1, high=90)
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT status, count(*)::int AS n
+                  FROM auto_inferences
+                 WHERE source_kind = $1
+                   AND status IN ('confirmed', 'rejected', 'skipped')
+                   AND created_at >= now() - ($2::int * interval '1 day')
+                 GROUP BY status
+                """,
+                clean_kind,
+                bounded_days,
+            )
+        out = dict(empty)
+        for row in rows:
+            status = str(row["status"])
+            if status in out:
+                out[status] = int(row["n"])
+        return out
+
     async def recent(
         self,
         *,
