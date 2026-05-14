@@ -33,8 +33,8 @@
 		FAC0001000000000FACADE10 /* SyncIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncIntent.swift; sourceTree = "<group>"; };
 		FAC0001100000000FACADE10 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		FAC0001200000000FACADE10 /* HomeIntelligenceHealth.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HomeIntelligenceHealth.entitlements; sourceTree = "<group>"; };
-		FAC0005000000000FACADE10 /* HealthKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = HealthKit.framework; path = System/Library/Frameworks/HealthKit.framework; sourceTree = SDKROOT; };
 		FAC0004000000000FACADE10 /* HomeIntelligenceHealth.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HomeIntelligenceHealth.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FAC0005000000000FACADE10 /* HealthKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = HealthKit.framework; path = System/Library/Frameworks/HealthKit.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -49,7 +49,7 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		FAC0001000000000FACADE00 /* HomeIntelligenceHealth (root) */ = {
+		FAC0001000000000FACADE00 = {
 			isa = PBXGroup;
 			children = (
 				FAC0001100000000FACADE00 /* Sources */,
@@ -83,7 +83,6 @@
 				FAC0001100000000FACADE10 /* Info.plist */,
 				FAC0001200000000FACADE10 /* HomeIntelligenceHealth.entitlements */,
 			);
-			name = Resources;
 			path = Resources;
 			sourceTree = "<group>";
 		};
@@ -151,7 +150,7 @@
 				en,
 				Base,
 			);
-			mainGroup = FAC0001000000000FACADE00 /* HomeIntelligenceHealth (root) */;
+			mainGroup = FAC0001000000000FACADE00;
 			productRefGroup = FAC0001300000000FACADE00 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -303,7 +302,7 @@
 				CODE_SIGN_ENTITLEMENTS = Resources/HomeIntelligenceHealth.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = SDS6Q84XSZ;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
@@ -329,7 +328,7 @@
 				CODE_SIGN_ENTITLEMENTS = Resources/HomeIntelligenceHealth.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = SDS6Q84XSZ;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";

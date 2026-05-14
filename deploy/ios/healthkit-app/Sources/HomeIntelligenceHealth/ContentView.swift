@@ -1,10 +1,10 @@
 import SwiftUI
 
-// Minimal one-screen UI: settings (URL, token, optional member id, window
-// length) plus a "Sync now" button and the last-run status. The actual
-// sync logic lives in SyncCoordinator so the AppIntent can reuse it.
+// One-screen settings + sync UI. Uses @Bindable so SwiftUI re-renders
+// whenever the @Observable Settings instance mutates — this is the fix
+// for "the stepper doesn't update the label".
 struct ContentView: View {
-    @State private var settings = Settings.shared
+    @Bindable private var settings = Settings.shared
     @State private var isSyncing = false
     @State private var liveSummary: String?
 
@@ -12,50 +12,44 @@ struct ContentView: View {
         NavigationStack {
             Form {
                 Section("TrueNAS orchestrator") {
-                    LabeledTextField(
-                        title: "URL",
-                        placeholder: "http://192.168.1.190:8080",
-                        text: Binding(
-                            get: { settings.orchestratorURL ?? "" },
-                            set: { settings.orchestratorURL = $0 }
-                        ),
-                        keyboard: .URL,
-                        autocap: false
-                    )
-                    LabeledSecureField(
-                        title: "X-Health-Token",
-                        placeholder: "matches HEALTHKIT_WEBHOOK_TOKEN",
-                        text: Binding(
-                            get: { settings.healthToken ?? "" },
-                            set: { settings.healthToken = $0 }
-                        )
-                    )
-                    LabeledTextField(
-                        title: "Member ID (optional)",
-                        placeholder: "1",
-                        text: Binding(
+                    LabeledContent("URL") {
+                        TextField("http://192.168.1.190:8080", text: $settings.orchestratorURL)
+                            .keyboardType(.URL)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    LabeledContent("Token") {
+                        SecureField("X-Health-Token", text: $settings.healthToken)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    LabeledContent("Member ID") {
+                        TextField("optional", text: Binding(
                             get: { settings.memberId.map(String.init) ?? "" },
                             set: { settings.memberId = Int($0) }
-                        ),
-                        keyboard: .numberPad,
-                        autocap: false
-                    )
+                        ))
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing)
+                    }
                 }
 
                 Section("Sync window") {
-                    Stepper(
-                        "Look back \(settings.windowMinutes) min each run",
-                        value: Binding(
-                            get: { settings.windowMinutes },
-                            set: { settings.windowMinutes = $0 }
-                        ),
-                        in: 5...24*60, step: 5
-                    )
-                    Text("Set this to be at least as long as the gap between runs so you don't miss data between syncs.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Picker("Look back", selection: Binding(
+                        get: { WindowPreset.closest(to: settings.windowMinutes) },
+                        set: { settings.windowMinutes = $0.minutes }
+                    )) {
+                        ForEach(WindowPreset.allCases) { preset in
+                            Text(preset.label).tag(preset)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    Text("Each sync reads Health samples from the last \(WindowPreset.closest(to: settings.windowMinutes).label.lowercased()). Set this to be at least as long as the gap between automation runs so you don't miss data.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
-                Section("Sync") {
+                Section {
                     Button {
                         Task { await syncNow() }
                     } label: {
@@ -68,25 +62,52 @@ struct ContentView: View {
                     .disabled(isSyncing)
 
                     if let summary = liveSummary ?? settings.lastRunSummary {
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: 6) {
                             Text(summary)
                                 .font(.callout)
                                 .foregroundStyle(settings.lastRunWasError ? .red : .primary)
                             if let when = settings.lastRunAt {
-                                Text("Last run: \(when, style: .relative) ago")
+                                Text("Last run \(when, style: .relative) ago")
                                     .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if !settings.lastMetricsList.isEmpty {
+                                FlowLabels(items: settings.lastMetricsList)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Sync")
+                }
+
+                Section {
+                    ForEach(MetricCatalog.all) { cat in
+                        HStack(alignment: .top) {
+                            Image(systemName: cat.symbol)
+                                .frame(width: 24)
+                                .foregroundStyle(.tint)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(cat.label).font(.body)
+                                Text(cat.detail)
+                                    .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
                         }
                     }
+                } header: {
+                    Text("What gets uploaded each run")
+                } footer: {
+                    Text("Categories with no recent samples are silently skipped — they're not zeroed on the server. Permission is requested on first sync.")
                 }
 
-                Section("Schedule it") {
-                    Text("Open the Shortcuts app → Automation tab → + → Personal Automation → Time of Day → Add 'Sync Health to Home Intelligence' as the action. Toggle 'Run Immediately' on so it fires without asking.")
+                Section {
+                    Text("Open the **Shortcuts** app → Automation tab → + → Personal Automation → Time of Day → choose a recurrence (e.g. every hour) → add **'Sync Health to Home Intelligence'** as the action → toggle 'Run Immediately' on so it fires without asking.")
                         .font(.callout)
+                } header: {
+                    Text("Schedule it")
                 }
             }
-            .navigationTitle("Home Intelligence Health")
+            .navigationTitle("HI Health")
         }
     }
 
@@ -100,33 +121,24 @@ struct ContentView: View {
     }
 }
 
-private struct LabeledTextField: View {
-    let title: String
-    let placeholder: String
-    @Binding var text: String
-    var keyboard: UIKeyboardType = .default
-    var autocap: Bool = true
+/// Wraps a list of short labels (e.g. "Steps", "Heart Rate") in pill-style
+/// chips that wrap to multiple lines if needed. SwiftUI doesn't have a
+/// built-in flow layout pre-iOS 16 — using a simple LazyVGrid is fine for
+/// our short fixed lists.
+private struct FlowLabels: View {
+    let items: [String]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            TextField(placeholder, text: $text)
-                .keyboardType(keyboard)
-                .autocapitalization(autocap ? .sentences : .none)
-                .disableAutocorrection(true)
-        }
-    }
-}
-
-private struct LabeledSecureField: View {
-    let title: String
-    let placeholder: String
-    @Binding var text: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            SecureField(placeholder, text: $text)
+        let columns = [GridItem(.adaptive(minimum: 90), spacing: 6)]
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+            ForEach(items, id: \.self) { label in
+                Text(label)
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.tint.opacity(0.15), in: Capsule())
+                    .foregroundStyle(.tint)
+            }
         }
     }
 }

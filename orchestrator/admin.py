@@ -349,6 +349,22 @@ async def healthkit_sync(request: Request) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         detail = f"invalid Health Auto Export payload: {exc}"
         raise HTTPException(status_code=400, detail=detail) from exc
+    # Diagnostic: when the payload arrives but normalizes to ZERO rows,
+    # something on the producer side is mis-shaped (wrong key names, missing
+    # timestamps, etc) and the user gets a confusing "200 OK with 0 inserted".
+    # Log a snippet of the payload + the source so the producer can be fixed.
+    if not rows:
+        try:
+            payload_snippet = json.dumps(payload, default=str)[:1500]
+        except Exception:
+            payload_snippet = repr(payload)[:1500]
+        logger.warning(
+            "healthkit_sync_normalized_zero_rows",
+            user_agent=request.headers.get("user-agent", ""),
+            client=getattr(request.client, "host", "?"),
+            member_id=member_id,
+            payload_snippet=payload_snippet,
+        )
     store = _health_store(request)
     result = await store.upsert_metrics(rows)
     inserted = int(result.get("inserted") or 0)
