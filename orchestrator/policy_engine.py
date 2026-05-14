@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from fnmatch import fnmatch
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -12,6 +13,7 @@ from zoneinfo import ZoneInfo
 from redis.asyncio import Redis
 
 SEVERITY_ORDER = ["debug", "info", "notice", "warn", "alert", "critical"]
+SLEEP_WINDOW_CACHE_TTL_SECONDS = 5 * 60
 
 
 @dataclass(slots=True)
@@ -39,10 +41,16 @@ class PolicyEngine:
         policies: dict[str, Any],
         redis: Redis,
         now_fn: Callable[[], datetime] | None = None,
+        pool: Any | None = None,
     ) -> None:
         self._policies = policies
         self._redis = redis
         self._now_fn = now_fn or (lambda: datetime.now(UTC))
+        self._pool = pool
+        # Cache for household sleep windows. None means 'never loaded';
+        # an empty list means 'loaded, but the household has none configured'.
+        self._sleep_windows: list[tuple[time, time]] | None = None
+        self._sleep_windows_loaded_at: float = 0.0
 
     @property
     def policies(self) -> dict[str, Any]:
@@ -88,24 +96,88 @@ class PolicyEngine:
         await self._redis.hincrby("policy:stats", key, 1)
 
     def _quiet_hours_active(self, now: datetime) -> bool:
+        """True if NOW falls inside any active quiet window.
+
+        Window sources, in order of precedence:
+          1. household_members.sleep_time/wake_time (loaded async via
+             ``_member_sleep_windows`` and cached). When at least one
+             member has a sleep_time set, the union of all member windows
+             defines quiet hours and the static config below is IGNORED.
+             This stops the policy engine from muting at 22:30 just
+             because that's the YAML default, when the user actually
+             goes to bed at 00:30.
+          2. Static config in ``policies.yaml`` quiet_hours.start/end —
+             only used when no household members have sleep_time set
+             (fresh install) or the DB is unreachable.
+
+        Either source can be disabled by setting quiet_hours.enabled=false.
+        """
         cfg = self._policies.get("quiet_hours", {})
         if not cfg.get("enabled", False):
             return False
 
         tz_name = cfg.get("tz", "Asia/Dubai")
         local = now.astimezone(ZoneInfo(tz_name))
+        local_time = local.time().replace(tzinfo=None)
+
+        member_windows = self._sleep_windows
+        if member_windows:
+            return any(
+                _time_is_in_sleep_window(local_time, sleep, wake)
+                for sleep, wake in member_windows
+            )
+
+        # Static fallback (no member data available)
         start_s = cfg.get("start", "22:30")
         end_s = cfg.get("end", "07:00")
-        start_h, start_m = [int(x) for x in start_s.split(":", 1)]
-        end_h, end_m = [int(x) for x in end_s.split(":", 1)]
+        start_h, start_m = (int(x) for x in start_s.split(":", 1))
+        end_h, end_m = (int(x) for x in end_s.split(":", 1))
+        return _time_is_in_sleep_window(
+            local_time,
+            time(start_h, start_m),
+            time(end_h, end_m),
+        )
 
-        current_minutes = local.hour * 60 + local.minute
-        start_minutes = start_h * 60 + start_m
-        end_minutes = end_h * 60 + end_m
+    async def _refresh_member_sleep_windows(self) -> None:
+        """Pull (sleep_time, wake_time) for every non-pet member with a
+        sleep_time set. Cached for 5 minutes — DB queries on the hot
+        notification path would add latency for no benefit."""
+        if self._pool is None:
+            self._sleep_windows = []
+            self._sleep_windows_loaded_at = _time.monotonic()
+            return
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT sleep_time, wake_time
+                      FROM household_members
+                     WHERE sleep_time IS NOT NULL
+                       AND role <> 'pet'
+                    """
+                )
+        except Exception:
+            # Don't override an existing cache on transient DB failures.
+            if self._sleep_windows is None:
+                self._sleep_windows = []
+            self._sleep_windows_loaded_at = _time.monotonic()
+            return
+        windows: list[tuple[time, time]] = []
+        for row in rows:
+            sleep = row["sleep_time"]
+            wake = row["wake_time"] or time(7, 0)
+            if isinstance(sleep, time) and isinstance(wake, time):
+                windows.append((sleep, wake))
+        self._sleep_windows = windows
+        self._sleep_windows_loaded_at = _time.monotonic()
 
-        if start_minutes < end_minutes:
-            return start_minutes <= current_minutes < end_minutes
-        return current_minutes >= start_minutes or current_minutes < end_minutes
+    async def _ensure_sleep_windows_fresh(self) -> None:
+        if (
+            self._sleep_windows is None
+            or _time.monotonic() - self._sleep_windows_loaded_at
+            > SLEEP_WINDOW_CACHE_TTL_SECONDS
+        ):
+            await self._refresh_member_sleep_windows()
 
     def _quiet_pass(self, payload: NotifyPayload) -> bool:
         topic = payload.topic or ""
@@ -211,6 +283,7 @@ class PolicyEngine:
             return True
         if override == "off":
             return False
+        await self._ensure_sleep_windows_fresh()
         return self._quiet_hours_active(self._now_fn())
 
     async def set_quiet_override(self, value: str, ttl_seconds: int) -> None:
@@ -234,3 +307,19 @@ class PolicyEngine:
             ttl = await self._redis.ttl(key)
             output.append({"key": key.removeprefix("policy:mute:"), "ttl_seconds": max(ttl, 0)})
         return output
+
+
+def _time_is_in_sleep_window(now_time: time, sleep_time: time, wake_time: time) -> bool:
+    """True if ``now_time`` falls inside the [sleep_time, wake_time) window.
+
+    Mirrors orchestrator.observers.tv_observer._time_is_in_sleep_window —
+    handles midnight-crossing windows (23:00 -> 07:00) and same-clock-face
+    windows (00:30 -> 09:00) correctly. Used here so the policy engine's
+    quiet hours respect the user's actual bedtime instead of the static
+    YAML default.
+    """
+    if sleep_time == wake_time:
+        return False
+    if sleep_time < wake_time:
+        return sleep_time <= now_time < wake_time
+    return now_time >= sleep_time or now_time < wake_time

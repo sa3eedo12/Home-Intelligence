@@ -1,6 +1,9 @@
 quiet_hours:
   enabled: true
-  start: "22:30"
+  # Fallback used ONLY when no household_member has a sleep_time set.
+  # When a member exists with sleep_time/wake_time, the policy engine
+  # uses that window instead, so this YAML can stay generic.
+  start: "00:30"
   end: "07:00"
   tz: "Asia/Dubai"
 
