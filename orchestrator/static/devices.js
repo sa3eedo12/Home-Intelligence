@@ -142,11 +142,11 @@
   function renderDetail(d) {
     document.getElementById('dd-name').textContent = d.friendly_name || d.primary_entity_id || 'Device';
     const metaBits = [
-      d.type,
-      d.manufacturer,
-      d.model,
       d.area ? `📍 ${d.area}` : null,
       d.scope === 'personal' ? '👤 Personal' : '🏠 Home',
+      d.manufacturer || null,
+      d.model || null,
+      d.primary_state ? `Currently: ${d.primary_state}` : null,
     ].filter(Boolean);
     document.getElementById('dd-meta').textContent = metaBits.join(' · ');
 
@@ -159,29 +159,56 @@
     select.dataset.thingId = d.id;
     document.getElementById('dd-owner-status').textContent = '';
 
-    // Entity list.
+    // Categorized properties.
     document.getElementById('dd-entity-count').textContent = `(${d.entity_count})`;
     const ul = document.getElementById('dd-entities');
-    if (!d.entities || d.entities.length === 0) {
-      ul.innerHTML = `<li class="muted">No entities.</li>`;
+    const groups = d.grouped_entities || [];
+    if (groups.length === 0) {
+      ul.innerHTML = `<li class="muted">No entities to show.</li>`;
       return;
     }
-    ul.innerHTML = d.entities.map(entityRow).join('');
-  }
-
-  function entityRow(e) {
-    const stateText = e.state == null ? '—' : `${e.state}${e.unit ? ` ${e.unit}` : ''}`;
-    const extraBits = [];
-    if (e.last_changed) extraBits.push(`changed ${formatRelative(e.last_changed)}`);
-    if (e.device_class) extraBits.push(e.device_class);
-    return `
-      <li class="entity-row">
-        <span class="entity-row-name">${escapeHtml(e.friendly_name || e.entity_id)}</span>
-        <span class="entity-row-state">${escapeHtml(stateText)}</span>
-        <span class="entity-row-eid">${escapeHtml(e.entity_id)}</span>
-        ${extraBits.length ? `<span class="entity-row-extra">${escapeHtml(extraBits.join(' · '))}</span>` : ''}
+    ul.innerHTML = groups.map(group => `
+      <li class="category-block">
+        <div class="category-header">
+          <span class="category-icon">${group.icon}</span>
+          <h4>${escapeHtml(group.name)}</h4>
+          <span class="muted">${group.entities.length}</span>
+        </div>
+        <div class="property-grid">
+          ${group.entities.map(propertyRow).join('')}
+        </div>
+      </li>
+    `).join('') + `
+      <li class="tech-toggle-row">
+        <button type="button" id="dd-tech-toggle" class="btn btn-ghost btn-sm linklike">Show technical details</button>
       </li>
     `;
+
+    document.getElementById('dd-tech-toggle')?.addEventListener('click', toggleTechDetails);
+  }
+
+  function propertyRow(e) {
+    const value = (e.value == null || e.value === '') ? '—' : e.value;
+    const ts = e.last_changed ? `<span class="prop-when muted">${escapeHtml(formatRelative(e.last_changed))}</span>` : '';
+    const eid = `<span class="prop-eid muted" hidden>${escapeHtml(e.entity_id)}</span>`;
+    return `
+      <div class="property-row">
+        <div class="property-label">
+          <span>${escapeHtml(e.property_label || e.entity_id)}</span>
+          ${ts}
+        </div>
+        <div class="property-value">${escapeHtml(String(value))}</div>
+        ${eid}
+      </div>
+    `;
+  }
+
+  function toggleTechDetails() {
+    const btn = document.getElementById('dd-tech-toggle');
+    const showing = btn.dataset.shown === 'yes';
+    document.querySelectorAll('.prop-eid').forEach(e => { e.hidden = showing; });
+    btn.dataset.shown = showing ? 'no' : 'yes';
+    btn.textContent = showing ? 'Show technical details' : 'Hide technical details';
   }
 
   async function saveOwner() {

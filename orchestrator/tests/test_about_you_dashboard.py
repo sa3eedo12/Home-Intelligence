@@ -13,14 +13,32 @@ class _FakeKnowledgeGraph:
                 "id": 1,
                 "type": "appliance.washer",
                 "friendly_name": "Washer",
-                "attributes": {"brand": "LG"},
+                "attributes": {"brand": "LG", "scope": "home"},
                 "ha_entity_ids": ["sensor.washer"],
                 "photo_path": None,
                 "confidence": 0.8,
                 "learned_at": "2026-01-01T00:00:00+00:00",
                 "last_confirmed_at": None,
                 "source": "event_log",
-            }
+            },
+            {
+                "id": 2,
+                "type": "device.phone",
+                "friendly_name": "Saeed's iPhone",
+                "attributes": {
+                    "manufacturer": "Apple",
+                    "model": "iPhone17,2",
+                    "scope": "personal",
+                    "owner_member_id": 7,
+                    "ha_device_id": "abc",
+                },
+                "ha_entity_ids": ["device_tracker.saeeds_iphone"],
+                "photo_path": None,
+                "confidence": 0.9,
+                "learned_at": "2026-01-01T00:00:00+00:00",
+                "last_confirmed_at": None,
+                "source": "auto_setup",
+            },
         ]
 
     async def list_habits(self):
@@ -61,6 +79,15 @@ class _FakeKnowledgeGraph:
             }
         ]
 
+    async def list_members(self, *, include_pets=False):
+        return [
+            {
+                "id": 7,
+                "name": "Saeed",
+                "role": "adult",
+            }
+        ]
+
 
 def test_about_you_renders_learned_knowledge() -> None:
     app = FastAPI()
@@ -71,11 +98,17 @@ def test_about_you_renders_learned_knowledge() -> None:
         resp = client.get("/dashboard/about-you")
 
     assert resp.status_code == 200
-    assert "About You" in resp.text
-    assert "Washer" in resp.text
+    # Header switched from "About You" to "About <member>" when a member exists.
+    assert "About Saeed" in resp.text
+    # Personal device shows up; home device (Washer) does NOT show as a card.
+    assert "Saeed&#39;s iPhone" in resp.text or "Saeed's iPhone" in resp.text
+    assert 'data-thing-id="1"' not in resp.text  # Washer thing not in personal devices
+    assert 'data-thing-id="2"' in resp.text       # iPhone is
+    # Other knowledge sections still rendered (they're not member-filtered yet).
     assert "user.coffee_brew" in resp.text
     assert "lights.after_sunset" in resp.text
     assert "Laundry day" in resp.text
+    # Page chrome
     assert "/static/_design.css" in resp.text
     assert "/static/_app.js" in resp.text
     assert "/static/about_you.css" in resp.text
@@ -83,6 +116,22 @@ def test_about_you_renders_learned_knowledge() -> None:
     assert 'id="edit-modal"' in resp.text
     assert 'id="evidence-modal"' in resp.text
     assert "toast-stack" in resp.text
-    assert 'data-table="things"' in resp.text
-    assert "Confirm" in resp.text
-    assert "Why?" in resp.text
+    # Tabs + drill-down DOM contract
+    assert 'class="ay-tab' in resp.text
+    assert 'data-tab="devices"' in resp.text
+    assert 'data-thing-id="2"' in resp.text
+    assert 'id="dev-detail"' in resp.text
+
+
+def test_about_you_filters_to_specified_member() -> None:
+    """?member=99 selects a member that doesn't exist → falls back to first."""
+    app = FastAPI()
+    app.include_router(router)
+    app.state.knowledge_graph = _FakeKnowledgeGraph()
+
+    with TestClient(app) as client:
+        resp = client.get("/dashboard/about-you?member=99")
+
+    assert resp.status_code == 200
+    # Falls back to the first member (Saeed) since 99 doesn't exist.
+    assert "About Saeed" in resp.text

@@ -1148,7 +1148,10 @@ async def list_devices(request: Request) -> dict[str, Any]:
 
 @router.get("/admin/devices/{thing_id}")
 async def device_detail(thing_id: int, request: Request) -> dict[str, Any]:
-    """Drill-down view: thing metadata + live state of every entity in HA."""
+    """Drill-down view: thing metadata + live state of every entity in HA,
+    with entities grouped into user-friendly categories (Battery, Location,
+    Activity, Climate, Media, etc.) plus a 'technical' bucket for the rest.
+    """
     import os as _os
 
     import httpx as _httpx
@@ -1161,9 +1164,10 @@ async def device_detail(thing_id: int, request: Request) -> dict[str, Any]:
 
     attrs = thing.get("attributes") or {}
     entity_ids: list[str] = list(thing.get("ha_entity_ids") or [])
+    primary_eid = attrs.get("entity_id") or (entity_ids[0] if entity_ids else "")
 
     # Pull live state from HA. Single /api/states call, then filter — cheaper
-    # than one call per entity and covers our typical 12-entity device.
+    # than one call per entity.
     ha_url = _os.environ.get("HA_URL", "").rstrip("/")
     ha_token = _os.environ.get("HA_TOKEN", "")
     states_by_eid: dict[str, dict[str, Any]] = {}
@@ -1184,34 +1188,63 @@ async def device_detail(thing_id: int, request: Request) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             logger.warning("device_detail_ha_states_failed", error=str(exc))
 
-    entities = []
+    primary_friendly = ""
+    if primary_eid in states_by_eid:
+        primary_friendly = (
+            states_by_eid[primary_eid].get("attributes") or {}
+        ).get("friendly_name", "")
+
+    # Strip the device's friendly_name prefix from each entity's friendly_name
+    # so "Saeed's iPhone Battery Level" becomes "Battery Level". Falls back to
+    # humanizing the entity_id slug if the friendly_name doesn't contain the
+    # device name.
+    device_name = str(thing.get("friendly_name") or primary_friendly or "").strip()
+    primary_state = states_by_eid.get(primary_eid, {})
+    primary_state_value = primary_state.get("state")
+
+    entities: list[dict[str, Any]] = []
     for eid in entity_ids:
         st = states_by_eid.get(eid) or {}
         sa = st.get("attributes") or {}
+        full_name = str(sa.get("friendly_name") or "").strip()
+        property_name = _humanize_property(
+            full_name=full_name,
+            entity_id=eid,
+            device_name=device_name,
+        )
+        category = _categorize_entity(eid, sa)
         entities.append({
             "entity_id": eid,
             "domain": eid.split(".", 1)[0] if "." in eid else "",
-            "state": st.get("state"),
-            "friendly_name": sa.get("friendly_name"),
+            "property_label": property_name,
+            "value": _format_value(st.get("state"), sa),
+            "raw_state": st.get("state"),
             "unit": sa.get("unit_of_measurement"),
             "device_class": sa.get("device_class"),
             "icon": sa.get("icon"),
             "last_changed": st.get("last_changed"),
             "last_updated": st.get("last_updated"),
-            # The full attribute bag is sometimes HUGE (battery histograms,
-            # zone polygons). Trim to the keys the dashboard actually shows.
-            "attributes": {
-                k: v for k, v in sa.items()
-                if k in {
-                    "battery_level", "temperature", "humidity",
-                    "current_temperature", "target_temp_high",
-                    "target_temp_low", "hvac_action", "fan_mode",
-                    "preset_mode", "brightness", "color_temp", "rgb_color",
-                    "media_title", "media_artist", "media_position",
-                    "source", "options", "supported_features",
-                }
-            },
+            "category": category,
+            "is_primary": eid == primary_eid,
         })
+
+    # Group by category, ordered by CATEGORY_ORDER.
+    by_category: dict[str, list[dict[str, Any]]] = {}
+    for e in entities:
+        by_category.setdefault(e["category"], []).append(e)
+    grouped: list[dict[str, Any]] = []
+    for cat in CATEGORY_ORDER:
+        items = by_category.pop(cat, [])
+        if items:
+            grouped.append({
+                "name": cat,
+                "icon": CATEGORY_ICONS.get(cat, "•"),
+                "entities": items,
+            })
+    # Anything left over (unexpected categories) goes last under "Other".
+    leftovers = [e for items in by_category.values() for e in items]
+    if leftovers:
+        grouped.append({"name": "Other", "icon": "•", "entities": leftovers})
 
     owner_id = attrs.get("owner_member_id") or thing.get("owner_member_id")
     return {
@@ -1226,11 +1259,155 @@ async def device_detail(thing_id: int, request: Request) -> dict[str, Any]:
         "model": attrs.get("model"),
         "ha_device_id": attrs.get("ha_device_id"),
         "owner_member_id": owner_id,
-        "primary_entity_id": attrs.get("entity_id"),
+        "primary_entity_id": primary_eid,
+        "primary_state": primary_state_value,
         "entity_count": len(entity_ids),
         "ha_states_available": bool(states_by_eid),
-        "entities": entities,
+        "grouped_entities": grouped,
     }
+
+
+# Categorization knobs for device_detail. Order matters — the first category
+# whose `match()` returns True wins, so put narrow tests before broad ones.
+CATEGORY_ORDER = [
+    "Status", "Battery", "Location", "Activity", "Climate", "Light",
+    "Media", "Connectivity", "Storage", "Settings", "Other",
+]
+CATEGORY_ICONS = {
+    "Status":       "📊",
+    "Battery":      "🔋",
+    "Location":     "📍",
+    "Activity":     "🏃",
+    "Climate":      "🌡️",
+    "Light":        "💡",
+    "Media":        "🎵",
+    "Connectivity": "📡",
+    "Storage":      "💾",
+    "Settings":     "⚙️",
+    "Other":        "•",
+}
+
+
+def _categorize_entity(eid: str, attrs: dict[str, Any]) -> str:
+    """Classify an HA entity into a user-friendly category. Looks at the
+    entity_id slug + device_class. Heuristic but covers the bulk of the
+    common HA integration footprints (Apple, Aqara, Samsung SmartThings,
+    Hue, Nest, etc)."""
+    eid_lower = eid.lower()
+    device_class = (attrs.get("device_class") or "").lower()
+
+    # Battery / power — battery_level, battery_state, etc.
+    if device_class == "battery" or "battery" in eid_lower:
+        return "Battery"
+
+    # Location-related — device_tracker, distance, geocoded, network ID.
+    if eid.startswith("device_tracker.") or eid.startswith("person."):
+        return "Location"
+    if any(k in eid_lower for k in (
+        "distance", "geocoded_location", "location_permission", "_location"
+    )):
+        return "Location"
+
+    # Activity / fitness — steps, floors, pace.
+    if any(k in eid_lower for k in (
+        "steps", "floors_ascended", "floors_descended",
+        "active_pace", "activity",
+    )):
+        return "Activity"
+
+    # Climate — temperature, humidity, hvac.
+    if device_class in {"temperature", "humidity"}:
+        return "Climate"
+    if any(k in eid_lower for k in (
+        "temperature", "humidity", "thermostat", "_climate",
+    )):
+        return "Climate"
+
+    # Light — brightness, color.
+    if eid.startswith("light."):
+        return "Light"
+    if any(k in eid_lower for k in ("brightness", "color_temp", "rgb_color")):
+        return "Light"
+
+    # Media — current track, source.
+    if eid.startswith("media_player."):
+        return "Media"
+    if any(k in eid_lower for k in (
+        "media_title", "media_artist", "media_position", "audio_output",
+    )):
+        return "Media"
+
+    # Connectivity — WiFi, cell.
+    if any(k in eid_lower for k in (
+        "ssid", "bssid", "connection_type", "_sim_", "_wifi", "_cellular",
+    )):
+        return "Connectivity"
+
+    # Storage / app meta.
+    if any(k in eid_lower for k in ("storage", "app_version", "lifespan")):
+        return "Storage"
+
+    # Settings / configuration.
+    if any(k in eid_lower for k in (
+        "focus", "last_update_trigger", "permission", "supported_features",
+    )):
+        return "Settings"
+
+    # Status: the primary controllable surface or an obvious "main reading".
+    domain = eid.split(".", 1)[0] if "." in eid else ""
+    if domain in {
+        "climate", "vacuum", "lock", "camera", "light", "cover",
+        "media_player", "switch", "binary_sensor", "lawn_mower",
+        "water_heater", "alarm_control_panel", "humidifier",
+    }:
+        return "Status"
+    if domain == "sensor":
+        return "Status"
+
+    return "Other"
+
+
+def _humanize_property(
+    *, full_name: str, entity_id: str, device_name: str
+) -> str:
+    """Strip the device prefix from an entity's friendly_name so "Saeed's
+    iPhone Battery Level" becomes "Battery Level". Falls back to humanizing
+    the entity_id slug when no friendly_name is available."""
+    if full_name and device_name:
+        # Try removing the device name as a prefix (case-insensitive).
+        if full_name.lower().startswith(device_name.lower()):
+            stripped = full_name[len(device_name):].strip(" -:")
+            if stripped:
+                return stripped
+    if full_name:
+        return full_name
+    # Fall back to the local part of the entity_id, replacing _ with spaces.
+    local = entity_id.split(".", 1)[1] if "." in entity_id else entity_id
+    return local.replace("_", " ").title()
+
+
+def _format_value(state: Any, attrs: dict[str, Any]) -> str:
+    """Pretty-print a state value using its unit and a few well-known patterns."""
+    if state is None or state in ("unavailable", "unknown", "none", "None"):
+        return "—"
+    s = str(state)
+    unit = attrs.get("unit_of_measurement")
+    # Common booleans → readable
+    if s.lower() in ("on", "off", "home", "not_home", "open", "closed",
+                     "locked", "unlocked", "playing", "paused", "idle"):
+        return s.replace("_", " ").title()
+    # Numbers: trim trailing zeros, append unit.
+    try:
+        num = float(s)
+        # Whole numbers render as int, else 1 decimal max.
+        formatted = f"{int(num)}" if num.is_integer() else f"{num:.1f}"
+        if unit:
+            sep = "" if unit == "%" else " "
+            return f"{formatted}{sep}{unit}"
+        return formatted
+    except (TypeError, ValueError):
+        pass
+    return s
 
 
 @router.post("/admin/devices/{thing_id}/owner")

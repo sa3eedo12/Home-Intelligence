@@ -288,9 +288,13 @@ def _maintenance_row(row: Any) -> dict[str, Any]:
     }
 
 
-async def _about_you_snapshot(request: Request) -> dict[str, list[dict[str, Any]]]:
-    empty: dict[str, list[dict[str, Any]]] = {
-        "things": [],
+async def _about_you_snapshot(
+    request: Request, *, member_id: int | None = None
+) -> dict[str, Any]:
+    empty: dict[str, Any] = {
+        "members": [],
+        "current_member": None,
+        "personal_devices": [],
         "habits": [],
         "preferences": [],
         "routines": [],
@@ -299,19 +303,49 @@ async def _about_you_snapshot(request: Request) -> dict[str, list[dict[str, Any]
     if knowledge_graph is None:
         return empty
     try:
-        things, habits, preferences, routines = await asyncio.gather(
+        things, habits, preferences, routines, members = await asyncio.gather(
             knowledge_graph.list_things(),
             knowledge_graph.list_habits(),
             knowledge_graph.list_preferences(),
             knowledge_graph.list_routines(),
+            knowledge_graph.list_members(include_pets=False),
         )
     except Exception:
         return empty
+
+    members = members or []
+    # Choose the current member: explicit query param wins, else first member.
+    current = None
+    if member_id is not None:
+        current = next((m for m in members if int(m.get("id") or 0) == member_id), None)
+    if current is None and members:
+        current = members[0]
+    current_id = int(current.get("id")) if current else None
+
+    # Filter things to those owned by current member. Owner is stored in
+    # attributes.owner_member_id (set by auto_setup's heuristic or via
+    # POST /admin/devices/{id}/owner). Falls back to the column.
+    personal_devices: list[dict[str, Any]] = []
+    if current_id is not None:
+        for t in things or []:
+            attrs = t.get("attributes") or {}
+            owner = attrs.get("owner_member_id") or t.get("owner_member_id")
+            try:
+                if owner is not None and int(owner) == current_id:
+                    personal_devices.append(t)
+            except (TypeError, ValueError):
+                continue
+
     return {
-        "things": things,
-        "habits": habits,
-        "preferences": preferences,
-        "routines": routines,
+        "members": [
+            {"id": m.get("id"), "name": m.get("name"), "role": m.get("role")}
+            for m in members
+        ],
+        "current_member": current,
+        "personal_devices": personal_devices,
+        "habits": habits or [],
+        "preferences": preferences or [],
+        "routines": routines or [],
     }
 
 
@@ -463,8 +497,10 @@ def _suggest_entity_type(entity: dict[str, Any]) -> str:
 
 
 @router.get("/dashboard/about-you", response_class=HTMLResponse)
-async def about_you(request: Request) -> HTMLResponse:
-    knowledge = await _about_you_snapshot(request)
+async def about_you(
+    request: Request, member: int | None = None
+) -> HTMLResponse:
+    knowledge = await _about_you_snapshot(request, member_id=member)
     return templates.TemplateResponse(
         request=request,
         name="about_you.html.j2",

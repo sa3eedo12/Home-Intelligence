@@ -16,3 +16,45 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .evidence-item { padding: var(--space-4); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md); }
 .evidence-item strong { display: block; margin-bottom: var(--space-1); }
 @media (max-width: 640px) { .page-body main { padding: var(--space-3); } .knowledge-card header { flex-direction: column; } .card-actions .btn { width: auto; } }
+
+/* Tab strip + panes */
+.ay-tabs {
+  display: flex;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--space-4);
+  flex-wrap: wrap;
+}
+.ay-tab {
+  background: none;
+  border: none;
+  padding: var(--space-3) var(--space-4);
+  font-size: 1rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ay-tab.is-active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.ay-tab:hover:not(.is-active) { color: var(--text); }
+.ay-pane:not(.is-active) { display: none; }
+
+/* Member switcher */
+#member-select {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 6px 10px;
+  font-size: 0.95rem;
+}
+
+/* Personal device cards reuse .dev-card from devices.css */
+.devices-pane .dev-card {
+  background: var(--surface-2);
+}

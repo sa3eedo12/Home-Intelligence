@@ -6,17 +6,29 @@
   <title>About You — Home Intelligence</title>
   <link rel="stylesheet" href="/static/_design.css">
   <link rel="stylesheet" href="/static/about_you.css">
+  <link rel="stylesheet" href="/static/devices.css">
   <script src="/static/_app.js" defer></script>
   <script src="/static/about_you.js" defer></script>
 </head>
 <body class="page-body about-you-body">
+  {% set current = (knowledge.current_member or {}) %}
+  {% set members  = knowledge.members or [] %}
   <header class="topbar">
     <a class="back-link" href="/dashboard">← Dashboard</a>
     <div>
-      <h1>About You</h1>
-      <p>Review, correct, confirm, or forget what Home Intelligence has learned.</p>
+      <h1>About {{ current.name or 'You' }}</h1>
+      <p>What Home Intelligence has learned about {{ current.name or 'this person' }} — and the devices they own.</p>
     </div>
-    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
+    <div style="display:flex; gap:8px; align-items:center;">
+      {% if members|length > 1 %}
+      <select id="member-select" aria-label="Switch household member">
+        {% for m in members %}
+          <option value="{{ m.id }}" {% if m.id == current.id %}selected{% endif %}>{{ m.name }}</option>
+        {% endfor %}
+      </select>
+      {% endif %}
+      <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
+    </div>
   </header>
 
   {% macro confidence_bar(confidence) -%}
@@ -35,26 +47,50 @@
   {%- endmacro %}
 
   <main>
-    <section class="card">
-      <div class="section-header"><div><h2>Things</h2><p>Devices, appliances, rooms, and other learned objects.</p></div></div>
-      <div class="card-grid">
-        {% for item in knowledge.things %}
-          <article class="knowledge-card card-hover" data-table="things" data-id="{{ item.id }}">
-            <script type="application/json" class="card-json">{{ item | tojson }}</script>
-            <header><h3>{{ item.friendly_name }}</h3><span class="badge badge-muted">{{ item.type }}</span></header>
-            <pre>{{ (item.attributes or {}) | tojson }}</pre>
-            {{ confidence_bar(item.confidence) }}
-            <dl><dt>Source</dt><dd>{{ item.source or 'unknown' }}</dd><dt>Last confirmed</dt><dd>{{ item.last_confirmed_at or item.learned_at or '—' }}</dd></dl>
-            {{ actions('things', item.id) }}
+
+    <!-- Tabs -->
+    <nav class="ay-tabs" role="tablist">
+      <button class="ay-tab is-active" data-tab="devices" role="tab">📱 Devices <span class="muted">({{ knowledge.personal_devices|length }})</span></button>
+      <button class="ay-tab" data-tab="habits"      role="tab">🔁 Habits <span class="muted">({{ knowledge.habits|length }})</span></button>
+      <button class="ay-tab" data-tab="preferences" role="tab">⚙️ Preferences <span class="muted">({{ knowledge.preferences|length }})</span></button>
+      <button class="ay-tab" data-tab="routines"    role="tab">🪜 Routines <span class="muted">({{ knowledge.routines|length }})</span></button>
+    </nav>
+
+    <!-- Devices tab -->
+    <section class="ay-pane is-active" data-pane="devices">
+      <div class="card-grid devices-pane">
+        {% for item in knowledge.personal_devices %}
+          {% set attrs = (item.attributes or {}) %}
+          <article class="dev-card device-card" data-thing-id="{{ item.id }}" tabindex="0">
+            <div class="dev-card-icon">
+              {% set t = item.type or '' %}
+              {% if t == 'device.phone' %}📱
+              {% elif t == 'device.tablet' %}📱
+              {% elif t == 'device.watch' %}⌚
+              {% elif t == 'device.laptop' %}💻
+              {% elif t == 'device.monitor' %}🖥️
+              {% else %}🔌{% endif %}
+            </div>
+            <p class="dev-card-name">{{ item.friendly_name }}</p>
+            <div class="dev-card-meta">
+              {% if attrs.manufacturer or attrs.model %}
+                <span class="dev-card-pill">{{ (attrs.manufacturer or '') ~ ' ' ~ (attrs.model or '') }}</span>
+              {% endif %}
+              <span class="dev-card-pill">{{ (item.ha_entity_ids or []) | length }} properties</span>
+            </div>
           </article>
         {% else %}
-          <div class="empty-state"><div class="empty-state-icon">🏠</div><h3>No things learned yet</h3><p>Adopt Home Assistant entities from Discovery to start building the home graph.</p><a class="btn btn-primary btn-sm" href="/dashboard/discovery">Open Discovery</a></div>
+          <div class="empty-state">
+            <div class="empty-state-icon">📱</div>
+            <h3>No personal devices yet</h3>
+            <p>Open <a href="/dashboard/devices">Devices</a>, click any device, and assign it to {{ current.name or 'you' }}.</p>
+          </div>
         {% endfor %}
       </div>
     </section>
 
-    <section class="card">
-      <div class="section-header"><div><h2>Habits</h2><p>Observed routines that may need confirmation.</p></div></div>
+    <!-- Habits tab -->
+    <section class="ay-pane" data-pane="habits" hidden>
       <div class="card-grid">
         {% for item in knowledge.habits %}
           <article class="knowledge-card card-hover" data-table="habits" data-id="{{ item.id }}">
@@ -71,8 +107,8 @@
       </div>
     </section>
 
-    <section class="card">
-      <div class="section-header"><div><h2>Preferences</h2><p>Your saved choices and defaults.</p></div></div>
+    <!-- Preferences tab -->
+    <section class="ay-pane" data-pane="preferences" hidden>
       <div class="card-grid">
         {% for item in knowledge.preferences %}
           <article class="knowledge-card card-hover" data-table="preferences" data-id="{{ item.key }}">
@@ -89,8 +125,8 @@
       </div>
     </section>
 
-    <section class="card">
-      <div class="section-header"><div><h2>Routines</h2><p>Reusable steps and schedules for home workflows.</p></div></div>
+    <!-- Routines tab -->
+    <section class="ay-pane" data-pane="routines" hidden>
       <div class="card-grid">
         {% for item in knowledge.routines %}
           <article class="knowledge-card card-hover" data-table="routines" data-id="{{ item.id }}">
@@ -107,6 +143,22 @@
       </div>
     </section>
   </main>
+
+  <!-- Drill-down panel (same DOM contract as /dashboard/devices) -->
+  <aside id="dev-detail" class="dev-detail" hidden aria-label="Device detail">
+    <div class="dev-detail-inner">
+      <button id="dev-detail-close" class="btn btn-secondary btn-icon" aria-label="Close">✕</button>
+      <header class="dev-detail-header">
+        <h2 id="dd-name">…</h2>
+        <p id="dd-meta" class="muted">…</p>
+      </header>
+      <section class="dev-detail-section">
+        <h3>Properties <small id="dd-entity-count" class="muted"></small></h3>
+        <p class="muted dev-detail-hint">Live state from Home Assistant, grouped by category.</p>
+        <ul id="dd-entities" class="entity-list"></ul>
+      </section>
+    </div>
+  </aside>
 
   <dialog id="edit-modal" class="modal">
     <form method="dialog">
