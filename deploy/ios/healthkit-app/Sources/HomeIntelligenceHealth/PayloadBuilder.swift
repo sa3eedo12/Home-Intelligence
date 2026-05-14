@@ -57,21 +57,40 @@ enum PayloadBuilder {
         addQuantity("HKQuantityTypeIdentifierVO2Max",
                     "mL/kg/min", snapshot.vo2Max)
 
-        // Sleep — emit a single asleep aggregate if we found any.
-        if let asleepMin = snapshot.sleepAsleepMin, asleepMin > 0 {
-            let window = snapshot.sleepWindow
-            let start = iso.string(from: window?.start ?? snapshot.capturedAt)
-            let end   = iso.string(from: window?.end   ?? snapshot.capturedAt)
-            metrics.append([
-                "type": "HKCategoryTypeIdentifierSleepAnalysis",
-                "data": [[
-                    "startDate": start,
-                    "endDate":   end,
-                    "stage":     "asleep",
-                    "qty":       asleepMin,
-                    "value":     "asleep",
-                ]],
-            ])
+        // Sleep — emit one entry per stage that has data. The orchestrator's
+        // normalizer maps each stage to its own metric (sleep_core,
+        // sleep_deep, sleep_rem, sleep_asleep, sleep_awake, sleep_inBed) so
+        // the dashboard can show a breakdown. The TOTAL `sleep_asleep` uses
+        // the union of asleep-class intervals so it doesn't double-count
+        // legacy `.asleep` + per-stage samples.
+        if let sleep = snapshot.sleep, sleep.totalAsleepMin > 0 {
+            let startStr = iso.string(from: sleep.windowStart)
+            let endStr   = iso.string(from: sleep.windowEnd)
+
+            func addSleep(stage: String, minutes: Double?) {
+                guard let minutes = minutes, minutes > 0 else { return }
+                metrics.append([
+                    "type": "HKCategoryTypeIdentifierSleepAnalysis",
+                    "data": [[
+                        "startDate": startStr,
+                        "endDate":   endStr,
+                        "stage":     stage,
+                        "qty":       minutes,
+                        "value":     stage,
+                    ]],
+                ])
+            }
+            // Total asleep first — this is what the dashboard's "you slept
+            // X hours" surface uses.
+            addSleep(stage: "asleep", minutes: sleep.totalAsleepMin)
+            addSleep(stage: "core",   minutes: sleep.coreMin)
+            addSleep(stage: "deep",   minutes: sleep.deepMin)
+            addSleep(stage: "rem",    minutes: sleep.remMin)
+            addSleep(stage: "awake",  minutes: sleep.awakeMin)
+            addSleep(stage: "inBed",  minutes: sleep.inBedMin)
+            // .asleepUnspecified maps to "sleep_asleep" upstream, but we
+            // already account for it in the total above; emitting it again
+            // would double-count.
         }
 
         let workouts: [[String: Any]] = snapshot.workouts.map { wk in

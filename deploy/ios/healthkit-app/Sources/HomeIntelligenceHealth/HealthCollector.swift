@@ -48,7 +48,7 @@ struct HealthCollector {
                                                    unit: vo2MaxUnit(),
                                                    start: now.addingTimeInterval(-30 * 86400),
                                                    end: now)
-        async let sleepData    = sleepAsleep(start: now.addingTimeInterval(-86400), end: now)
+        async let sleepData    = sleepBreakdown(start: now.addingTimeInterval(-86400), end: now)
         async let workouts     = recentWorkouts(start: windowStart, end: now)
 
         // Convert percent (HealthKit returns 0.0-1.0) into the 0-100 % the
@@ -56,7 +56,6 @@ struct HealthCollector {
         let bo = try await bloodOxygen
         let oxygenPct = bo.map { $0 * 100 }
 
-        let (asleepMin, sleepWindow) = try await sleepData
         return try await Snapshot(
             capturedAt: now,
             windowMinutes: windowMinutes,
@@ -68,8 +67,7 @@ struct HealthCollector {
             weight:           weight,
             bloodOxygen:      oxygenPct,
             vo2Max:           vo2Max,
-            sleepAsleepMin:   asleepMin,
-            sleepWindow:      sleepWindow,
+            sleep:            sleepData,
             workouts:         workouts
         )
     }
@@ -128,10 +126,15 @@ struct HealthCollector {
         }
     }
 
-    /// Returns (sumOfAsleepMinutes, optional aggregate window).
-    private func sleepAsleep(start: Date, end: Date) async throws -> (Double?, SleepWindow?) {
+    /// Reads sleep samples for the window and produces a per-stage breakdown.
+    /// Handles the watchOS quirk of emitting both legacy `.asleep` AND fine
+    /// stage samples covering the same period: the total `asleep` value is
+    /// the UNION of all asleep-class intervals (so overlapping legacy +
+    /// stages count once), while the per-stage minutes are summed
+    /// independently.
+    private func sleepBreakdown(start: Date, end: Date) async throws -> SleepBreakdown? {
         guard let type = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else {
-            return (nil, nil)
+            return nil
         }
         let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: .strictStartDate)
         let sort = [NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)]
@@ -142,45 +145,74 @@ struct HealthCollector {
             }
             store.execute(q)
         }
+        if samples.isEmpty { return nil }
 
-        // Sum durations of "asleep"-class samples — but be careful about
-        // double-counting: watchOS 9+ emits BOTH a legacy `.asleep` sample
-        // covering the whole sleep period AND fine-grained per-stage samples
-        // (`.asleepCore`, `.asleepDeep`, `.asleepREM`) for the SAME period.
-        // Naively summing them all reports ~2x the real sleep time.
-        //
-        // Strategy: if any stage-specific sample exists in the window, ignore
-        // the legacy `.asleep` value entirely (the stages cover the same
-        // ground in finer detail). Otherwise count `.asleep` (older devices /
-        // manually-logged sleep without a watch).
-        let hasStagedSamples = samples.contains { sample in
-            guard let v = HKCategoryValueSleepAnalysis(rawValue: sample.value) else { return false }
-            switch v {
-            case .asleepCore, .asleepDeep, .asleepREM, .asleepUnspecified:
-                return true
-            default:
-                return false
-            }
-        }
-        var asleepSeconds: TimeInterval = 0
-        var earliest: Date?
-        var latest: Date?
+        // Collect intervals per stage so we can both report per-stage totals
+        // AND compute the union of all asleep-class intervals.
+        var coreIntervals: [(Date, Date)]    = []
+        var deepIntervals: [(Date, Date)]    = []
+        var remIntervals: [(Date, Date)]     = []
+        var unspecIntervals: [(Date, Date)]  = []
+        var legacyAsleep: [(Date, Date)]     = []
+        var awakeIntervals: [(Date, Date)]   = []
+        var inBedIntervals: [(Date, Date)]   = []
         for s in samples {
             guard let value = HKCategoryValueSleepAnalysis(rawValue: s.value) else { continue }
-            if !isAsleepStage(value) { continue }
-            // Skip the legacy bucket if we have staged data — the stages
-            // already account for the same minutes more precisely.
-            if value == .asleep && hasStagedSamples { continue }
-            asleepSeconds += s.endDate.timeIntervalSince(s.startDate)
-            if earliest == nil || s.startDate < earliest! { earliest = s.startDate }
-            if latest == nil   || s.endDate   > latest!   { latest   = s.endDate }
+            let pair = (s.startDate, s.endDate)
+            switch value {
+            case .asleepCore:        coreIntervals.append(pair)
+            case .asleepDeep:        deepIntervals.append(pair)
+            case .asleepREM:         remIntervals.append(pair)
+            case .asleepUnspecified: unspecIntervals.append(pair)
+            case .asleep:            legacyAsleep.append(pair)   // legacy aggregate
+            case .awake:             awakeIntervals.append(pair)
+            case .inBed:             inBedIntervals.append(pair)
+            @unknown default:        unspecIntervals.append(pair) // be conservative
+            }
         }
-        let minutes = asleepSeconds / 60.0
-        if minutes <= 0 { return (nil, nil) }
-        let window = (earliest != nil && latest != nil)
-            ? SleepWindow(start: earliest!, end: latest!, asleepMin: minutes)
-            : nil
-        return (minutes, window)
+
+        let asleepIntervals = coreIntervals + deepIntervals + remIntervals
+                              + unspecIntervals + legacyAsleep
+        let totalAsleepSec  = mergedDurationSec(asleepIntervals)
+        if totalAsleepSec <= 0 { return nil }
+
+        return SleepBreakdown(
+            totalAsleepMin: totalAsleepSec / 60.0,
+            coreMin:        coreIntervals.isEmpty   ? nil : sumDurationSec(coreIntervals)   / 60.0,
+            deepMin:        deepIntervals.isEmpty   ? nil : sumDurationSec(deepIntervals)   / 60.0,
+            remMin:         remIntervals.isEmpty    ? nil : sumDurationSec(remIntervals)    / 60.0,
+            unspecifiedMin: unspecIntervals.isEmpty ? nil : sumDurationSec(unspecIntervals) / 60.0,
+            awakeMin:       awakeIntervals.isEmpty  ? nil : sumDurationSec(awakeIntervals)  / 60.0,
+            inBedMin:       inBedIntervals.isEmpty  ? nil : mergedDurationSec(inBedIntervals) / 60.0,
+            windowStart:    asleepIntervals.map { $0.0 }.min() ?? start,
+            windowEnd:      asleepIntervals.map { $0.1 }.max() ?? end
+        )
+    }
+
+    /// Merges overlapping (start, end) intervals and returns the total
+    /// covered duration in seconds. Used so a legacy `.asleep` sample
+    /// covering the whole night doesn't double-count with the fine-grained
+    /// per-stage samples that subdivide it.
+    private func mergedDurationSec(_ intervals: [(Date, Date)]) -> TimeInterval {
+        if intervals.isEmpty { return 0 }
+        let sorted = intervals.sorted(by: { $0.0 < $1.0 })
+        var merged: [(Date, Date)] = [sorted[0]]
+        for (s, e) in sorted.dropFirst() {
+            let last = merged[merged.count - 1]
+            if s <= last.1 {
+                merged[merged.count - 1] = (last.0, max(last.1, e))
+            } else {
+                merged.append((s, e))
+            }
+        }
+        return merged.reduce(0) { $0 + $1.1.timeIntervalSince($1.0) }
+    }
+
+    /// Plain sum of interval durations — does NOT merge overlaps. Used for
+    /// per-stage minutes where overlap shouldn't happen and the user wants
+    /// the actual stage time (e.g. "you spent 95 min in deep sleep").
+    private func sumDurationSec(_ intervals: [(Date, Date)]) -> TimeInterval {
+        intervals.reduce(0) { $0 + $1.1.timeIntervalSince($1.0) }
     }
 
     private func recentWorkouts(start: Date, end: Date) async throws -> [Workout] {
@@ -206,21 +238,6 @@ struct HealthCollector {
                 activeEnergy: energy,
                 distanceM: distance
             )
-        }
-    }
-
-    // MARK: - Stage classification
-
-    private func isAsleepStage(_ value: HKCategoryValueSleepAnalysis) -> Bool {
-        // .inBed and .awake are NOT asleep. Everything else counts. Default
-        // to "asleep" for new enum values rather than discarding them.
-        switch value {
-        case .inBed, .awake:
-            return false
-        case .asleep, .asleepCore, .asleepDeep, .asleepREM, .asleepUnspecified:
-            return true
-        @unknown default:
-            return true
         }
     }
 

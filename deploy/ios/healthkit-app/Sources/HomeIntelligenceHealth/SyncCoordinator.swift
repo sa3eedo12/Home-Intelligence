@@ -99,7 +99,12 @@ struct SyncCoordinator {
         if s.weight != nil           { out.append("Weight") }
         if s.bloodOxygen != nil      { out.append("Blood Oxygen") }
         if s.vo2Max != nil           { out.append("VO₂ Max") }
-        if (s.sleepAsleepMin ?? 0) > 0 { out.append("Sleep") }
+        if let sleep = s.sleep, sleep.totalAsleepMin > 0 {
+            out.append("Sleep")
+            if sleep.coreMin != nil { out.append("• Core") }
+            if sleep.deepMin != nil { out.append("• Deep") }
+            if sleep.remMin != nil  { out.append("• REM") }
+        }
         if !s.workouts.isEmpty       { out.append("Workouts (\(s.workouts.count))") }
         return out
     }
