@@ -475,14 +475,14 @@ class NightlyReflector:
         except Exception as exc:
             logger.warning("reflection_capability_snapshot_failed", error=str(exc))
         prompt = {
-            "recent_events": evidence.get("events", [])[:30],
-            "activity_stream": evidence.get("activity", [])[:30],
-            "dismissals": evidence.get("dismissals", [])[:20],
+            "recent_events": evidence.get("events", [])[:60],
+            "activity_stream": evidence.get("activity", [])[:60],
+            "dismissals": evidence.get("dismissals", [])[:30],
             "self_audit": audit,
             "knowledge_gaps": gaps,
             "hourly_patterns": patterns,
             "health_summary": health_summary or {},
-            "capabilities": capabilities[:60],
+            "capabilities": capabilities[:80],
         }
         response = await self._chat_with_fallback(
             [
