@@ -301,6 +301,7 @@ class Advisor:
             model=self.default_model,
             temperature=0.2,
             response_format="json",
+            think=False,
         )
         content = str(
             (response.get("message") or {}).get("content") or response.get("response") or "{}"

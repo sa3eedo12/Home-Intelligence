@@ -121,6 +121,11 @@ async def infer(context: str) -> dict[str, Any]:
             model=_model(),
             temperature=0.1,
             response_format="json",
+            # Reactive path: this runs on every observer event. Skip the
+            # thinking trace — the structured JSON output is what matters,
+            # and a 35B model emitting <thinking>…</thinking> first added
+            # ~60-90s of latency that blocked the next reactive trigger.
+            think=False,
         )
         parsed = _extract_json(str((response.get("message") or {}).get("content") or "{}"))
     except Exception as exc:

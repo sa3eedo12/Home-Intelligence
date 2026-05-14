@@ -332,6 +332,9 @@ class Router:
                 messages=messages,
                 model=ollama_model,
                 response_format="json",
+                # Router classification is structured-output only; thinking
+                # adds 5-30s per request which delays the request flow.
+                think=False,
             )
             content = (response.get("message") or {}).get("content", "")
             if not content:
