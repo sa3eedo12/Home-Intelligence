@@ -129,3 +129,102 @@ def test_dashboard_renders_with_curator_narrative_and_agents() -> None:
     assert "Why was this blocked?" in resp.text
     assert 'id="connection-state"' in resp.text
     assert 'data-job="morning_brief"' in resp.text  # run-now button is wired
+
+
+# ── Pending-proposals nav badge ─────────────────────────────────────────
+
+
+def _minimal_status() -> dict:
+    return {
+        "stack": {
+            "orchestrator": {"ok": True},
+            "ollama": {"ok": False},
+            "lemonade": {"ok": False},
+            "redis": {"ok": False},
+            "postgres": {"ok": False},
+            "qdrant": {"ok": False},
+        },
+        "agents": [],
+        "jobs": [],
+        "recent_notifications": [],
+        "active_mutes": [],
+        "suppression_counts": {},
+        "quiet_override": None,
+        "models": {"npu": [], "igpu": []},
+        "activity": {"window_minutes": 5, "agents": [], "total_events": 0},
+        "recent_activity": [],
+        "narrative": None,
+        "alert_narrative": None,
+    }
+
+
+def test_dashboard_renders_proposals_nav_badge_with_pending_count() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    app = FastAPI()
+    app.include_router(router)
+
+    async def _status() -> dict:
+        return _minimal_status()
+
+    app.state.status_provider = _status
+    app.state.reflection_store = SimpleNamespace(
+        count_proposals=AsyncMock(return_value=12),
+    )
+
+    with TestClient(app) as client:
+        resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    # Badge rendered with the count and aria-label
+    assert 'class="nav-badge"' in resp.text
+    assert ">12<" in resp.text  # the digit appears inside the badge span
+    assert 'aria-label="12 pending"' in resp.text
+    # Helper was called with status='pending' (NOT all proposals)
+    assert app.state.reflection_store.count_proposals.await_args.kwargs == {
+        "status": "pending"
+    }
+
+
+def test_dashboard_omits_proposals_badge_when_zero_pending() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    app = FastAPI()
+    app.include_router(router)
+
+    async def _status() -> dict:
+        return _minimal_status()
+
+    app.state.status_provider = _status
+    app.state.reflection_store = SimpleNamespace(
+        count_proposals=AsyncMock(return_value=0),
+    )
+
+    with TestClient(app) as client:
+        resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    # No badge when nothing is pending — keeps the nav uncluttered
+    assert "nav-badge" not in resp.text
+
+
+def test_dashboard_survives_count_proposals_error() -> None:
+    """If the count helper blows up, the dashboard must still render."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    app = FastAPI()
+    app.include_router(router)
+
+    async def _status() -> dict:
+        return _minimal_status()
+
+    app.state.status_provider = _status
+    app.state.reflection_store = SimpleNamespace(
+        count_proposals=AsyncMock(side_effect=Exception("boom")),
+    )
+
+    with TestClient(app) as client:
+        resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    assert "nav-badge" not in resp.text

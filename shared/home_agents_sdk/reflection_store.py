@@ -232,6 +232,34 @@ class ReflectionStore:
                 return []
         return [_row_dict(row) for row in rows]
 
+    async def count_proposals(self, status: str | None = None) -> int:
+        """Return how many proposals match ``status`` (or all if None).
+
+        Used by the dashboard nav to render an at-a-glance "X to confirm"
+        badge without paying the cost of fetching every row. Returns 0 on
+        any DB error so a flaky pool can never break navigation.
+        """
+        async with self._connection("count_proposals") as conn:
+            if conn is None:
+                return 0
+            try:
+                value = await conn.fetchval(
+                    """
+                    SELECT COUNT(*)::int
+                    FROM proposals
+                    WHERE ($1::text IS NULL OR status = $1::text)
+                    """,
+                    status,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "reflection_store_query_failed",
+                    operation="count_proposals",
+                    error=str(exc),
+                )
+                return 0
+        return int(value or 0)
+
     async def add_proposal(
         self,
         *,

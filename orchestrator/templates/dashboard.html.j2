@@ -30,7 +30,7 @@
         <a class="nav-brand" href="/dashboard"><span aria-hidden="true">🏠</span><span>Home Intelligence</span></a>
         <a class="nav-link active" href="/dashboard" aria-current="page"><span class="nav-icon" aria-hidden="true">🏠</span><span class="nav-label">Home</span></a>
         <a class="nav-link" href="/dashboard/morning-brief"><span class="nav-icon" aria-hidden="true">🌅</span><span class="nav-label">Morning Brief</span></a>
-        <a class="nav-link" href="/dashboard/proposals"><span class="nav-icon" aria-hidden="true">📋</span><span class="nav-label">Proposals</span></a>
+        <a class="nav-link" href="/dashboard/proposals"><span class="nav-icon" aria-hidden="true">📋</span><span class="nav-label">Proposals</span>{% if pending_proposals and pending_proposals > 0 %}<span class="nav-badge" aria-label="{{ pending_proposals }} pending">{{ pending_proposals }}</span>{% endif %}</a>
         <a class="nav-link" href="/dashboard/about-you"><span class="nav-icon" aria-hidden="true">👤</span><span class="nav-label">About You</span></a>
         <a class="nav-link" href="/dashboard/what-i-know"><span class="nav-icon" aria-hidden="true">🧠</span><span class="nav-label">What I Know</span></a>
         <a class="nav-link" href="/dashboard/devices"><span class="nav-icon" aria-hidden="true">🔌</span><span class="nav-label">Devices</span></a>

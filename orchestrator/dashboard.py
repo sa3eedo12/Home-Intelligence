@@ -510,10 +510,20 @@ async def about_you(
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
+    store = _reflection_store(request)
+    pending_proposals = 0
+    if store is not None and hasattr(store, "count_proposals"):
+        try:
+            pending_proposals = await store.count_proposals(status="pending")
+        except Exception:
+            pending_proposals = 0
     return templates.TemplateResponse(
         request=request,
         name="dashboard.html.j2",
-        context={"status": await _status(request)},
+        context={
+            "status": await _status(request),
+            "pending_proposals": pending_proposals,
+        },
     )
 
 

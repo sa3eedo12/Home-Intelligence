@@ -242,6 +242,8 @@ a:hover { color: var(--accent-hover); text-decoration: underline; }
 .nav-link:hover, .nav-link.active { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--text-primary); text-decoration: none; }
 .nav-link.active { box-shadow: inset 3px 0 0 var(--accent); }
 .nav-icon { width: 1.5rem; text-align: center; }
+.nav-badge { margin-left: auto; min-width: 1.5rem; height: 1.25rem; padding: 0 var(--space-2); border-radius: 999px; background: var(--accent); color: var(--accent-contrast, #fff); font-size: var(--font-size-xs); font-weight: 600; line-height: 1.25rem; text-align: center; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
+.nav-link:hover .nav-badge, .nav-link.active .nav-badge { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent); }
 .nav-toggle, .nav-toggle-button { display: none; }
 
 .empty-state { display: grid; place-items: center; gap: var(--space-2); min-height: 7rem; padding: var(--space-5); text-align: center; color: var(--text-muted); border: 1px dashed var(--border); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--surface-2) 48%, transparent); }

@@ -152,3 +152,44 @@ async def test_unavailable_pool_returns_empty_or_noop() -> None:
     await store.record_delivery(1, channel="github_issue", error="github not configured")
     await store.upsert_profile("wake_time", "07:00", 0.5, "test")
     await store.forget_profile("wake_time")
+
+
+@pytest.mark.asyncio
+async def test_count_proposals_filters_by_status() -> None:
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=12)
+    store = ReflectionStore(_pool_with(conn))
+
+    count = await store.count_proposals(status="pending")
+
+    assert count == 12
+    conn.fetchval.assert_awaited_once()
+    assert conn.fetchval.await_args.args[-1] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_count_proposals_no_filter_returns_total() -> None:
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(return_value=37)
+    store = ReflectionStore(_pool_with(conn))
+
+    count = await store.count_proposals()
+
+    assert count == 37
+    assert conn.fetchval.await_args.args[-1] is None
+
+
+@pytest.mark.asyncio
+async def test_count_proposals_returns_zero_on_db_error() -> None:
+    """Nav badge can never break navigation — return 0 instead of raising."""
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(side_effect=Exception("connection lost"))
+    store = ReflectionStore(_pool_with(conn))
+
+    assert await store.count_proposals(status="pending") == 0
+
+
+@pytest.mark.asyncio
+async def test_count_proposals_returns_zero_when_no_pool() -> None:
+    store = ReflectionStore(None)
+    assert await store.count_proposals(status="pending") == 0
