@@ -532,3 +532,163 @@ async def apply_proposal(
         "skipped_already_adopted": len(skipped),
         "member_updates": member_updates,
     }
+
+
+async def consolidate_by_device(*, knowledge_graph: Any) -> dict[str, Any]:
+    """Walk the existing things and merge sibling HA entities into the same
+    thing using HA's device registry as the source of truth.
+
+    Use case: the registry-aware discovery added in 2026-05 needs to fix up
+    the things that were created BEFORE registry-grouping existed (one row
+    per HA entity, even though many of them are siblings of the same
+    physical device).
+
+    Idempotent: rows that are already device-grouped (have
+    attributes.ha_device_id) are left alone. Rows whose entity_id no longer
+    exists in HA are also left alone (could be a renamed entity).
+
+    Returns ``{"ok": True, "updated": [...], "merged_into": [...],
+    "untouched": N}``.
+    """
+    if knowledge_graph is None:
+        return {"ok": False, "error": "knowledge_graph unavailable"}
+    registries = await _ha_registries()
+    if not registries["entities"]:
+        return {"ok": False, "error": "HA registry not reachable"}
+
+    # entity_id → device_id (skip disabled/hidden)
+    eid_to_device: dict[str, str] = {}
+    for entity in registries["entities"]:
+        eid = str(entity.get("entity_id") or "").strip()
+        if not eid:
+            continue
+        if entity.get("disabled_by") or entity.get("hidden_by"):
+            continue
+        device_id = entity.get("device_id")
+        if device_id:
+            eid_to_device[eid] = device_id
+
+    devices_by_id = {d.get("id", ""): d for d in registries["devices"] if d.get("id")}
+
+    # device_id → all of its entity_ids (HA's view, not ours)
+    device_to_eids: dict[str, list[str]] = {}
+    for eid, device_id in eid_to_device.items():
+        device_to_eids.setdefault(device_id, []).append(eid)
+
+    things = await knowledge_graph.list_things() or []
+
+    # First pass: bucket existing things by their device_id (if discoverable).
+    things_by_device: dict[str, list[dict[str, Any]]] = {}
+    untouched: list[str] = []
+    for t in things:
+        attrs = t.get("attributes") or {}
+        if attrs.get("ha_device_id"):
+            untouched.append(str(attrs.get("entity_id") or ""))
+            continue
+        eids = list(t.get("ha_entity_ids") or [])
+        single = attrs.get("entity_id")
+        if single and single not in eids:
+            eids.append(single)
+        # Pick the first matching device — if a thing already references
+        # multiple entities from different devices, leave it alone (the
+        # user crafted that grouping by hand).
+        device_ids = {eid_to_device.get(eid) for eid in eids} - {None}
+        if len(device_ids) != 1:
+            untouched.append(single or (eids[0] if eids else ""))
+            continue
+        device_id = next(iter(device_ids))
+        things_by_device.setdefault(device_id, []).append(t)
+
+    updated: list[dict[str, Any]] = []
+    merged_into: list[dict[str, Any]] = []
+
+    for device_id, group in things_by_device.items():
+        all_ha_eids = sorted(set(device_to_eids.get(device_id, [])))
+        device = devices_by_id.get(device_id, {})
+        if not all_ha_eids:
+            continue
+
+        # Pick the canonical thing to keep: prefer the one whose primary
+        # entity is "controllable" (climate / vacuum / lock / camera / light),
+        # otherwise the first one alphabetically. Other things in the same
+        # device-group get deleted (their entity_ids fold into the keeper).
+        def _rank(thing: dict[str, Any]) -> tuple[int, str]:
+            primary = str((thing.get("attributes") or {}).get("entity_id") or "")
+            domain = primary.split(".", 1)[0] if "." in primary else ""
+            priority = {
+                "climate": 0, "vacuum": 1, "lock": 2, "camera": 3,
+                "light": 4, "cover": 5, "media_player": 6,
+            }.get(domain, 99)
+            return (priority, primary)
+        keeper = sorted(group, key=_rank)[0]
+        keeper_attrs = dict(keeper.get("attributes") or {})
+        keeper_attrs["entity_id_list"] = all_ha_eids
+        keeper_attrs["ha_device_id"] = device_id
+        if device.get("manufacturer"):
+            keeper_attrs["manufacturer"] = device["manufacturer"]
+        if device.get("model"):
+            keeper_attrs["model"] = device["model"]
+        keeper_name = _device_friendly_name(
+            device, str(keeper.get("friendly_name") or "")
+        ) or keeper.get("friendly_name") or "device"
+
+        try:
+            await knowledge_graph.put_thing(
+                type=str(keeper.get("type") or ""),
+                friendly_name=str(keeper_name),
+                attributes=keeper_attrs,
+                ha_entity_ids=all_ha_eids,
+                photo_path=keeper.get("photo_path"),
+                confidence=float(keeper.get("confidence") or 0.9),
+                source=str(keeper.get("source") or "auto_setup"),
+            )
+            updated.append({
+                "device_id": device_id,
+                "name": keeper_name,
+                "primary": keeper_attrs.get("entity_id"),
+                "entity_count": len(all_ha_eids),
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "consolidate_keep_failed",
+                device_id=device_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            continue
+
+        # Delete the non-keeper rows (they're now redundant).
+        deleter = getattr(knowledge_graph, "forget_thing", None)
+        for losing in group:
+            if losing.get("id") == keeper.get("id"):
+                continue
+            losing_id = losing.get("id")
+            losing_eid = (losing.get("attributes") or {}).get("entity_id")
+            if deleter is None or losing_id is None:
+                merged_into.append({
+                    "kept_id": keeper.get("id"),
+                    "would_delete_id": losing_id,
+                    "would_delete_entity": losing_eid,
+                    "note": "knowledge_graph has no forget_thing — left in place",
+                })
+                continue
+            try:
+                await deleter(int(losing_id))
+                merged_into.append({
+                    "kept_id": keeper.get("id"),
+                    "deleted_id": losing_id,
+                    "deleted_entity": losing_eid,
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "consolidate_delete_failed",
+                    losing_id=losing_id, error=f"{type(exc).__name__}: {exc}",
+                )
+
+    return {
+        "ok": True,
+        "updated_count": len(updated),
+        "merged_count": len(merged_into),
+        "untouched_count": len(untouched),
+        "updated": updated,
+        "merged_into": merged_into,
+    }

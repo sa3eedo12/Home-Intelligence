@@ -1066,6 +1066,22 @@ async def setup_auto_apply(request: Request) -> dict[str, Any]:
     return await apply_proposal(proposal=body, knowledge_graph=graph)
 
 
+@router.post("/admin/setup/consolidate-by-device")
+async def setup_consolidate_by_device(request: Request) -> dict[str, Any]:
+    """One-shot migration: merge existing per-entity ``things`` into device-
+    grouped ones using HA's device registry. Run this once after upgrading
+    to the registry-aware discovery if your DB still has rows from the old
+    per-entity flow.
+
+    Idempotent: things that are already device-grouped (have
+    ``attributes.ha_device_id``) are left alone.
+    """
+    from .auto_setup import consolidate_by_device
+
+    graph = _knowledge_graph(request)
+    return await consolidate_by_device(knowledge_graph=graph)
+
+
 @router.post("/admin/safety/explain")
 async def explain_safety(request: Request) -> dict[str, Any]:
     body = await request.json()
