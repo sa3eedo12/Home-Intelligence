@@ -666,25 +666,29 @@ async def consolidate_by_device(*, knowledge_graph: Any) -> dict[str, Any]:
     members = await knowledge_graph.list_members(include_pets=False) or []
 
     # First pass: bucket existing things by their device_id (if discoverable).
+    # We re-process even already-grouped rows so the migration can backfill
+    # scope/area/owner fields added in later versions.
     things_by_device: dict[str, list[dict[str, Any]]] = {}
     untouched: list[str] = []
     for t in things:
         attrs = t.get("attributes") or {}
-        if attrs.get("ha_device_id"):
-            untouched.append(str(attrs.get("entity_id") or ""))
-            continue
         eids = list(t.get("ha_entity_ids") or [])
         single = attrs.get("entity_id")
         if single and single not in eids:
             eids.append(single)
-        # Pick the first matching device — if a thing already references
-        # multiple entities from different devices, leave it alone (the
-        # user crafted that grouping by hand).
-        device_ids = {eid_to_device.get(eid) for eid in eids} - {None}
-        if len(device_ids) != 1:
+        # Pick the device id either from existing attributes (already grouped)
+        # or by looking up any of its entity_ids in HA's registry.
+        device_id = attrs.get("ha_device_id")
+        if not device_id:
+            device_ids = {eid_to_device.get(eid) for eid in eids} - {None}
+            if len(device_ids) != 1:
+                # Multi-device thing (user crafted by hand) or unknown to HA.
+                untouched.append(single or (eids[0] if eids else ""))
+                continue
+            device_id = next(iter(device_ids))
+        if device_id is None or device_id not in devices_by_id:
             untouched.append(single or (eids[0] if eids else ""))
             continue
-        device_id = next(iter(device_ids))
         things_by_device.setdefault(device_id, []).append(t)
 
     updated: list[dict[str, Any]] = []
