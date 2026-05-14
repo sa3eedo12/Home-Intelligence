@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundleDisplayName</key>
+    <string>HI Health</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <false/>
+    </dict>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <!-- HealthKit permission strings — shown in the system permission
+         sheet the first time we call HKHealthStore.requestAuthorization.
+         Be specific so the user knows what they're granting. -->
+    <key>NSHealthShareUsageDescription</key>
+    <string>Reads your recent steps, heart rate, sleep, and other Apple Health metrics so they can be uploaded to your local Home Intelligence orchestrator on your home network.</string>
+
+    <!-- We do NOT write to HealthKit. NSHealthUpdateUsageDescription is
+         intentionally omitted so iOS doesn't ask for write permission. -->
+
+    <!-- Allow plain HTTP to your TrueNAS on the local network. Defaults
+         block HTTP. The orchestrator typically runs on http://truenas.local:8080
+         or http://<lan-ip>:8080 — both are local-only and safe. -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <key>NSAllowsArbitraryLoadsInWebContent</key>
+        <false/>
+    </dict>
+
+    <!-- Bonjour types we'd discover on the LAN. Optional: lets iOS prompt
+         once for "find devices on local network" rather than failing later. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Sends your Health data to the Home Intelligence orchestrator on your local network. Your data never leaves your home.</string>
+</dict>
+</plist>

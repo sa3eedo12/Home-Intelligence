@@ -49,23 +49,6 @@
             ReferencedContainer = "container:HomeIntelligenceHealth.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
-      <EnvironmentVariables>
-         <EnvironmentVariable
-            key = "ORCHESTRATOR_URL"
-            value = "http://truenas.local:8080"
-            isEnabled = "NO">
-         </EnvironmentVariable>
-         <EnvironmentVariable
-            key = "HEALTHKIT_TOKEN"
-            value = "set-me-before-running"
-            isEnabled = "NO">
-         </EnvironmentVariable>
-         <EnvironmentVariable
-            key = "WINDOW_MINUTES"
-            value = "60"
-            isEnabled = "NO">
-         </EnvironmentVariable>
-      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"

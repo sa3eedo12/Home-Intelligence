@@ -1,13 +1,11 @@
-# Xcode + build artifacts — never check these in. The .xcodeproj/project.pbxproj
-# IS tracked (intentional, so users get a working project), but per-user state
-# and build output is not.
+# build artifacts
 build/
 DerivedData/
 *.xcuserdata*/
 xcuserdata/
 .DS_Store
 
-# Per-user Xcode state files inside .xcodeproj
+# per-user Xcode state
 HomeIntelligenceHealth.xcodeproj/xcuserdata/
 HomeIntelligenceHealth.xcodeproj/project.xcworkspace/xcuserdata/
 HomeIntelligenceHealth.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist

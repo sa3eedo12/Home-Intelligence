@@ -1,6 +1,6 @@
 import Foundation
 
-// Flat snapshot the collector produces — one struct per run, mirroring the
+// Flat snapshot the collector produces — one struct per sync, mirroring the
 // JSON shape the orchestrator's HealthAutoExportNormalizer accepts. Optional
 // fields are skipped from the payload (not zeroed) so the orchestrator never
 // stores a fake "0 steps" if HealthKit had no data.
@@ -19,7 +19,7 @@ struct Snapshot {
     var sleepWindow: SleepWindow?        // optional aggregate window
     var workouts: [Workout] = []
 
-    // Number of *quantity* metrics that have data. Used in summary log only.
+    /// Number of *quantity* metrics that have data. Used in summary log only.
     var metricCount: Int {
         let quantities: [Double?] = [
             steps, activeEnergy, heartRate, restingHeartRate,

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- HealthKit read access. Paired with NSHealthShareUsageDescription
+         in Info.plist. Available for iOS app targets in Xcode. -->
+    <key>com.apple.developer.healthkit</key>
+    <true/>
+
+    <!-- Newer HealthKit access classes (background delivery, etc). Empty
+         array is fine for read-only use. -->
+    <key>com.apple.developer.healthkit.access</key>
+    <array/>
+</dict>
+</plist>

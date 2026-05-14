@@ -74,8 +74,6 @@ enum PayloadBuilder {
             ])
         }
 
-        // Workouts — separate top-level array (the normalizer reads both
-        // `data.metrics` workout entries AND `data.workouts`).
         let workouts: [[String: Any]] = snapshot.workouts.map { wk in
             var item: [String: Any] = [
                 "type":     "HKWorkoutTypeIdentifier",

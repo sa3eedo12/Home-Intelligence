@@ -8,7 +8,7 @@ struct HealthCollector {
     let store: HKHealthStore
     let windowMinutes: Int
 
-    // The set of quantity types we read. main → Authorization → here.
+    /// The set of quantity types we read. Authorization.swift uses this list.
     static let quantityTypeIds: [HKQuantityTypeIdentifier] = [
         .stepCount,
         .activeEnergyBurned,
@@ -193,9 +193,8 @@ struct HealthCollector {
     // MARK: - Stage classification
 
     private func isAsleepStage(_ value: HKCategoryValueSleepAnalysis) -> Bool {
-        // .inBed and .awake are NOT asleep. Everything else is — Apple expands
-        // this enum periodically, so default to "asleep" for unknown new
-        // values rather than discarding them.
+        // .inBed and .awake are NOT asleep. Everything else counts. Default
+        // to "asleep" for new enum values rather than discarding them.
         switch value {
         case .inBed, .awake:
             return false

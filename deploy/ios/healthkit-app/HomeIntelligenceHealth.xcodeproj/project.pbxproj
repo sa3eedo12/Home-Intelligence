@@ -8,27 +8,31 @@
 
 /* Begin PBXBuildFile section */
 		FAC1000100000000FACADE10 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000100000000FACADE10 /* App.swift */; };
-		FAC1000200000000FACADE10 /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000200000000FACADE10 /* Config.swift */; };
-		FAC1000300000000FACADE10 /* Authorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000300000000FACADE10 /* Authorization.swift */; };
-		FAC1000400000000FACADE10 /* HealthCollector.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000400000000FACADE10 /* HealthCollector.swift */; };
-		FAC1000500000000FACADE10 /* Snapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000500000000FACADE10 /* Snapshot.swift */; };
+		FAC1000200000000FACADE10 /* Authorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000200000000FACADE10 /* Authorization.swift */; };
+		FAC1000300000000FACADE10 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000300000000FACADE10 /* ContentView.swift */; };
+		FAC1000400000000FACADE10 /* Forwarder.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000400000000FACADE10 /* Forwarder.swift */; };
+		FAC1000500000000FACADE10 /* HealthCollector.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000500000000FACADE10 /* HealthCollector.swift */; };
 		FAC1000600000000FACADE10 /* PayloadBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000600000000FACADE10 /* PayloadBuilder.swift */; };
-		FAC1000700000000FACADE10 /* Forwarder.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000700000000FACADE10 /* Forwarder.swift */; };
-		FAC1000800000000FACADE10 /* Log.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000800000000FACADE10 /* Log.swift */; };
+		FAC1000700000000FACADE10 /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000700000000FACADE10 /* Settings.swift */; };
+		FAC1000800000000FACADE10 /* Snapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000800000000FACADE10 /* Snapshot.swift */; };
+		FAC1000900000000FACADE10 /* SyncCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0000900000000FACADE10 /* SyncCoordinator.swift */; };
+		FAC1001000000000FACADE10 /* SyncIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAC0001000000000FACADE10 /* SyncIntent.swift */; };
 		FAC1005100000000FACADE10 /* HealthKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FAC0005000000000FACADE10 /* HealthKit.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		FAC0000100000000FACADE10 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
-		FAC0000200000000FACADE10 /* Config.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Config.swift; sourceTree = "<group>"; };
-		FAC0000300000000FACADE10 /* Authorization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Authorization.swift; sourceTree = "<group>"; };
-		FAC0000400000000FACADE10 /* HealthCollector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthCollector.swift; sourceTree = "<group>"; };
-		FAC0000500000000FACADE10 /* Snapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Snapshot.swift; sourceTree = "<group>"; };
+		FAC0000200000000FACADE10 /* Authorization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Authorization.swift; sourceTree = "<group>"; };
+		FAC0000300000000FACADE10 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		FAC0000400000000FACADE10 /* Forwarder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Forwarder.swift; sourceTree = "<group>"; };
+		FAC0000500000000FACADE10 /* HealthCollector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthCollector.swift; sourceTree = "<group>"; };
 		FAC0000600000000FACADE10 /* PayloadBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PayloadBuilder.swift; sourceTree = "<group>"; };
-		FAC0000700000000FACADE10 /* Forwarder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Forwarder.swift; sourceTree = "<group>"; };
-		FAC0000800000000FACADE10 /* Log.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Log.swift; sourceTree = "<group>"; };
-		FAC0001000000000FACADE10 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		FAC0001100000000FACADE10 /* HomeIntelligenceHealth.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HomeIntelligenceHealth.entitlements; sourceTree = "<group>"; };
+		FAC0000700000000FACADE10 /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
+		FAC0000800000000FACADE10 /* Snapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Snapshot.swift; sourceTree = "<group>"; };
+		FAC0000900000000FACADE10 /* SyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncCoordinator.swift; sourceTree = "<group>"; };
+		FAC0001000000000FACADE10 /* SyncIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncIntent.swift; sourceTree = "<group>"; };
+		FAC0001100000000FACADE10 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		FAC0001200000000FACADE10 /* HomeIntelligenceHealth.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HomeIntelligenceHealth.entitlements; sourceTree = "<group>"; };
 		FAC0005000000000FACADE10 /* HealthKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = HealthKit.framework; path = System/Library/Frameworks/HealthKit.framework; sourceTree = SDKROOT; };
 		FAC0004000000000FACADE10 /* HomeIntelligenceHealth.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HomeIntelligenceHealth.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -59,13 +63,15 @@
 			isa = PBXGroup;
 			children = (
 				FAC0000100000000FACADE10 /* App.swift */,
-				FAC0000200000000FACADE10 /* Config.swift */,
-				FAC0000300000000FACADE10 /* Authorization.swift */,
-				FAC0000400000000FACADE10 /* HealthCollector.swift */,
-				FAC0000500000000FACADE10 /* Snapshot.swift */,
+				FAC0000300000000FACADE10 /* ContentView.swift */,
+				FAC0000700000000FACADE10 /* Settings.swift */,
+				FAC0000900000000FACADE10 /* SyncCoordinator.swift */,
+				FAC0001000000000FACADE10 /* SyncIntent.swift */,
+				FAC0000200000000FACADE10 /* Authorization.swift */,
+				FAC0000500000000FACADE10 /* HealthCollector.swift */,
+				FAC0000800000000FACADE10 /* Snapshot.swift */,
 				FAC0000600000000FACADE10 /* PayloadBuilder.swift */,
-				FAC0000700000000FACADE10 /* Forwarder.swift */,
-				FAC0000800000000FACADE10 /* Log.swift */,
+				FAC0000400000000FACADE10 /* Forwarder.swift */,
 			);
 			name = Sources;
 			path = Sources/HomeIntelligenceHealth;
@@ -74,8 +80,8 @@
 		FAC0001200000000FACADE00 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
-				FAC0001000000000FACADE10 /* Info.plist */,
-				FAC0001100000000FACADE10 /* HomeIntelligenceHealth.entitlements */,
+				FAC0001100000000FACADE10 /* Info.plist */,
+				FAC0001200000000FACADE10 /* HomeIntelligenceHealth.entitlements */,
 			);
 			name = Resources;
 			path = Resources;
@@ -133,9 +139,6 @@
 							com.apple.HealthKit = {
 								enabled = 1;
 							};
-							com.apple.Sandbox = {
-								enabled = 1;
-							};
 						};
 					};
 				};
@@ -174,13 +177,15 @@
 			buildActionMask = 2147483647;
 			files = (
 				FAC1000100000000FACADE10 /* App.swift in Sources */,
-				FAC1000200000000FACADE10 /* Config.swift in Sources */,
-				FAC1000300000000FACADE10 /* Authorization.swift in Sources */,
-				FAC1000400000000FACADE10 /* HealthCollector.swift in Sources */,
-				FAC1000500000000FACADE10 /* Snapshot.swift in Sources */,
+				FAC1000300000000FACADE10 /* ContentView.swift in Sources */,
+				FAC1000700000000FACADE10 /* Settings.swift in Sources */,
+				FAC1000900000000FACADE10 /* SyncCoordinator.swift in Sources */,
+				FAC1001000000000FACADE10 /* SyncIntent.swift in Sources */,
+				FAC1000200000000FACADE10 /* Authorization.swift in Sources */,
+				FAC1000500000000FACADE10 /* HealthCollector.swift in Sources */,
+				FAC1000800000000FACADE10 /* Snapshot.swift in Sources */,
 				FAC1000600000000FACADE10 /* PayloadBuilder.swift in Sources */,
-				FAC1000700000000FACADE10 /* Forwarder.swift in Sources */,
-				FAC1000800000000FACADE10 /* Log.swift in Sources */,
+				FAC1000400000000FACADE10 /* Forwarder.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -191,10 +196,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
-				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = YES;
 				CLANG_ENABLE_OBJC_WEAK = YES;
@@ -204,24 +207,18 @@
 				CLANG_WARN_CONSTANT_CONVERSION = YES;
 				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
 				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
-				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
 				CLANG_WARN_EMPTY_BODY = YES;
 				CLANG_WARN_ENUM_CONVERSION = YES;
 				CLANG_WARN_INFINITE_RECURSION = YES;
 				CLANG_WARN_INT_CONVERSION = YES;
 				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
-				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
 				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
 				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
-				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
 				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
 				CLANG_WARN_STRICT_PROTOTYPES = YES;
 				CLANG_WARN_SUSPICIOUS_MOVE = YES;
-				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
-				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -240,14 +237,14 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
-				SDKROOT = macosx;
+				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
 		};
@@ -255,10 +252,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
-				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ANALYZER_NONNULL = YES;
 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
-				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = YES;
 				CLANG_ENABLE_OBJC_WEAK = YES;
@@ -268,24 +263,18 @@
 				CLANG_WARN_CONSTANT_CONVERSION = YES;
 				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
 				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
-				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
 				CLANG_WARN_EMPTY_BODY = YES;
 				CLANG_WARN_ENUM_CONVERSION = YES;
 				CLANG_WARN_INFINITE_RECURSION = YES;
 				CLANG_WARN_INT_CONVERSION = YES;
 				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
-				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
 				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
 				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
-				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
 				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
 				CLANG_WARN_STRICT_PROTOTYPES = YES;
 				CLANG_WARN_SUSPICIOUS_MOVE = YES;
-				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
-				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -298,68 +287,65 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
-				SDKROOT = macosx;
+				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
 			};
 			name = Release;
 		};
 		FAC0002400000000FACADE10 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_ENTITLEMENTS = Resources/HomeIntelligenceHealth.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
-				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
-					"@executable_path/../Frameworks",
+					"@executable_path/Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 1.0;
-				
-				PRODUCT_BUNDLE_IDENTIFIER = "com.home-intelligence.healthkit-native";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.home-intelligence.healthkit-ios";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
 		};
 		FAC0002500000000FACADE10 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_ENTITLEMENTS = Resources/HomeIntelligenceHealth.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
-				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.healthcare-fitness";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
-					"@executable_path/../Frameworks",
+					"@executable_path/Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 1.0;
-				
-				PRODUCT_BUNDLE_IDENTIFIER = "com.home-intelligence.healthkit-native";
+				PRODUCT_BUNDLE_IDENTIFIER = "com.home-intelligence.healthkit-ios";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};
