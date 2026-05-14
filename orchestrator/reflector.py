@@ -636,10 +636,18 @@ class NightlyReflector:
             evidence_count = len(proposal.get("evidence_event_ids") or []) + len(
                 proposal.get("evidence_keys") or []
             )
+            # Auto-confirm safe inferences with reasonable backing. Tightened
+            # in 2026-05: was habit_inference only, threshold 0.95 + 5
+            # evidence — too strict (nothing ever qualified). Now: any
+            # inference kind with confidence >= 0.85 and >= 3 evidence.
+            # Habits/preferences/routines also get promoted to their typed
+            # tables in _write_auto_confirmed_profile so the dashboard sees
+            # them.
+            kind = proposal.get("kind") or ""
             auto_confirm = (
-                proposal.get("kind") == "habit_inference"
-                and float(proposal.get("confidence") or 0.0) >= 0.95
-                and evidence_count >= 5
+                kind in {"habit_inference", "preference_inference", "routine_inference"}
+                and float(proposal.get("confidence") or 0.0) >= 0.85
+                and evidence_count >= 3
             )
             status = "auto_confirmed" if auto_confirm else "pending"
             proposal_id = await self.store.add_proposal(
@@ -675,6 +683,60 @@ class NightlyReflector:
             confidence=float(proposal.get("confidence") or 0.0),
             source=f"proposal:{proposal.get('id') or 'nightly_reflector'}",
         )
+        # Also promote into the typed table the dashboard reads from. Without
+        # this, the user_profile row exists but /dashboard/about-you shows an
+        # empty Habits / Preferences / Routines tab forever.
+        kg = getattr(self, "knowledge_graph", None)
+        if kg is None:
+            return
+        kind = proposal.get("kind")
+        try:
+            if kind == "habit_inference":
+                await kg.put_habit(
+                    subject=str(proposal.get("title") or proposal.get("profile_key") or "habit"),
+                    pattern={
+                        "rationale": proposal.get("rationale"),
+                        "value": proposal.get("profile_value"),
+                        "evidence_event_ids": proposal.get("evidence_event_ids") or [],
+                    },
+                    frequency=str(proposal.get("frequency") or ""),
+                    confidence=float(proposal.get("confidence") or 0.0),
+                    source=f"proposal:{proposal.get('id') or 'nightly_reflector'}",
+                )
+            elif kind == "preference_inference":
+                pref_key = proposal.get("profile_key") or _slug(
+                    str(proposal.get("title") or "preference")
+                )
+                pref_value = proposal.get("profile_value") or {
+                    "title": proposal.get("title"),
+                    "rationale": proposal.get("rationale"),
+                }
+                await kg.put_preference(
+                    key=str(pref_key),
+                    value=pref_value,
+                    confidence=float(proposal.get("confidence") or 0.0),
+                    source=f"proposal:{proposal.get('id') or 'nightly_reflector'}",
+                )
+            elif kind == "routine_inference":
+                steps = proposal.get("profile_value") or {
+                    "rationale": proposal.get("rationale"),
+                }
+                # put_routine expects a list of steps; wrap the value if it
+                # came in as a dict so we don't crash on bad LLM output.
+                steps_list = steps if isinstance(steps, list) else [steps]
+                await kg.put_routine(
+                    name=str(proposal.get("title") or "routine"),
+                    steps=steps_list,
+                    schedule=proposal.get("schedule") or None,
+                    source=f"proposal:{proposal.get('id') or 'nightly_reflector'}",
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "reflection_promote_failed",
+                kind=kind,
+                title=proposal.get("title"),
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
     def _build_brief_body(
         self,

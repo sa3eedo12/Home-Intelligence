@@ -276,3 +276,117 @@ a:hover { color: var(--accent-hover); text-decoration: underline; }
   .btn-icon { width: 2.4rem; }
   .modal menu { flex-direction: column-reverse; }
 }
+
+/* ── Layout primitives ────────────────────────────────────────────────────
+   Tiny composable building blocks. Use these instead of one-off CSS per
+   page. They compose with .card / .btn / .badge to keep templates terse. */
+
+/* Vertical flow: every direct child gets the same gap. */
+.stack            { display: flex; flex-direction: column; gap: var(--space-4); }
+.stack-sm         { display: flex; flex-direction: column; gap: var(--space-2); }
+.stack-lg         { display: flex; flex-direction: column; gap: var(--space-6); }
+
+/* Horizontal flow with wrap: pills, buttons, tags. */
+.cluster          { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.cluster-sm       { display: flex; flex-wrap: wrap; gap: var(--space-1); align-items: center; }
+
+/* Two-column grid that collapses to one column on narrow screens. */
+.grid-2           { display: grid; grid-template-columns: 1fr; gap: var(--space-4); }
+@media (min-width: 760px) { .grid-2 { grid-template-columns: 1fr 1fr; } }
+
+/* Three-up auto grid. */
+.grid-auto        { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: var(--space-3); }
+
+/* ── Hero metrics strip ───────────────────────────────────────────────────
+   "X devices · Y habits · Z observations" at the top of dashboard pages. */
+.metric-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.metric-value {
+  font-size: var(--font-size-2xl);
+  font-weight: var(--font-weight-bold);
+  color: var(--text-primary);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.metric-label {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* ── Key/value list (used in habits, presence, device summaries) ─────── */
+.kv-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.kv-list > li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border);
+  align-items: baseline;
+}
+.kv-list > li:first-child { border-top: none; }
+.kv-list .kv-key   { color: var(--text-secondary); font-size: var(--font-size-sm); word-break: break-word; }
+.kv-list .kv-value { color: var(--text-primary); font-weight: var(--font-weight-medium); font-variant-numeric: tabular-nums; text-align: right; }
+
+/* ── Improved empty states ───────────────────────────────────────────────
+   The old .empty-state was tiny and easy to miss. .empty-state-card gives
+   it a proper presence inside any .card. */
+.empty-state-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+  background: color-mix(in srgb, var(--surface-2) 50%, transparent);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+}
+.empty-state-card .empty-state-icon { font-size: 2rem; opacity: 0.7; }
+.empty-state-card h3 { margin: 0; font-size: var(--font-size-md); color: var(--text-secondary); }
+.empty-state-card p  { margin: 0; font-size: var(--font-size-sm); max-width: 32rem; }
+
+/* ── Status / kind pills (for inferences, observations) ──────────────── */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  border: 1px solid var(--border);
+}
+.pill-strong { background: var(--surface-3); color: var(--text-primary); font-weight: var(--font-weight-medium); }
+.pill-success { background: color-mix(in srgb, var(--success) 18%, var(--surface)); color: var(--success); border-color: color-mix(in srgb, var(--success) 48%, var(--border)); }
+.pill-warning { background: color-mix(in srgb, var(--warning) 18%, var(--surface)); color: var(--warning); border-color: color-mix(in srgb, var(--warning) 48%, var(--border)); }
+.pill-info    { background: color-mix(in srgb, var(--info) 18%, var(--surface));    color: var(--info);    border-color: color-mix(in srgb, var(--info) 48%, var(--border)); }
+
+/* ── Standardized card disclosure (collapsible section inside a card) ─ */
+details.disclosure              { border-top: 1px solid var(--border); padding-top: var(--space-3); margin-top: var(--space-3); }
+details.disclosure > summary    { list-style: none; cursor: pointer; color: var(--accent); font-size: var(--font-size-sm); font-weight: var(--font-weight-medium); user-select: none; }
+details.disclosure > summary::-webkit-details-marker { display: none; }
+details.disclosure > summary::before { content: '▸ '; transition: transform 120ms; display: inline-block; }
+details.disclosure[open] > summary::before { content: '▾ '; }
+details.disclosure[open] > summary { margin-bottom: var(--space-2); }

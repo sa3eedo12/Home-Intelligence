@@ -391,6 +391,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     reflector.store = reflection_store
     reflector.health_store = health_store
+    reflector.knowledge_graph = knowledge_graph
     advisor = Advisor(
         pool=pool,
         redis=redis,
