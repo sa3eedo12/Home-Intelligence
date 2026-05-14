@@ -1,27 +1,33 @@
 """GET /admin/setup/auto-discover and POST /admin/setup/auto-apply.
 
 Closes the loop on "I have 600 HA entities, what should the system actually
-adopt and link?". The auto-discover endpoint scans HA's /api/states and
-returns a structured proposal:
+adopt and link?". The auto-discover endpoint scans HA's /api/states *and*
+its WebSocket device + entity registries so we can group multiple HA
+entities (e.g. 12 entities for one Aqara thermostat) under the same
+``thing`` instead of treating each as a standalone object.
 
     {
-      "things_to_adopt": [{"entity_id":"...", "type":"...", "friendly_name":"..."}],
+      "things_to_adopt": [{"entity_id":"...", "type":"...", "friendly_name":"...",
+                           "device_id":"abc", "extra_entity_ids":["...","..."]}],
       "trackers_by_member": {"saeed": ["person.saeed", "device_tracker.saeeds_iphone"]},
       "duplicates": [["entity_id_a", "entity_id_b"]]   // suggested merges
     }
 
 The auto-apply endpoint takes that same shape (or a user-edited version)
-and applies it: adopts each thing into the registry and patches each
-household_member's attributes.tracker_entity_ids.
+and applies it: adopts each thing into the registry (with ALL its child
+entity_ids) and patches each household_member's attributes.tracker_entity_ids.
 """
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterable
 from typing import Any
 
 import httpx
 from home_agents_sdk.telemetry import get_logger
+
+from .ha_event_bridge import _default_ws_connector, _ws_url_for
 
 logger = get_logger("orchestrator.auto_setup")
 
@@ -134,9 +140,151 @@ async def _ha_states() -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
+async def _ha_registries() -> dict[str, list[dict[str, Any]]]:
+    """Pull HA's device + entity registries via WebSocket.
+
+    Returns ``{"devices": [...], "entities": [...]}``. Each entity row has a
+    ``device_id`` linking back to a device row, which is how we group the
+    "12 entities for one Aqara thermostat" mess into a single thing.
+
+    Failures (no HA, bad token, HA too old to expose registries) return
+    empty lists so the caller can fall back to per-entity classification
+    using ``/api/states``.
+    """
+    ha_url = os.environ.get("HA_URL", "").rstrip("/")
+    ha_token = os.environ.get("HA_TOKEN", "")
+    if not ha_url or not ha_token:
+        return {"devices": [], "entities": []}
+    try:
+        # WebSocket-based registry fetch: open, auth, query both registries,
+        # close. Borrows the connector + auth pattern from ha_event_bridge.
+        ws_url = _ws_url_for(ha_url)
+        async with _default_ws_connector(ws_url) as ws:
+            # Auth handshake
+            first = json.loads(await ws.recv())
+            if first.get("type") != "auth_required":
+                logger.warning("ha_registry_fetch_no_auth_required", got=first.get("type"))
+                return {"devices": [], "entities": []}
+            await ws.send(json.dumps({"type": "auth", "access_token": ha_token}))
+            second = json.loads(await ws.recv())
+            if second.get("type") != "auth_ok":
+                logger.warning(
+                    "ha_registry_fetch_auth_failed", message=second.get("message")
+                )
+                return {"devices": [], "entities": []}
+
+            async def fetch(req_id: int, kind: str) -> list[dict[str, Any]]:
+                await ws.send(json.dumps({"id": req_id, "type": f"config/{kind}/list"}))
+                while True:
+                    msg = json.loads(await ws.recv())
+                    if msg.get("id") != req_id:
+                        continue
+                    if msg.get("type") != "result":
+                        return []
+                    if not msg.get("success"):
+                        logger.warning(
+                            "ha_registry_fetch_request_failed",
+                            kind=kind,
+                            error=msg.get("error"),
+                        )
+                        return []
+                    result = msg.get("result")
+                    return result if isinstance(result, list) else []
+
+            devices = await fetch(1, "device_registry")
+            entities = await fetch(2, "entity_registry")
+            return {"devices": devices, "entities": entities}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ha_registry_fetch_failed", error=f"{type(exc).__name__}: {exc}")
+        return {"devices": [], "entities": []}
+
+
+def _device_friendly_name(device: dict[str, Any], fallback_entity_id: str) -> str:
+    """User-editable name wins, then auto-name, then the entity_id."""
+    for key in ("name_by_user", "name"):
+        v = device.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return fallback_entity_id
+
+
+def _classify_device(
+    entity_ids: list[str],
+    state_by_eid: dict[str, dict[str, Any]],
+    device: dict[str, Any] | None,
+) -> tuple[str | None, str]:
+    """Given a device + all its child entity_ids, return (thing_type, primary_eid).
+
+    Strategy:
+      1. Look for a "primary" entity by domain — climate.* / vacuum.* / lock.* /
+         light.* / cover.* / camera.* control the device, so they're the
+         natural primary.
+      2. Otherwise look for the appliance-state sensors used by observers.
+      3. Otherwise look for motion / occupancy / doorbell signals.
+      4. Fall back to per-entity classification with the first matching one.
+    """
+    by_domain: dict[str, list[str]] = {}
+    for eid in entity_ids:
+        domain = eid.split(".", 1)[0] if "." in eid else ""
+        by_domain.setdefault(domain, []).append(eid)
+
+    # Tier 1: domains that represent the device itself (controllable surfaces).
+    DOMAIN_PRIORITY = (
+        ("climate", "device.climate"),
+        ("vacuum", "device.vacuum"),
+        ("lock", "device.lock"),
+        ("camera", "device.camera"),
+        ("light", "device.light"),
+    )
+    for domain, type_ in DOMAIN_PRIORITY:
+        if by_domain.get(domain):
+            return type_, sorted(by_domain[domain])[0]
+
+    # Tier 2: media_player needs name-based disambiguation (TV vs monitor vs speaker).
+    for eid in by_domain.get("media_player", []):
+        fn = (state_by_eid.get(eid, {}).get("attributes") or {}).get("friendly_name", "")
+        haystack = (eid + " " + fn).lower()
+        if any(kw in haystack for kw in MONITOR_KEYWORDS):
+            return "device.monitor", eid
+        if any(kw in haystack for kw in TV_KEYWORDS):
+            return "device.tv", eid
+
+    # Tier 3: observer-relevant appliance state sensors.
+    for eid in entity_ids:
+        for substr, type_ in ADOPT_PATTERNS:
+            if substr in eid:
+                return type_, eid
+
+    # Tier 4: presence / doorbell signals.
+    for eid in by_domain.get("binary_sensor", []):
+        if "motion" in eid or "occupancy" in eid:
+            return "sensor.motion", eid
+    for eid in by_domain.get("event", []):
+        fn = (state_by_eid.get(eid, {}).get("attributes") or {}).get("friendly_name", "")
+        if "doorbell" in (eid + " " + fn).lower():
+            return "device.doorbell", eid
+
+    # Tier 5: covers (curtains/shades/blinds).
+    for eid in by_domain.get("cover", []):
+        fn = (state_by_eid.get(eid, {}).get("attributes") or {}).get("friendly_name", "")
+        haystack = (eid + " " + fn).lower()
+        if any(kw in haystack for kw in ("curtain", "shade", "blind")):
+            return "device.cover", eid
+
+    # Nothing matched — caller skips this device.
+    return None, ""
+
+
 async def discover_proposal(*, knowledge_graph: Any) -> dict[str, Any]:
-    """Build the auto-setup proposal: what to adopt + member tracker links."""
+    """Build the auto-setup proposal: what to adopt + member tracker links.
+
+    Now device-aware: if HA's device registry is reachable, group entities
+    by their ``device_id`` and propose one ``thing`` per *device* with all
+    its child entity_ids. Falls back to per-entity classification (the old
+    behavior) if the registry can't be fetched.
+    """
     states = await _ha_states()
+    registries = await _ha_registries()
     things = await knowledge_graph.list_things() if knowledge_graph else []
     members = await knowledge_graph.list_members(include_pets=False) if knowledge_graph else []
 
@@ -144,25 +292,96 @@ async def discover_proposal(*, knowledge_graph: Any) -> dict[str, Any]:
     for t in things or []:
         for eid in (t.get("attributes") or {}).get("entity_id_list", []):
             adopted_eids.add(eid)
-        # Also match the singular entity_id if present
+        for eid in (t.get("ha_entity_ids") or []):
+            adopted_eids.add(eid)
         single = (t.get("attributes") or {}).get("entity_id")
         if single:
             adopted_eids.add(single)
 
+    state_by_eid: dict[str, dict[str, Any]] = {
+        s.get("entity_id", ""): s for s in states if s.get("entity_id")
+    }
     things_to_adopt: list[dict[str, Any]] = []
-    for s in states:
-        eid = s.get("entity_id", "")
-        if eid in adopted_eids:
+
+    devices_by_id: dict[str, dict[str, Any]] = {
+        d.get("id", ""): d for d in registries["devices"] if d.get("id")
+    }
+    entities_by_device: dict[str, list[str]] = {}
+    deviceless_entities: list[str] = []
+    for entity in registries["entities"]:
+        eid = str(entity.get("entity_id") or "").strip()
+        if not eid:
             continue
-        fn = (s.get("attributes") or {}).get("friendly_name", "")
-        thing_type = _classify_thing(eid, fn)
-        if thing_type is None:
+        # Skip disabled / hidden entities — HA already says they shouldn't show
+        # up in user-facing surfaces.
+        if entity.get("disabled_by") or entity.get("hidden_by"):
             continue
-        things_to_adopt.append({
-            "entity_id": eid,
-            "type": thing_type,
-            "friendly_name": fn or eid,
-        })
+        device_id = entity.get("device_id")
+        if device_id and device_id in devices_by_id:
+            entities_by_device.setdefault(device_id, []).append(eid)
+        else:
+            deviceless_entities.append(eid)
+
+    # ── Path 1: HA device registry available → group by device_id ──────────
+    if entities_by_device:
+        for device_id, child_eids in entities_by_device.items():
+            # Skip the whole device if any of its entities is already adopted —
+            # rely on the user to merge manually if they actually want the rest.
+            if any(c in adopted_eids for c in child_eids):
+                continue
+            device = devices_by_id[device_id]
+            thing_type, primary_eid = _classify_device(child_eids, state_by_eid, device)
+            if thing_type is None or not primary_eid:
+                continue
+            extras = sorted(c for c in child_eids if c != primary_eid)
+            things_to_adopt.append({
+                "entity_id": primary_eid,
+                "type": thing_type,
+                "friendly_name": _device_friendly_name(device, primary_eid),
+                "device_id": device_id,
+                "manufacturer": device.get("manufacturer"),
+                "model": device.get("model"),
+                "extra_entity_ids": extras,
+                "child_count": len(child_eids),
+            })
+
+        # Path 1.5: deviceless entities (template helpers, scripts, etc) get
+        # the per-entity classifier so we still surface things like a
+        # template washer state sensor that isn't tied to an HA device.
+        for eid in deviceless_entities:
+            if eid in adopted_eids:
+                continue
+            state = state_by_eid.get(eid, {})
+            fn = (state.get("attributes") or {}).get("friendly_name", "")
+            thing_type = _classify_thing(eid, fn)
+            if thing_type is None:
+                continue
+            things_to_adopt.append({
+                "entity_id": eid,
+                "type": thing_type,
+                "friendly_name": fn or eid,
+                "device_id": None,
+                "extra_entity_ids": [],
+                "child_count": 1,
+            })
+    else:
+        # ── Path 2: No registry → per-entity fallback (the old behavior) ───
+        for s in states:
+            eid = s.get("entity_id", "")
+            if eid in adopted_eids:
+                continue
+            fn = (s.get("attributes") or {}).get("friendly_name", "")
+            thing_type = _classify_thing(eid, fn)
+            if thing_type is None:
+                continue
+            things_to_adopt.append({
+                "entity_id": eid,
+                "type": thing_type,
+                "friendly_name": fn or eid,
+                "device_id": None,
+                "extra_entity_ids": [],
+                "child_count": 1,
+            })
 
     trackers_by_member: dict[str, list[str]] = {}
     for m in members or []:
@@ -182,7 +401,6 @@ async def discover_proposal(*, knowledge_graph: Any) -> dict[str, Any]:
         domain, _, local = eid.partition(".")
         if not local:
             continue
-        # Strip trailing _<digit>
         root = local
         while root and root.split("_")[-1].isdigit():
             root = root.rsplit("_", 1)[0]
@@ -195,6 +413,8 @@ async def discover_proposal(*, knowledge_graph: Any) -> dict[str, Any]:
     return {
         "ok": True,
         "ha_total": len(states),
+        "ha_devices_total": len(devices_by_id),
+        "registry_available": bool(entities_by_device),
         "things_to_adopt": things_to_adopt,
         "trackers_by_member": trackers_by_member,
         "duplicates": duplicates,
@@ -252,12 +472,27 @@ async def apply_proposal(
             if not eid or eid in existing_eids:
                 skipped.append(eid)
                 continue
+            extras_raw = thing.get("extra_entity_ids") or []
+            extras = [str(e).strip() for e in extras_raw if isinstance(e, str) and e.strip()]
+            # All entity_ids that belong to this device — primary first so
+            # match-by-first-id heuristics behave predictably downstream.
+            all_entity_ids = [eid] + [e for e in extras if e != eid]
+            attrs: dict[str, Any] = {
+                "entity_id": eid,
+                "entity_id_list": all_entity_ids,
+            }
+            if thing.get("device_id"):
+                attrs["ha_device_id"] = thing["device_id"]
+            if thing.get("manufacturer"):
+                attrs["manufacturer"] = thing["manufacturer"]
+            if thing.get("model"):
+                attrs["model"] = thing["model"]
             try:
                 await knowledge_graph.put_thing(
                     type=str(thing.get("type") or ""),
                     friendly_name=str(thing.get("friendly_name") or eid),
-                    attributes={"entity_id": eid},
-                    ha_entity_ids=[eid],
+                    attributes=attrs,
+                    ha_entity_ids=all_entity_ids,
                     photo_path=None,
                     confidence=0.9,
                     source="auto_setup",
