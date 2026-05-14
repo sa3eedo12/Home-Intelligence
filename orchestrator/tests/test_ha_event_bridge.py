@@ -94,10 +94,15 @@ def _state_changed_frame(entity_id: str, *, state: str = "running") -> str:
 
 
 def _auth_handshake_frames() -> list[str]:
+    # The bridge subscribes to three event types after auth (state_changed,
+    # device_registry_updated, entity_registry_updated). HA replies with a
+    # success result for each subscription id.
     return [
         json.dumps({"type": "auth_required", "ha_version": "2026.5.0"}),
         json.dumps({"type": "auth_ok"}),
         json.dumps({"id": 1, "type": "result", "success": True, "result": None}),
+        json.dumps({"id": 2, "type": "result", "success": True, "result": None}),
+        json.dumps({"id": 3, "type": "result", "success": True, "result": None}),
     ]
 
 
@@ -574,3 +579,116 @@ async def test_replay_history_now_refuses_when_disabled() -> None:
     result = await bridge.replay_history_now()
     assert result["ok"] is False
     assert "disabled" in result["error"]
+
+
+def _registry_event_frame(
+    event_type: str = "device_registry_updated", action: str = "create"
+) -> str:
+    return json.dumps({
+        "type": "event",
+        "event": {
+            "event_type": event_type,
+            "data": {"action": action, "device_id": "abc123"},
+            "time_fired": "2026-05-13T19:00:00Z",
+        },
+    })
+
+
+async def test_registry_event_triggers_debounced_callback() -> None:
+    """When HA fires a registry_updated event, the bridge should call the
+    user-supplied on_registry_changed coroutine after a short debounce."""
+    redis = FakeRedis()
+    ws = FakeWs(_auth_handshake_frames() + [
+        _registry_event_frame("device_registry_updated", "create"),
+        _registry_event_frame("entity_registry_updated", "create"),
+        _registry_event_frame("entity_registry_updated", "update"),
+    ])
+    calls: list[str] = []
+
+    async def on_change() -> None:
+        calls.append("called")
+
+    bridge = HaEventBridge(
+        redis=redis,
+        ha_url="http://ha.local:8123",
+        ha_token="t",
+        ws_connector=_ws_connector(ws),
+        replay_hours=0,
+        on_registry_changed=on_change,
+        registry_debounce_seconds=0.05,
+    )
+    await bridge.start()
+    # All three events fire, debounce should collapse to a single call.
+    for _ in range(40):
+        if calls:
+            break
+        await asyncio.sleep(0.02)
+    await bridge.stop()
+    assert len(calls) == 1, f"expected one debounced call, got {len(calls)}"
+    assert bridge.status.registry_events_received == 3
+    assert bridge.status.last_registry_event_type in {
+        "device_registry_updated",
+        "entity_registry_updated",
+    }
+    assert bridge.status.last_registry_resync_at is not None
+
+
+async def test_registry_event_logs_resync_failure_without_crashing() -> None:
+    """Callback errors should be captured in status, not raise."""
+    redis = FakeRedis()
+    ws = FakeWs(_auth_handshake_frames() + [_registry_event_frame()])
+
+    async def on_change() -> None:
+        raise RuntimeError("boom")
+
+    bridge = HaEventBridge(
+        redis=redis,
+        ha_url="http://ha.local:8123",
+        ha_token="t",
+        ws_connector=_ws_connector(ws),
+        replay_hours=0,
+        on_registry_changed=on_change,
+        registry_debounce_seconds=0.02,
+    )
+    await bridge.start()
+    for _ in range(40):
+        if bridge.status.last_registry_resync_error:
+            break
+        await asyncio.sleep(0.02)
+    await bridge.stop()
+    assert "boom" in (bridge.status.last_registry_resync_error or "")
+    # Bridge should still be running cleanly — no crash.
+    assert bridge.status.registry_events_received == 1
+
+
+async def test_state_changed_still_routes_when_subscriptions_include_registry() -> None:
+    """Sanity: adding registry subscriptions doesn't break the existing
+    state_changed forwarding path."""
+    redis = FakeRedis()
+    ws = FakeWs(_auth_handshake_frames() + [
+        _state_changed_frame("sensor.washing_machine"),
+        _registry_event_frame("device_registry_updated"),
+        _state_changed_frame("light.living_room"),
+    ])
+
+    async def on_change() -> None:
+        pass
+
+    bridge = HaEventBridge(
+        redis=redis,
+        ha_url="http://ha.local:8123",
+        ha_token="t",
+        ws_connector=_ws_connector(ws),
+        replay_hours=0,
+        on_registry_changed=on_change,
+        registry_debounce_seconds=0.5,
+    )
+    await bridge.start()
+    for _ in range(40):
+        if len(redis.calls) >= 2:
+            break
+        await asyncio.sleep(0.02)
+    await bridge.stop()
+    # Two state_changed frames forwarded, one registry event tracked.
+    assert len(redis.calls) == 2
+    assert bridge.status.registry_events_received == 1

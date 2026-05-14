@@ -125,6 +125,14 @@ class HaBridgeStatus:
     history_replayed: bool = False
     history_replay_count: int = 0
     history_replay_error: str | None = None
+    # Counters for the new HA device/entity registry watch path. Bumped each
+    # time HA tells us "I added/renamed/removed something" so we can show
+    # in /admin/ha-bridge/status that the auto-resync is wired and firing.
+    registry_events_received: int = 0
+    last_registry_event_at: str | None = None
+    last_registry_event_type: str | None = None
+    last_registry_resync_at: str | None = None
+    last_registry_resync_error: str | None = None
     history: list[str] = field(default_factory=list)
 
     def snapshot(self) -> dict[str, Any]:
@@ -141,6 +149,11 @@ class HaBridgeStatus:
             "history_replayed": self.history_replayed,
             "history_replay_count": self.history_replay_count,
             "history_replay_error": self.history_replay_error,
+            "registry_events_received": self.registry_events_received,
+            "last_registry_event_at": self.last_registry_event_at,
+            "last_registry_event_type": self.last_registry_event_type,
+            "last_registry_resync_at": self.last_registry_resync_at,
+            "last_registry_resync_error": self.last_registry_resync_error,
             "recent_history": list(self.history[-10:]),
         }
 
@@ -174,6 +187,8 @@ class HaEventBridge:
         ws_connector: WebSocketConnector | None = None,
         replay_hours: int = DEFAULT_REPLAY_HOURS,
         history_fetcher: Any | None = None,
+        on_registry_changed: Any | None = None,
+        registry_debounce_seconds: float = 8.0,
     ) -> None:
         self._redis = redis
         self._ha_url = (ha_url or "").strip()
@@ -187,6 +202,15 @@ class HaEventBridge:
         self._first_session = True
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
+        # When HA's device or entity registry changes (new pairing, rename,
+        # area assignment, removal), we want to re-sync our `things` table.
+        # Multiple events typically arrive in a burst (12 entities for one
+        # new device), so we debounce: cancel any pending callback and
+        # schedule a fresh one this many seconds in the future. The first
+        # event waits the full window; subsequent events restart the timer.
+        self._on_registry_changed = on_registry_changed
+        self._registry_debounce_seconds = max(0.5, float(registry_debounce_seconds))
+        self._registry_debounce_task: asyncio.Task | None = None
         self.status = HaBridgeStatus(
             enabled=bool(self._ha_url and self._ha_token),
         )
@@ -432,23 +456,41 @@ class HaEventBridge:
             raise RuntimeError(f"unexpected auth response: {msg.get('type')}")
 
     async def _subscribe_state_changed(self, ws: _WebSocketLike) -> None:
-        sub_id = 1
-        await ws.send(
-            json.dumps(
-                {
-                    "id": sub_id,
-                    "type": "subscribe_events",
-                    "event_type": "state_changed",
-                }
-            )
-        )
-        msg = await self._recv_json(ws)
-        if not (
-            msg.get("type") == "result"
-            and msg.get("id") == sub_id
-            and msg.get("success") is True
+        # Three subscriptions on the same socket:
+        #   id=1  state_changed              — live entity state (existing)
+        #   id=2  device_registry_updated    — pair / rename / delete devices
+        #   id=3  entity_registry_updated    — entity-level changes (new
+        #                                      property exposed, area moved, etc)
+        # Registry events fire from HA in bursts (a freshly-paired Aqara FP2
+        # emits 1 device + ~12 entity events back-to-back). We debounce in
+        # the consumer rather than per-subscription so the storm collapses
+        # into a single re-discovery run downstream.
+        for sub_id, event_type in (
+            (1, "state_changed"),
+            (2, "device_registry_updated"),
+            (3, "entity_registry_updated"),
         ):
-            raise RuntimeError(f"HA refused subscribe_events: {msg}")
+            await ws.send(json.dumps({
+                "id": sub_id,
+                "type": "subscribe_events",
+                "event_type": event_type,
+            }))
+            msg = await self._recv_json(ws)
+            if not (
+                msg.get("type") == "result"
+                and msg.get("id") == sub_id
+                and msg.get("success") is True
+            ):
+                # state_changed is mandatory — observers starve without it.
+                # registry events are nice-to-have; if HA refuses (older
+                # version, stripped permissions), log and keep going.
+                if event_type == "state_changed":
+                    raise RuntimeError(f"HA refused subscribe_events: {msg}")
+                logger.warning(
+                    "ha_bridge_registry_subscribe_failed",
+                    event_type=event_type,
+                    response=msg,
+                )
 
     async def _consume(self, ws: _WebSocketLike) -> None:
         while not self._stop.is_set():
@@ -457,9 +499,53 @@ class HaEventBridge:
                 # ignore pong/result/etc. (we don't emit pings, but HA might)
                 continue
             event = msg.get("event") or {}
-            if event.get("event_type") != "state_changed":
-                continue
-            await self._forward(event)
+            event_type = event.get("event_type")
+            if event_type == "state_changed":
+                await self._forward(event)
+            elif event_type in (
+                "device_registry_updated",
+                "entity_registry_updated",
+            ):
+                await self._on_registry_event(event)
+            # else: silently drop — we only subscribed to the three above
+
+    async def _on_registry_event(self, event: dict[str, Any]) -> None:
+        """Bookkeeping + debounced re-sync trigger."""
+        self.status.registry_events_received += 1
+        self.status.last_registry_event_at = datetime.now(UTC).isoformat()
+        self.status.last_registry_event_type = str(event.get("event_type") or "")
+        self.status.note(
+            f"registry event: {event.get('event_type')} "
+            f"action={(event.get('data') or {}).get('action', '?')}"
+        )
+        if self._on_registry_changed is None:
+            return
+        # Cancel any in-flight debounce — restart the clock.
+        if self._registry_debounce_task and not self._registry_debounce_task.done():
+            self._registry_debounce_task.cancel()
+        self._registry_debounce_task = asyncio.create_task(
+            self._registry_debounce_callback()
+        )
+
+    async def _registry_debounce_callback(self) -> None:
+        """Sleep through the debounce window then call the user-supplied
+        re-sync function. Cancellation by a fresh event during the window
+        is the expected path; we silently swallow it."""
+        try:
+            await asyncio.sleep(self._registry_debounce_seconds)
+        except asyncio.CancelledError:
+            return
+        try:
+            await self._on_registry_changed()
+            self.status.last_registry_resync_at = datetime.now(UTC).isoformat()
+            self.status.last_registry_resync_error = None
+            self.status.note("registry resync ok")
+            logger.info("ha_bridge_registry_resync_ok")
+        except Exception as exc:  # noqa: BLE001
+            msg = f"{type(exc).__name__}: {exc}"
+            self.status.last_registry_resync_error = msg
+            self.status.note(f"registry resync failed: {msg}")
+            logger.warning("ha_bridge_registry_resync_failed", error=msg)
 
     async def _forward(self, event: dict[str, Any]) -> None:
         data = event.get("data") if isinstance(event.get("data"), dict) else {}

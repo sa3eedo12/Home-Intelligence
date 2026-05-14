@@ -557,6 +557,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await observer_runner.start()
 
     ha_event_bridge = build_ha_bridge(redis)
+
+    async def _on_ha_registry_changed() -> None:
+        """Triggered when HA emits device_registry_updated /
+        entity_registry_updated. Re-run discovery + apply + consolidate so
+        new pairings appear in /dashboard/devices automatically (no manual
+        Discovery click). Debounced inside the bridge — multiple events in
+        a burst collapse to one call."""
+        from .auto_setup import apply_proposal, consolidate_by_device, discover_proposal
+
+        proposal = await discover_proposal(knowledge_graph=knowledge_graph)
+        if proposal.get("things_to_adopt"):
+            await apply_proposal(proposal=proposal, knowledge_graph=knowledge_graph)
+        await consolidate_by_device(knowledge_graph=knowledge_graph)
+
+    ha_event_bridge._on_registry_changed = _on_ha_registry_changed
     await ha_event_bridge.start()
 
     app.state.pool = pool
