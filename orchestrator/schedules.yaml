@@ -184,3 +184,12 @@ jobs:
       agent: __orchestrator__
       capability: orchestrator.anomaly_check
       inputs: {}
+
+  - id: proactive_scan
+    description: "Surface gentle 'you usually do X around now' suggestions every 15min"
+    trigger: interval
+    interval: { minutes: 15 }
+    dispatch:
+      agent: __orchestrator__
+      capability: orchestrator.proactive_scan
+      inputs: {}

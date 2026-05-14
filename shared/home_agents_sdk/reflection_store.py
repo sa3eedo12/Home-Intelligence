@@ -17,6 +17,7 @@ PROPOSAL_KINDS = {
     "routine_inference",
     "cleanup_action",
     "household_inference",
+    "proactive_suggestion",
 }
 ACTION_PROPOSAL_KINDS = {"suggested_action", "auto_action"}
 _ALLOWED_PROPOSAL_KINDS = PROPOSAL_KINDS | ACTION_PROPOSAL_KINDS

@@ -465,6 +465,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         sent = await emit_anomalies(anomalies=anomalies, redis=redis)
         return {"ok": True, "detected": len(anomalies), "emitted": sent}
 
+    async def _run_proactive_scan(_inputs: dict[str, Any]) -> dict[str, Any]:
+        from home_agents_sdk.auto_inferences_store import AutoInferencesStore
+
+        from .proactive import scan_for_opportunities
+
+        return await scan_for_opportunities(
+            reflection_store=reflection_store,
+            auto_store=AutoInferencesStore(pool=pool),
+            pool=pool,
+        )
+
     scheduler = Scheduler(
         registry=registry,
         redis=redis,
@@ -481,6 +492,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "data_science.monthly_report": _run_monthly_report,
             "data_science.lora_training": _run_lora_training,
             "orchestrator.anomaly_check": _run_anomaly_check,
+            "orchestrator.proactive_scan": _run_proactive_scan,
         },
     )
     await scheduler.start()
