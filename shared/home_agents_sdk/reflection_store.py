@@ -130,6 +130,14 @@ class ReflectionStore:
                         OR e.agent LIKE '__orchestrator__%'
                       )
                       AND NOT (e.capability = ANY($3::text[]))
+                      -- Suppress no-op "completed_successfully in 0 ms" heartbeats:
+                      -- these are reactive triggers that fired but returned no
+                      -- inference (e.g. a presence event that wasn't a return).
+                      -- They drown out real evidence in pattern mining.
+                      AND NOT (
+                        e.summary LIKE '%completed successfully in 0 ms'
+                        AND coalesce(e.payload->>'evidence', '') = ''
+                      )
                     ORDER BY e.ts DESC
                     LIMIT 500
                     """,
