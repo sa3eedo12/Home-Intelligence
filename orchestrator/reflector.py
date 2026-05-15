@@ -813,76 +813,18 @@ class NightlyReflector:
         return applied
 
     async def _write_auto_confirmed_profile(self, proposal: dict[str, Any]) -> None:
-        key = proposal.get("profile_key") or (
-            f"habits.{_slug(str(proposal.get('title') or 'habit'))}"
+        """Promote an auto-confirmed proposal into user_profile + the typed
+        knowledge tables. Delegates to the shared helper so /admin/proposals/
+        {id}/accept and the bulk-accept paths get the SAME promotion behavior
+        as auto-confirm — without this duplication, manual accepts silently
+        skipped the typed-table write and /dashboard/about-you stayed empty."""
+        from home_agents_sdk.proposal_promotion import promote_proposal_to_knowledge
+
+        await promote_proposal_to_knowledge(
+            proposal=proposal,
+            reflection_store=self.store,
+            knowledge_graph=getattr(self, "knowledge_graph", None),
         )
-        value = proposal.get("profile_value")
-        if value is None:
-            value = {
-                "title": proposal.get("title"),
-                "rationale": proposal.get("rationale"),
-                "evidence_event_ids": proposal.get("evidence_event_ids") or [],
-            }
-        await self.store.upsert_profile(
-            key=str(key),
-            value=value,
-            confidence=float(proposal.get("confidence") or 0.0),
-            source=f"proposal:{proposal.get('id') or 'nightly_reflector'}",
-        )
-        # Also promote into the typed table the dashboard reads from. Without
-        # this, the user_profile row exists but /dashboard/about-you shows an
-        # empty Habits / Preferences / Routines tab forever.
-        kg = getattr(self, "knowledge_graph", None)
-        if kg is None:
-            return
-        kind = proposal.get("kind")
-        try:
-            if kind == "habit_inference":
-                await kg.put_habit(
-                    subject=str(proposal.get("title") or proposal.get("profile_key") or "habit"),
-                    pattern={
-                        "rationale": proposal.get("rationale"),
-                        "value": proposal.get("profile_value"),
-                        "evidence_event_ids": proposal.get("evidence_event_ids") or [],
-                    },
-                    frequency=str(proposal.get("frequency") or ""),
-                    confidence=float(proposal.get("confidence") or 0.0),
-                    source=f"proposal:{proposal.get('id') or 'nightly_reflector'}",
-                )
-            elif kind == "preference_inference":
-                pref_key = proposal.get("profile_key") or _slug(
-                    str(proposal.get("title") or "preference")
-                )
-                pref_value = proposal.get("profile_value") or {
-                    "title": proposal.get("title"),
-                    "rationale": proposal.get("rationale"),
-                }
-                await kg.put_preference(
-                    key=str(pref_key),
-                    value=pref_value,
-                    confidence=float(proposal.get("confidence") or 0.0),
-                    source=f"proposal:{proposal.get('id') or 'nightly_reflector'}",
-                )
-            elif kind == "routine_inference":
-                steps = proposal.get("profile_value") or {
-                    "rationale": proposal.get("rationale"),
-                }
-                # put_routine expects a list of steps; wrap the value if it
-                # came in as a dict so we don't crash on bad LLM output.
-                steps_list = steps if isinstance(steps, list) else [steps]
-                await kg.put_routine(
-                    name=str(proposal.get("title") or "routine"),
-                    steps=steps_list,
-                    schedule=proposal.get("schedule") or None,
-                    source=f"proposal:{proposal.get('id') or 'nightly_reflector'}",
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "reflection_promote_failed",
-                kind=kind,
-                title=proposal.get("title"),
-                error=f"{type(exc).__name__}: {exc}",
-            )
 
     def _build_brief_body(
         self,

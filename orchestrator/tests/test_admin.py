@@ -747,6 +747,7 @@ def _proposals_app(initial_proposals: list[dict]) -> tuple[FastAPI, AsyncMock]:
     app.state.reflection_store = SimpleNamespace(
         list_proposals=AsyncMock(return_value=initial_proposals),
         update_proposal_status=update_mock,
+        upsert_profile=AsyncMock(),
         record_delivery=AsyncMock(),
     )
     return app, update_mock
@@ -760,7 +761,9 @@ def test_accept_proposal_marks_pending_as_accepted() -> None:
         resp = client.post("/admin/proposals/11/accept")
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload == {"ok": True, "proposal_id": 11, "status": "accepted"}
+    assert payload["ok"] is True
+    assert payload["proposal_id"] == 11
+    assert payload["status"] == "accepted"
     update.assert_awaited_once_with(11, "accepted", channel="dashboard")
 
 
@@ -861,3 +864,92 @@ def test_bulk_accept_400_on_non_integer_ids() -> None:
             "/admin/proposals/bulk-accept", json={"ids": ["not-an-int"]}
         )
     assert resp.status_code == 400
+
+
+# ── Manual accept promotes into knowledge graph ──────────────────────────
+
+
+def test_accept_habit_proposal_promotes_to_knowledge_graph() -> None:
+    """REGRESSION: /admin/proposals/{id}/accept used to flip status only,
+    skipping the typed-table promotion. /dashboard/about-you stayed
+    empty even after the user accepted habit/preference proposals.
+    Manual accepts must now also write to habits/preferences/routines."""
+    app = FastAPI()
+    app.include_router(router)
+    update_mock = AsyncMock()
+    upsert_profile = AsyncMock()
+    put_habit = AsyncMock()
+    app.state.reflection_store = SimpleNamespace(
+        list_proposals=AsyncMock(return_value=[
+            {
+                "id": 22,
+                "kind": "habit_inference",
+                "title": "User watches TV around 20:30",
+                "rationale": "5 evenings in a row",
+                "evidence_event_ids": [1, 2, 3, 4, 5],
+                "confidence": 0.85,
+                "status": "pending",
+            }
+        ]),
+        update_proposal_status=update_mock,
+        upsert_profile=upsert_profile,
+    )
+    app.state.knowledge_graph = SimpleNamespace(
+        put_habit=put_habit,
+        put_preference=AsyncMock(),
+        put_routine=AsyncMock(),
+    )
+
+    with TestClient(app) as client:
+        resp = client.post("/admin/proposals/22/accept")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "accepted"
+    # Promotion happened
+    upsert_profile.assert_awaited_once()
+    put_habit.assert_awaited_once()
+    # Promotion summary returned to caller
+    assert body["promoted"]["knowledge_table"] == "habits"
+
+
+def test_bulk_accept_promotes_each_id() -> None:
+    """Bulk accept must promote every accepted proposal too."""
+    app = FastAPI()
+    app.include_router(router)
+    upsert_profile = AsyncMock()
+    put_pref = AsyncMock()
+    put_habit = AsyncMock()
+    app.state.reflection_store = SimpleNamespace(
+        list_proposals=AsyncMock(return_value=[
+            {"id": 1, "kind": "habit_inference", "title": "h", "status": "pending"},
+            {
+                "id": 2,
+                "kind": "preference_inference",
+                "title": "Halal",
+                "status": "pending",
+            },
+            # cleanup_action is not promotable — should still flip status
+            {"id": 3, "kind": "cleanup_action", "title": "x", "status": "pending"},
+        ]),
+        update_proposal_status=AsyncMock(),
+        upsert_profile=upsert_profile,
+    )
+    app.state.knowledge_graph = SimpleNamespace(
+        put_habit=put_habit,
+        put_preference=put_pref,
+        put_routine=AsyncMock(),
+    )
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/admin/proposals/bulk-accept", json={"ids": [1, 2, 3]}
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["accepted"] == 3
+    # Two promotable kinds → two upsert_profile + the right typed writes
+    assert upsert_profile.await_count == 2
+    put_habit.assert_awaited_once()
+    put_pref.assert_awaited_once()

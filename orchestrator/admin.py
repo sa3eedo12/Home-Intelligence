@@ -1611,13 +1611,32 @@ async def dispatch_to_copilot(proposal_id: int, request: Request) -> dict:
 async def accept_proposal(proposal_id: int, request: Request) -> dict:
     """Mark a single proposal as user-accepted. Used by the proposals
     dashboard for cleanup_action / routine_inference cards that the user
-    can confirm without opening an issue."""
+    can confirm without opening an issue.
+
+    Also promotes habit/preference/routine inferences into the typed
+    knowledge tables so /dashboard/about-you actually reflects the
+    accepted answer. Without this, the proposals.status flipped to
+    'accepted' but the typed tables stayed empty — the 'are my answers
+    used?' problem the user raised.
+    """
+    from home_agents_sdk.proposal_promotion import promote_proposal_to_knowledge
+
     store = _reflection_store(request)
     proposal = await _find_proposal(store, proposal_id)
     if proposal.get("status") in {"accepted", "auto_confirmed"}:
         return {"ok": True, "proposal_id": proposal_id, "status": proposal["status"]}
     await store.update_proposal_status(proposal_id, "accepted", channel="dashboard")
-    return {"ok": True, "proposal_id": proposal_id, "status": "accepted"}
+    promotion = await promote_proposal_to_knowledge(
+        proposal=proposal,
+        reflection_store=store,
+        knowledge_graph=getattr(request.app.state, "knowledge_graph", None),
+    )
+    return {
+        "ok": True,
+        "proposal_id": proposal_id,
+        "status": "accepted",
+        "promoted": promotion.get("promoted"),
+    }
 
 
 @router.post("/admin/proposals/{proposal_id}/dismiss")
@@ -1650,10 +1669,17 @@ def _bulk_proposal_ids(payload: Any) -> list[int]:
 async def bulk_accept_proposals(request: Request) -> dict:
     """Accept many proposals in one round-trip. Skips already-resolved ones
     silently (returns the count anyway). Returns per-id results so the UI
-    can show toast messages."""
+    can show toast messages.
+
+    Each accepted proposal is also promoted into the typed knowledge tables
+    via promote_proposal_to_knowledge — same path the auto_confirm flow uses
+    so the dashboard's About You tab actually reflects manual accepts."""
+    from home_agents_sdk.proposal_promotion import promote_proposal_to_knowledge
+
     body = await request.json()
     ids = _bulk_proposal_ids(body)
     store = _reflection_store(request)
+    kg = getattr(request.app.state, "knowledge_graph", None)
     results: list[dict[str, Any]] = []
     for proposal_id in ids:
         try:
@@ -1662,7 +1688,17 @@ async def bulk_accept_proposals(request: Request) -> dict:
                 results.append({"id": proposal_id, "ok": True, "skipped": True})
                 continue
             await store.update_proposal_status(proposal_id, "accepted", channel="dashboard")
-            results.append({"id": proposal_id, "ok": True, "skipped": False})
+            promotion = await promote_proposal_to_knowledge(
+                proposal=proposal,
+                reflection_store=store,
+                knowledge_graph=kg,
+            )
+            results.append({
+                "id": proposal_id,
+                "ok": True,
+                "skipped": False,
+                "promoted": promotion.get("promoted"),
+            })
         except HTTPException as exc:
             results.append({"id": proposal_id, "ok": False, "error": exc.detail})
     accepted = sum(1 for r in results if r["ok"] and not r.get("skipped"))
