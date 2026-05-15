@@ -322,6 +322,42 @@ async def _about_you_snapshot(
         current = members[0]
     current_id = int(current.get("id")) if current else None
 
+    # Profile rows (the answers the user gave during onboarding +
+    # follow-up questions). Loaded from the reflection_store/user_profile
+    # table — currently the ONLY page that surfaces these. Without this,
+    # answered profile questions silently sit in the DB unused — the
+    # exact "are my answers being used?" complaint.
+    profile_entries: list[dict[str, Any]] = []
+    reflection_store = getattr(request.app.state, "reflection_store", None)
+    if reflection_store is not None and hasattr(reflection_store, "list_profile"):
+        try:
+            raw_profile = await reflection_store.list_profile()
+        except Exception as exc:
+            logger.warning("about_you_profile_load_failed", error=str(exc))
+            raw_profile = []
+        for entry in raw_profile or []:
+            key = str(entry.get("key") or "").strip()
+            if not key:
+                continue
+            source = str(entry.get("source") or "")
+            confidence = entry.get("confidence")
+            try:
+                confidence_value = float(confidence) if confidence is not None else None
+            except (TypeError, ValueError):
+                confidence_value = None
+            # Skip explicitly-skipped entries from the UI by default.
+            if source == "user_skipped":
+                continue
+            profile_entries.append({
+                "key": key,
+                "label": _humanize_profile_key(key),
+                "value": _humanize_profile_value(entry.get("value")),
+                "raw_value": entry.get("value"),
+                "source": source,
+                "confidence": confidence_value,
+                "updated_at": str(entry.get("updated_at") or ""),
+            })
+
     # Filter things to those owned by current member. Owner is stored in
     # attributes.owner_member_id (set by auto_setup's heuristic or via
     # POST /admin/devices/{id}/owner). Falls back to the column.
@@ -346,7 +382,41 @@ async def _about_you_snapshot(
         "habits": habits or [],
         "preferences": preferences or [],
         "routines": routines or [],
+        "profile": profile_entries,
     }
+
+
+def _humanize_profile_key(key: str) -> str:
+    """Turn 'sleep_time' -> 'Sleep time', 'dietary_restrictions' -> 'Dietary restrictions'."""
+    cleaned = key.replace("_", " ").strip()
+    return cleaned[:1].upper() + cleaned[1:] if cleaned else key
+
+
+def _humanize_profile_value(value: Any) -> str:
+    """Render a profile value (string, dict, list, jsonb) as a single readable line."""
+    import json as _json
+
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith('"') and text.endswith('"'):
+            try:
+                text = _json.loads(text)
+            except Exception:
+                text = text[1:-1]
+        return str(text)
+    if isinstance(value, dict):
+        if not value:
+            return ""
+        if "value" in value and len(value) <= 2:
+            return _humanize_profile_value(value.get("value"))
+        return ", ".join(
+            f"{k}: {v}" for k, v in value.items() if k not in {"confidence", "source"}
+        )
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value if v not in (None, ""))
+    return str(value)
 
 
 async def _discovery_snapshot(request: Request) -> dict[str, Any]:
@@ -593,9 +663,18 @@ async def morning_brief(request: Request) -> HTMLResponse:
     briefs = await store.list_briefs(limit=1)
     brief = briefs[0] if briefs else None
     body = (brief or {}).get("body_json") or {}
-    proposals = await store.list_proposals(limit=50)
+    # Only show proposals that are still actionable on this page. Resolved
+    # ones (accepted / dismissed / auto_confirmed) belong on /dashboard/proposals
+    # where they can be filtered. Without this gate the brief showed all 25
+    # historical proposals as if each were waiting for input.
+    proposals = await store.list_proposals(status="pending", limit=50)
     if not proposals:
-        proposals = body.get("proposals") or []
+        # Fall back to the snapshot embedded in the brief body for older briefs.
+        proposals = [
+            p
+            for p in (body.get("proposals") or [])
+            if str(p.get("status") or "pending") == "pending"
+        ]
     reflector = getattr(request.app.state, "reflector", None)
     reflection_state = reflector.status if reflector is not None else {"running": False}
     return templates.TemplateResponse(

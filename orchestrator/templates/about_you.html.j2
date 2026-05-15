@@ -50,14 +50,39 @@
 
     <!-- Tabs -->
     <nav class="ay-tabs" role="tablist">
-      <button class="ay-tab is-active" data-tab="devices" role="tab">📱 Devices <span class="muted">({{ knowledge.personal_devices|length }})</span></button>
+      <button class="ay-tab is-active" data-tab="profile"    role="tab">👤 About me <span class="muted">({{ knowledge.profile|length }})</span></button>
+      <button class="ay-tab" data-tab="devices"     role="tab">📱 Devices <span class="muted">({{ knowledge.personal_devices|length }})</span></button>
       <button class="ay-tab" data-tab="habits"      role="tab">🔁 Habits <span class="muted">({{ knowledge.habits|length }})</span></button>
       <button class="ay-tab" data-tab="preferences" role="tab">⚙️ Preferences <span class="muted">({{ knowledge.preferences|length }})</span></button>
       <button class="ay-tab" data-tab="routines"    role="tab">🪜 Routines <span class="muted">({{ knowledge.routines|length }})</span></button>
     </nav>
 
+    <!-- Profile tab — the answers you gave during onboarding + follow-up questions -->
+    <section class="ay-pane is-active" data-pane="profile">
+      <div class="knowledge-grid">
+        {% for entry in knowledge.profile %}
+          <article class="knowledge-card card-hover" data-table="profile" data-id="{{ entry.key }}">
+            <header>
+              <h3>{{ entry.label }}</h3>
+              <span class="muted">{{ entry.source or 'manual' }}</span>
+            </header>
+            <p class="knowledge-card-value">{{ entry.value or '(no answer yet)' }}</p>
+            {% if entry.confidence is not none and entry.confidence != 1 %}
+              <footer class="muted">confidence {{ '%.0f' % (entry.confidence * 100) }}%</footer>
+            {% endif %}
+          </article>
+        {% else %}
+          <div class="empty-state-card">
+            <span class="empty-state-icon">💬</span>
+            <h3>No profile answers yet</h3>
+            <p>The Onboarding page (or Telegram follow-ups) collects these. They drive personalised brief timing, dietary suggestions, and quiet hours.</p>
+          </div>
+        {% endfor %}
+      </div>
+    </section>
+
     <!-- Devices tab -->
-    <section class="ay-pane is-active" data-pane="devices">
+    <section class="ay-pane" data-pane="devices">
       {% set _type_labels = {
         'device.phone': ('📱', 'Phones'),
         'device.tablet': ('📱', 'Tablets'),

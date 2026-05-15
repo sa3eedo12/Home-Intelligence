@@ -136,3 +136,88 @@ def test_open_questions_synthesizes_action_for_each_pending_kind() -> None:
     )
     topics = {q["topic"] for q in qs}
     assert topics == {"habit", "appliance", "cleaning", "sleep", "presence", "tv", "auto_infer"}
+
+
+# ── Regression: dict pattern must not crash _open_questions ─────────────
+
+
+def test_open_questions_handles_dict_pattern_without_crashing() -> None:
+    """REGRESSION: /dashboard/what-i-know returned HTTP 500 because
+    _open_questions did `(subject or "") + " — " + (pattern or "")` and
+    pattern is jsonb (a dict). User's habit row had:
+      pattern = {"value": {"start": "22:00", "end": "07:00"},
+                 "rationale": "...", "evidence_event_ids": [...]}
+    """
+    from orchestrator.intelligence import _open_questions
+
+    qs = _open_questions(
+        unconfirmed_habits=[
+            {
+                "subject": "User likely inactive during 22:00-01:00",
+                "pattern": {
+                    "value": {"start": "22:00", "end": "07:00", "confidence": 0.95},
+                    "rationale": "No user-initiated events in that window",
+                },
+            }
+        ],
+        cycle_unconfirmed=0,
+        cleaning_unconfirmed=0,
+        sleep_unconfirmed=0,
+        presence_unconfirmed=0,
+        tv_unconfirmed=0,
+        auto_status_counts=Counter(),
+    )
+    assert len(qs) == 1
+    example = qs[0]["example"]
+    assert isinstance(example, str)
+    # Should include the time window from the dict, not a stringified dict
+    assert "22:00" in example
+    assert "07:00" in example
+
+
+def test_format_habit_example_renders_dict_pattern() -> None:
+    from orchestrator.intelligence import _format_habit_example
+
+    out = _format_habit_example(
+        {
+            "subject": "Bedtime window",
+            "pattern": {"value": {"start": "23:00", "end": "07:00"}},
+        }
+    )
+    assert "Bedtime window" in out
+    assert "23:00" in out
+    assert "07:00" in out
+
+
+def test_format_habit_example_handles_string_pattern() -> None:
+    from orchestrator.intelligence import _format_habit_example
+
+    assert (
+        _format_habit_example({"subject": "Coffee at 7", "pattern": "weekday mornings"})
+        == "Coffee at 7 — weekday mornings"
+    )
+
+
+def test_format_habit_example_handles_none_pattern() -> None:
+    from orchestrator.intelligence import _format_habit_example
+
+    assert _format_habit_example({"subject": "Just a name"}) == "Just a name"
+    assert _format_habit_example({}) == "(habit details unavailable)"
+
+
+def test_format_habit_example_renders_value_only_dict() -> None:
+    from orchestrator.intelligence import _format_habit_example
+
+    out = _format_habit_example(
+        {"subject": "WFH", "pattern": {"value": {"days": "Mon-Fri", "hours": "9-17"}}}
+    )
+    assert "Mon-Fri" in out and "9-17" in out
+
+
+def test_format_habit_example_renders_rationale_when_no_value() -> None:
+    from orchestrator.intelligence import _format_habit_example
+
+    out = _format_habit_example(
+        {"subject": "Quiet morning", "pattern": {"rationale": "No motion before 8am"}}
+    )
+    assert "No motion before 8am" in out

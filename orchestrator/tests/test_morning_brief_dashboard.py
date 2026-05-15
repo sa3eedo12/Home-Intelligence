@@ -35,7 +35,11 @@ class FakeReflectionStore:
             }
         ]
 
-    async def list_proposals(self, limit: int = 50) -> list[dict]:
+    async def list_proposals(
+        self, status: str | None = None, limit: int = 50
+    ) -> list[dict]:
+        if status and self.proposal.get("status") != status:
+            return []
         return [self.proposal]
 
 
@@ -69,3 +73,76 @@ def test_morning_brief_page_renders_synthetic_brief() -> None:
     assert "/static/morning_brief.js" in resp.text
     assert 'id="run-now-btn"' in resp.text
     assert "toast-stack" in resp.text
+
+
+# ── Regression: only show pending proposals on the morning brief ─────────
+
+
+def test_morning_brief_filters_resolved_proposals() -> None:
+    """REGRESSION: dashboard audit found the brief listed all 25 historical
+    proposals (including 18 dismissed + 6 accepted) as if each were
+    waiting for input. The route must request status='pending' from the
+    store so resolved rows don't render with Copy/Open Issue/Dispatch
+    actions next to them."""
+    app = FastAPI()
+    app.include_router(router)
+
+    class _Tracking:
+        def __init__(self) -> None:
+            self.list_proposals_calls: list[dict] = []
+            self.proposal_pending = {
+                "id": 99,
+                "kind": "code_change",
+                "title": "Pending one",
+                "rationale": "x",
+                "evidence_event_ids": [1],
+                "confidence": 0.7,
+                "status": "pending",
+            }
+            self.proposal_dismissed = {
+                "id": 100,
+                "kind": "cleanup_action",
+                "title": "Dismissed one",
+                "rationale": "x",
+                "evidence_event_ids": [1],
+                "confidence": 0.5,
+                "status": "dismissed",
+            }
+
+        async def list_briefs(self, limit: int = 1) -> list[dict]:
+            return [
+                {
+                    "id": 1,
+                    "generated_at": "2026-01-02T02:30:00+00:00",
+                    "summary": "Brief",
+                    "body_json": {"proposals": []},
+                    "sent_at": None,
+                }
+            ]
+
+        async def list_proposals(
+            self, status: str | None = None, limit: int = 50
+        ) -> list[dict]:
+            self.list_proposals_calls.append({"status": status, "limit": limit})
+            if status == "pending":
+                return [self.proposal_pending]
+            return [self.proposal_pending, self.proposal_dismissed]
+
+    store = _Tracking()
+    app.state.reflection_store = store
+
+    async def _status() -> dict:
+        return {"reflection": {"last_run_at": None, "age_hours": 1.0, "healthy": True}}
+
+    app.state.status_provider = _status
+
+    with TestClient(app) as client:
+        resp = client.get("/dashboard/morning-brief")
+
+    assert resp.status_code == 200
+    # The route MUST request status='pending'
+    assert store.list_proposals_calls
+    assert store.list_proposals_calls[0]["status"] == "pending"
+    # The dismissed proposal must NOT appear in the rendered HTML
+    assert "Dismissed one" not in resp.text
+    assert "Pending one" in resp.text

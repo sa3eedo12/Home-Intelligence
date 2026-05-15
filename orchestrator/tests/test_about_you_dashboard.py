@@ -135,3 +135,105 @@ def test_about_you_filters_to_specified_member() -> None:
     assert resp.status_code == 200
     # Falls back to the first member (Saeed) since 99 doesn't exist.
     assert "About Saeed" in resp.text
+
+
+# ── Profile (user_profile rows) surfacing ────────────────────────────────
+
+
+def test_about_you_renders_profile_answers_from_user_profile() -> None:
+    """REGRESSION: user repeatedly asked 'are my answered questions used?'.
+    Audit found dashboard.py only loaded knowledge graph rows; the 10
+    user_profile entries were silently ignored. This test pins the new
+    'About me' tab + per-entry rendering."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    app = FastAPI()
+    app.include_router(router)
+
+    class _Graph(_FakeKnowledgeGraph):
+        async def list_members(self, *, include_pets=False):
+            return [{"id": 1, "name": "Saeed", "role": "adult"}]
+
+    app.state.knowledge_graph = _Graph()
+    app.state.reflection_store = SimpleNamespace(
+        list_profile=AsyncMock(
+            return_value=[
+                {
+                    "key": "dietary_restrictions",
+                    "value": '"I only eat Halal food, not a big fan of seafood"',
+                    "source": "morning_brief",
+                    "confidence": 1.0,
+                    "updated_at": "2026-05-12T22:31:00+00:00",
+                },
+                {
+                    "key": "wake_time",
+                    "value": '"I wake up no later than 9:00 AM on weekdays"',
+                    "source": "morning_brief",
+                    "confidence": 1.0,
+                    "updated_at": "2026-05-12T22:30:00+00:00",
+                },
+                {
+                    "key": "allergies",
+                    "value": '"(skipped)"',
+                    "source": "user_skipped",
+                    "confidence": 0.0,
+                    "updated_at": "2026-05-12T22:31:00+00:00",
+                },
+            ]
+        )
+    )
+
+    with TestClient(app) as client:
+        resp = client.get("/dashboard/about-you")
+
+    assert resp.status_code == 200
+    text = resp.text
+    # 'About me' tab present and active
+    assert 'data-tab="profile"' in text
+    assert 'data-pane="profile"' in text
+    # Surfaced answers (humanised, JSON-quotes stripped)
+    assert "Halal food" in text
+    assert "wake up no later than 9:00 AM" in text
+    # The label is humanised (sleep_time -> 'Sleep time' style)
+    assert "Dietary restrictions" in text
+    assert "Wake time" in text
+    # Skipped entries are filtered out — the user shouldn't see them on
+    # the visible 'About me' surface
+    assert "Allergies" not in text
+
+
+def test_about_you_renders_empty_profile_state_when_no_answers() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.knowledge_graph = _FakeKnowledgeGraph()
+    app.state.reflection_store = SimpleNamespace(
+        list_profile=AsyncMock(return_value=[])
+    )
+
+    with TestClient(app) as client:
+        resp = client.get("/dashboard/about-you")
+    assert resp.status_code == 200
+    assert "No profile answers yet" in resp.text
+
+
+def test_about_you_survives_profile_load_failure() -> None:
+    """A flaky reflection_store.list_profile must not break the page."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.knowledge_graph = _FakeKnowledgeGraph()
+    app.state.reflection_store = SimpleNamespace(
+        list_profile=AsyncMock(side_effect=Exception("connection lost"))
+    )
+
+    with TestClient(app) as client:
+        resp = client.get("/dashboard/about-you")
+    assert resp.status_code == 200
+    # Empty-state copy still renders
+    assert "No profile answers yet" in resp.text

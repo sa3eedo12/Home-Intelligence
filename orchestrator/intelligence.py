@@ -297,6 +297,45 @@ def _serialize_habit(habit: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _format_habit_example(habit: dict[str, Any]) -> str:
+    """Render a habit row as a one-line, human-readable example.
+
+    The ``pattern`` column is jsonb (e.g. ``{"value": {"start": "22:00", "end":
+    "07:00"}, "rationale": "..."}``) — earlier code concatenated the dict
+    directly into a string with ``+ " — " +``, which raises TypeError and
+    500s the entire /dashboard/what-i-know page. Now we extract the most
+    descriptive bits we can find.
+    """
+    subject = str(habit.get("subject") or "").strip()
+    pattern = habit.get("pattern")
+    parts: list[str] = []
+    if subject:
+        parts.append(subject)
+    if isinstance(pattern, dict):
+        # Prefer 'value' (the structured signal) over 'rationale' (LLM prose).
+        value = pattern.get("value")
+        if isinstance(value, dict):
+            # Time-window patterns are by far the most common shape.
+            start = value.get("start")
+            end = value.get("end")
+            if start and end:
+                parts.append(f"{start} → {end}")
+            else:
+                # Fall back to a compact key=value rendering of value
+                rendered = ", ".join(f"{k}={v}" for k, v in value.items() if k != "confidence")
+                if rendered:
+                    parts.append(rendered)
+        elif value not in (None, ""):
+            parts.append(str(value))
+        else:
+            rationale = pattern.get("rationale") or pattern.get("summary")
+            if rationale:
+                parts.append(str(rationale)[:120])
+    elif pattern not in (None, ""):
+        parts.append(str(pattern)[:120])
+    return " — ".join(parts) if parts else "(habit details unavailable)"
+
+
 def _serialize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     for r in rows or []:
@@ -328,7 +367,7 @@ def _open_questions(
         questions.append({
             "topic": "habit",
             "summary": f"{len(unconfirmed_habits)} inferred habits awaiting your confirmation",
-            "example": (sample.get("subject") or "") + " — " + (sample.get("pattern") or ""),
+            "example": _format_habit_example(sample),
             "action": "Open About You → Habits to confirm or correct.",
         })
     if cycle_unconfirmed:
