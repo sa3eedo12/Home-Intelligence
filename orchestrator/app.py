@@ -39,6 +39,7 @@ from .migrations import run_pending_migrations
 from .notify import run_consumer, send_morning_brief
 from .observers import ObserverRunner
 from .observers.coffee_observer import build as build_coffee
+from .observers.device_activity_recorder import build as build_device_activity
 from .observers.lights_observer import build as build_lights
 from .observers.presence_observer import build as build_presence
 from .observers.sleep_observer import build as build_sleep
@@ -614,6 +615,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             build_coffee(),
             build_tv(),
             lights_observer,
+            build_device_activity(),
         ],
     )
     await observer_runner.start()
