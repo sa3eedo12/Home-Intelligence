@@ -39,12 +39,9 @@ jobs:
     dispatch: { agent: __orchestrator__, capability: data_science.lora_training, inputs: {} }
 
   - id: morning_reflection_digest
-    description: "Send the latest Morning Brief to Telegram"
-    trigger: cron
-    cron: {}
-    time_env: MORNING_BRIEF_HOUR
-    time_default: "07:30"
-    timezone_env: MORNING_BRIEF_TZ
+    description: "Send the latest Morning Brief to Telegram (gated by wake_time)"
+    trigger: interval
+    interval: { minutes: 15 }
     dispatch:
       agent: __orchestrator__
       capability: morning_brief.send
@@ -60,9 +57,9 @@ jobs:
       inputs: {}
 
   - id: morning_brief
-    description: "Daily morning briefing"
+    description: "Generate the morning brief content (sender gates on wake_time)"
     trigger: cron
-    cron: { hour: 7, minute: 30 }
+    cron: { hour: 6, minute: 30 }
     dispatch:
       agent: personal_assistant
       capability: morning_brief
@@ -192,4 +189,13 @@ jobs:
     dispatch:
       agent: __orchestrator__
       capability: orchestrator.proactive_scan
+      inputs: {}
+
+  - id: pre_bedtime_scan
+    description: "Tier'd pre-bedtime nudge (90/30 min before sleep_time) — gated per-member"
+    trigger: interval
+    interval: { minutes: 15 }
+    dispatch:
+      agent: __orchestrator__
+      capability: orchestrator.pre_bedtime_scan
       inputs: {}

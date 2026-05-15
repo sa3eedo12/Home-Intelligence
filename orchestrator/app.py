@@ -39,6 +39,7 @@ from .migrations import run_pending_migrations
 from .notify import run_consumer, send_morning_brief
 from .observers import ObserverRunner
 from .observers.coffee_observer import build as build_coffee
+from .observers.lights_observer import build as build_lights
 from .observers.presence_observer import build as build_presence
 from .observers.sleep_observer import build as build_sleep
 from .observers.tv_observer import build as build_tv
@@ -410,10 +411,44 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         return await advisor.run_once()
 
     async def _send_reflection_digest(inputs: dict[str, Any]) -> dict[str, Any]:
+        # Wake-time-relative gating: when called by the scheduler (no chat_id
+        # in inputs) we only fire if NOW is within ``minutes_after_wake`` of
+        # any member's wake_time AND we haven't already sent today. Manual
+        # invocation (with chat_id) bypasses both checks so /admin endpoints
+        # and explicit user requests still work.
+        from .member_windows import (
+            already_fired_today,
+            any_member_in_post_wake,
+            load_member_windows,
+            mark_fired_today,
+        )
+
+        manual_chat_id = inputs.get("chat_id")
+        force = bool(inputs.get("force"))
+        if manual_chat_id is None and not force:
+            try:
+                minutes_after = int(os.environ.get("MORNING_BRIEF_AFTER_WAKE_MIN", "30"))
+            except ValueError:
+                minutes_after = 30
+            try:
+                window_minutes = int(os.environ.get("MORNING_BRIEF_WINDOW_MIN", "60"))
+            except ValueError:
+                window_minutes = 60
+            windows = await load_member_windows(pool)
+            member = (
+                any_member_in_post_wake(windows, minutes_after=minutes_after + window_minutes)
+                if windows
+                else None
+            )
+            if windows and member is None:
+                return {"ok": True, "skipped": True, "reason": "outside_wake_window"}
+            if await already_fired_today(redis, "morning_brief.send"):
+                return {"ok": True, "skipped": True, "reason": "already_sent_today"}
+
         tg_app_ref = tg_app_holder.get("app")
         if tg_app_ref is None:
             return {"ok": False, "error": "telegram_unavailable"}
-        chat_id_raw = inputs.get("chat_id") or await redis.get("config:telegram_chat_id")
+        chat_id_raw = manual_chat_id or await redis.get("config:telegram_chat_id")
         try:
             chat_id = int(chat_id_raw or telegram_chat_id)
         except (TypeError, ValueError):
@@ -435,6 +470,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
         except Exception as exc:
             logger.warning("morning_brief_sent_mark_failed", error=str(exc))
+        if manual_chat_id is None:
+            await mark_fired_today(redis, "morning_brief.send")
         return {"ok": True, "brief_id": brief.get("id"), "chat_id": chat_id}
 
     async def _run_maintenance(_inputs: dict[str, Any]) -> dict[str, Any]:
@@ -476,6 +513,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             pool=pool,
         )
 
+    async def _run_pre_bedtime_scan(_inputs: dict[str, Any]) -> dict[str, Any]:
+        from .pre_bedtime import scan_pre_bedtime
+
+        return await scan_pre_bedtime(
+            reflection_store=reflection_store,
+            redis=redis,
+            pool=pool,
+            lights_observer=getattr(app.state, "lights_observer", None),
+        )
+
     scheduler = Scheduler(
         registry=registry,
         redis=redis,
@@ -493,6 +540,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "data_science.lora_training": _run_lora_training,
             "orchestrator.anomaly_check": _run_anomaly_check,
             "orchestrator.proactive_scan": _run_proactive_scan,
+            "orchestrator.pre_bedtime_scan": _run_pre_bedtime_scan,
         },
     )
     await scheduler.start()
@@ -553,6 +601,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Observer events are surfaced through events.activity; the dashboard activity feed
     # provides the observer tile/surface instead of adding static dashboard tiles.
+    lights_observer = build_lights()
     observer_runner = ObserverRunner(
         bus=bus,
         event_log_store=event_log_store,
@@ -564,9 +613,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             build_sleep(),
             build_coffee(),
             build_tv(),
+            lights_observer,
         ],
     )
     await observer_runner.start()
+    # Stash the lights observer so the bedtime check + dashboard can
+    # query its current snapshot without going through the registry.
+    app.state.lights_observer = lights_observer
 
     ha_event_bridge = build_ha_bridge(redis)
 

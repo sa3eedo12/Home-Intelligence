@@ -11,6 +11,14 @@ allow_during_quiet:
   - severity: critical
   - topic_pattern: "doorbell.*"
   - capability_pattern: "personal_assistant.evening_recap"
+  # Sleep-tier notifications are themselves about quiet/bedtime — they
+  # ARE the user's signal that quiet is starting and should pass through.
+  - topic_pattern: "sleep.*"
+  # The wake-time-gated morning brief sender already only fires within
+  # the post-wake window; if quiet hours overlap (because the user's
+  # wake_time is inside the static-fallback window), the brief should
+  # still get through.
+  - topic_pattern: "brief.morning"
 
 rate_limits:
   - id: system_health.disk_warn

@@ -201,7 +201,10 @@ _SUGGESTION_TEMPLATES = {
 
 
 async def _recent_proactive_kinds(
-    reflection_store: ReflectionStore, dedup_hours: int
+    reflection_store: ReflectionStore,
+    dedup_hours: int,
+    *,
+    now: datetime | None = None,
 ) -> set[str]:
     """Return the source_kinds we've already proposed about in the dedup
     window. Reuses list_proposals; cheap for the volumes we're at."""
@@ -210,7 +213,7 @@ async def _recent_proactive_kinds(
     except Exception as exc:
         logger.warning("proactive_list_proposals_failed", error=str(exc))
         return set()
-    cutoff = datetime.now(UTC) - timedelta(hours=dedup_hours)
+    cutoff = (now or datetime.now(UTC)) - timedelta(hours=dedup_hours)
     seen: set[str] = set()
     for row in rows:
         if row.get("kind") != "proactive_suggestion":
@@ -293,7 +296,7 @@ async def scan_for_opportunities(
         )
     )
 
-    seen = await _recent_proactive_kinds(reflection_store, _dedup_hours())
+    seen = await _recent_proactive_kinds(reflection_store, _dedup_hours(), now=now)
     emitted = 0
     out: list[dict[str, Any]] = []
     for kind, _slot, rows in candidates:
