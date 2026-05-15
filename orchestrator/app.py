@@ -125,10 +125,15 @@ async def _people_home(app: FastAPI) -> list[str]:
     home. The HA query checks ``person.*`` plus every entity listed in
     ``household_members.attributes.tracker_entity_ids``.
 
+    Manual overrides (set via the Telegram "I'm not home" command) win over
+    everything else for their TTL window — keys at
+    ``policy:override:presence:<member_name>`` with values "home" / "not_home".
+
     Returns an empty list when no presence info is available anywhere
     (the dashboard then falls back to the "Presence learning" placeholder).
     """
     pool = getattr(app.state, "pool", None)
+    redis = getattr(app.state, "redis", None)
     home: list[str] = []
     person_to_member: dict[str, str] = {}
     if pool is not None:
@@ -226,6 +231,33 @@ async def _people_home(app: FastAPI) -> list[str]:
                         home.append(name)
         except Exception as exc:
             logger.warning("people_home_ha_query_failed", error=str(exc))
+
+    # Apply manual overrides (set via Telegram "I'm not home" / "I'm back").
+    # These win over both the event_log and the live HA query for their TTL.
+    if redis is not None:
+        # Need the union of (members we've seen) + (members with overrides)
+        # so an override for a member who isn't currently in 'home' can
+        # still ADD them. Pull all override keys, intersect with known
+        # member names from person_to_member.
+        try:
+            override_keys = await redis.keys("policy:override:presence:*")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("people_home_override_query_failed", error=str(exc))
+            override_keys = []
+        for raw_key in override_keys or []:
+            key = raw_key if isinstance(raw_key, str) else raw_key.decode("utf-8")
+            member_name = key.split(":", 3)[-1]
+            try:
+                value = await redis.get(key)
+            except Exception:  # noqa: BLE001
+                continue
+            value = value if isinstance(value, str) else (value or b"").decode("utf-8")
+            if value == "not_home":
+                if member_name in home:
+                    home.remove(member_name)
+            elif value == "home":
+                if member_name not in home:
+                    home.append(member_name)
     return home
 
 
@@ -538,6 +570,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             redis=redis,
             pool=pool,
             lights_observer=getattr(app.state, "lights_observer", None),
+            people_home_fetch=getattr(app.state, "people_home_fetch", None),
         )
 
     scheduler = Scheduler(
@@ -643,6 +676,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Stash the lights observer so the bedtime check + dashboard can
     # query its current snapshot without going through the registry.
     app.state.lights_observer = lights_observer
+
+    # Seed the lights observer with the current HA state so lights that
+    # were ALREADY ON at orchestrator boot show up in snapshot(). Without
+    # this, the bedtime nudge said '1 light on' when HA actually had 5
+    # because only state TRANSITIONS land in events.home — already-on
+    # lights are invisible until they flick.
+    async def _seed_lights_from_ha() -> None:
+        ha_url = os.environ.get("HA_URL", "").strip()
+        ha_token = os.environ.get("HA_TOKEN", "").strip()
+        if not (ha_url and ha_token):
+            return
+        try:
+            import httpx as _httpx
+
+            async with _httpx.AsyncClient(
+                timeout=10.0,
+                headers={"Authorization": f"Bearer {ha_token}"},
+            ) as client:
+                resp = await client.get(ha_url.rstrip("/") + "/api/states")
+                resp.raise_for_status()
+                states = resp.json() if resp.status_code == 200 else []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("lights_observer_seed_failed", error=str(exc))
+            return
+        if isinstance(states, list):
+            seeded = lights_observer.seed_from_ha_states(states)
+            logger.info("lights_observer_seeded", count=seeded)
+
+    asyncio.create_task(_seed_lights_from_ha(), name="orchestrator-seed-lights")
 
     ha_event_bridge = build_ha_bridge(redis)
 

@@ -28,6 +28,23 @@ class MemberWindow:
     name: str | None
     sleep_time: time
     wake_time: time
+    # Weekend overrides extracted from user_profile (parse_wake_or_sleep_time).
+    # When set, the helpers below pick the correct variant for today's
+    # weekday/weekend. Falls back to sleep_time/wake_time when absent.
+    sleep_time_weekend: time | None = None
+    wake_time_weekend: time | None = None
+
+    def effective_sleep_time(self, ref: datetime) -> time:
+        local = ref.astimezone(_local_tz())
+        if local.weekday() >= 5 and self.sleep_time_weekend is not None:
+            return self.sleep_time_weekend
+        return self.sleep_time
+
+    def effective_wake_time(self, ref: datetime) -> time:
+        local = ref.astimezone(_local_tz())
+        if local.weekday() >= 5 and self.wake_time_weekend is not None:
+            return self.wake_time_weekend
+        return self.wake_time
 
 
 def _local_tz() -> ZoneInfo:
@@ -43,9 +60,16 @@ async def load_member_windows(pool: Any | None) -> list[MemberWindow]:
     Members without sleep_time are skipped. Missing wake_time defaults
     to 07:00 — same fallback the TV observer uses, so behavior stays
     consistent across modules.
+
+    Also augments each window with weekend variants parsed from
+    user_profile if the user answered something like "I wake up no later
+    than 9:00 AM on weekdays, 11:00 AM weekends" — without this, every
+    helper used the same time 7 days a week even though the answer
+    explicitly mentioned a weekend variant.
     """
     if pool is None:
         return []
+    profile_rows: list[Any] = []
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -58,6 +82,53 @@ async def load_member_windows(pool: Any | None) -> list[MemberWindow]:
             )
     except Exception:
         return []
+    # Profile-row enrichment is best-effort; failures must NOT block
+    # the core sleep/wake window load above.
+    try:
+        async with pool.acquire() as conn:
+            profile_rows = await conn.fetch(
+                """
+                SELECT key, value
+                  FROM user_profile
+                 WHERE key IN ('wake_time', 'sleep_time')
+                """
+            )
+    except Exception:
+        profile_rows = []
+    # Parse the structured weekend overrides ONCE at the top — currently
+    # user_profile is a single-tenant key/value store so the overrides
+    # apply to all members. Once profile becomes per-member we'll add a
+    # member_id column and join here.
+    from .profile_parser import parse_wake_or_sleep_time
+
+    weekend_wake: time | None = None
+    weekend_sleep: time | None = None
+    for prow in profile_rows:
+        # Defensive: row dict may not have 'key'/'value' columns (e.g.
+        # when a fake test pool returns the same rows for every fetch).
+        try:
+            key = prow["key"]
+            raw = prow["value"]
+        except (KeyError, TypeError):
+            continue
+        if isinstance(raw, str):
+            text = raw.strip()
+            if text.startswith('"') and text.endswith('"'):
+                import json as _json
+
+                try:
+                    text = _json.loads(text)
+                except Exception:
+                    text = text[1:-1]
+        else:
+            text = str(raw or "")
+        parsed = parse_wake_or_sleep_time(text) if text else None
+        if not parsed:
+            continue
+        if key == "wake_time" and parsed.get("weekend") != parsed.get("weekday"):
+            weekend_wake = parsed["weekend"]
+        if key == "sleep_time" and parsed.get("weekend") != parsed.get("weekday"):
+            weekend_sleep = parsed["weekend"]
     out: list[MemberWindow] = []
     for row in rows:
         sleep = row["sleep_time"]
@@ -69,6 +140,8 @@ async def load_member_windows(pool: Any | None) -> list[MemberWindow]:
                     name=row.get("name"),
                     sleep_time=sleep,
                     wake_time=wake,
+                    sleep_time_weekend=weekend_sleep,
+                    wake_time_weekend=weekend_wake,
                 )
             )
     return out
@@ -101,7 +174,7 @@ def in_pre_bedtime_window(
     at 00:30 — so 23:35 is inside.
     """
     local_now = _local_now(now)
-    sleep_today = _on_today(window.sleep_time, local_now)
+    sleep_today = _on_today(window.effective_sleep_time(local_now), local_now)
     # If sleep_time is before the current hour by a wide margin, the
     # next sleep is tomorrow — compare against tomorrow's slot.
     if sleep_today < local_now - timedelta(hours=12):
@@ -120,9 +193,10 @@ def in_post_wake_window(
 
     Used by the morning brief sender so the brief lands shortly after
     the user actually wakes up, instead of at a hardcoded 07:30.
+    Respects weekend overrides via window.effective_wake_time.
     """
     local_now = _local_now(now)
-    wake_today = _on_today(window.wake_time, local_now)
+    wake_today = _on_today(window.effective_wake_time(local_now), local_now)
     if wake_today > local_now + timedelta(hours=12):
         wake_today = wake_today - timedelta(days=1)
     return wake_today <= local_now < wake_today + timedelta(minutes=minutes_after)

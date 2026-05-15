@@ -126,3 +126,66 @@ async def test_lights_observer_handles_multiple_lights() -> None:
     assert snap["count"] == 3
     names = {item["friendly_name"] for item in snap["lights"]}
     assert names == {"Living Room", "Kitchen", "Hallway"}
+
+
+# ── seed_from_ha_states (REGRESSION) ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_seed_from_ha_states_picks_up_already_on_lights() -> None:
+    """REGRESSION: bedtime nudge said '1 light on' when HA actually had 5
+    on, because the observer only saw state TRANSITIONS — already-on
+    lights at boot were invisible."""
+    obs = LightsObserver()
+    seeded = obs.seed_from_ha_states(
+        [
+            {
+                "entity_id": "light.living_room",
+                "state": "on",
+                "last_changed": "2026-05-15T20:00:00+00:00",
+                "attributes": {"friendly_name": "Living Room"},
+            },
+            {
+                "entity_id": "light.kitchen",
+                "state": "off",
+                "attributes": {"friendly_name": "Kitchen"},
+            },
+            {
+                "entity_id": "light.tv_backlight",  # filtered: backlight
+                "state": "on",
+                "attributes": {"friendly_name": "TV Backlight"},
+            },
+            {
+                "entity_id": "switch.kitchen_outlet",  # filtered: not a light
+                "state": "on",
+                "attributes": {"friendly_name": "Outlet"},
+            },
+        ]
+    )
+
+    snap = obs.snapshot()
+    # Backlight + non-light filtered out
+    assert seeded == 2  # Living Room + Kitchen
+    assert snap["count"] == 1  # Only Living Room is ON
+    assert snap["lights"][0]["entity_id"] == "light.living_room"
+    assert snap["lights"][0]["on_since"] is not None
+
+
+@pytest.mark.asyncio
+async def test_seed_skips_unavailable_states() -> None:
+    obs = LightsObserver()
+    obs.seed_from_ha_states(
+        [
+            {
+                "entity_id": "light.broken",
+                "state": "unavailable",
+                "attributes": {"friendly_name": "Broken"},
+            },
+            {
+                "entity_id": "light.unknown_one",
+                "state": "unknown",
+                "attributes": {"friendly_name": "Unknown"},
+            },
+        ]
+    )
+    assert obs.snapshot()["count"] == 0

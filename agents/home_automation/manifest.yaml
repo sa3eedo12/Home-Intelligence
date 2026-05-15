@@ -84,6 +84,35 @@ capabilities:
     inputs: { appliance: string, hours: "integer?" }
     side_effects: false
     cost: medium
+  - id: lights_off
+    description: >-
+      Turn off lights. Pass entity_ids for specific lights, area for a substring
+      match against entity_id/friendly_name (e.g. "kitchen", "living room"), or
+      both empty to turn off ALL real lights (excludes TV backlights, indicator
+      strips, etc.). Set only_on=false to force-call even on already-off lights.
+    inputs:
+      entity_ids: "list[string]?"
+      area: "string?"
+      only_on: "boolean?"
+    side_effects: true
+    cost: small
+  - id: lights_on
+    description: >-
+      Turn on lights with optional brightness 0-255. Same arg semantics as
+      lights_off.
+    inputs:
+      entity_ids: "list[string]?"
+      area: "string?"
+      brightness: "integer?"
+    side_effects: true
+    cost: small
+  - id: lights_status
+    description: >-
+      Return how many lights are currently on (excluding backlights/indicators)
+      and the friendly names. Cheap; safe to call from chat.
+    inputs: {}
+    side_effects: false
+    cost: small
 subscribes:
   - events.home
 publishes:

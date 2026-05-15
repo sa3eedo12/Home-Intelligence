@@ -254,3 +254,93 @@ async def test_scan_returns_no_member_windows_when_household_empty() -> None:
 
     assert result["emitted"] == 0
     assert result["skipped"] == "no_member_windows"
+
+
+# ── Skip when no one is home (REGRESSION) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_scan_skips_when_nobody_home() -> None:
+    """REGRESSION: user was gone 4h, system fired pre-bedtime nudges
+    saying 'X lights on, want to wind down?' — pointless when nobody's
+    there."""
+    pool = _member_pool(
+        [{"id": 1, "name": "Saeed", "sleep_time": time(0, 30), "wake_time": time(9, 0)}]
+    )
+    redis = FakeRedis(decode_responses=True)
+    reflection_store = AsyncMock()
+    reflection_store.add_proposal = AsyncMock(return_value=99)
+    lights = _lights_observer(5, ["A", "B", "C", "D", "E"])
+
+    async def empty_people_home() -> list[str]:
+        return []
+
+    now = datetime(2026, 5, 14, 19, 30, tzinfo=UTC)  # 23:30 local — in tier 90
+    result = await scan_pre_bedtime(
+        reflection_store=reflection_store,
+        redis=redis,
+        pool=pool,
+        lights_observer=lights,
+        people_home_fetch=empty_people_home,
+        now=now,
+    )
+
+    assert result["emitted"] == 0
+    assert result["skipped"] == "nobody_home"
+    reflection_store.add_proposal.assert_not_awaited()
+    # Crucially, the dedup flag was NOT set so we re-evaluate as soon as
+    # anyone returns home.
+    keys = await redis.keys("prebed:*")
+    assert keys == []
+
+
+@pytest.mark.asyncio
+async def test_scan_proceeds_when_someone_home() -> None:
+    pool = _member_pool(
+        [{"id": 1, "name": "Saeed", "sleep_time": time(0, 30), "wake_time": time(9, 0)}]
+    )
+    redis = FakeRedis(decode_responses=True)
+    reflection_store = AsyncMock()
+    reflection_store.add_proposal = AsyncMock(return_value=99)
+    lights = _lights_observer(3, ["A", "B", "C"])
+
+    async def saeed_home() -> list[str]:
+        return ["Saeed"]
+
+    now = datetime(2026, 5, 14, 19, 30, tzinfo=UTC)
+    result = await scan_pre_bedtime(
+        reflection_store=reflection_store,
+        redis=redis,
+        pool=pool,
+        lights_observer=lights,
+        people_home_fetch=saeed_home,
+        now=now,
+    )
+
+    assert result["emitted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scan_proceeds_when_fetch_fails() -> None:
+    """A flaky fetch shouldn't block the scan — proceed conservatively."""
+    pool = _member_pool(
+        [{"id": 1, "name": "Saeed", "sleep_time": time(0, 30), "wake_time": time(9, 0)}]
+    )
+    redis = FakeRedis(decode_responses=True)
+    reflection_store = AsyncMock()
+    reflection_store.add_proposal = AsyncMock(return_value=99)
+    lights = _lights_observer(3, ["A", "B", "C"])
+
+    async def explode() -> list[str]:
+        raise Exception("redis down")
+
+    now = datetime(2026, 5, 14, 19, 30, tzinfo=UTC)
+    result = await scan_pre_bedtime(
+        reflection_store=reflection_store,
+        redis=redis,
+        pool=pool,
+        lights_observer=lights,
+        people_home_fetch=explode,
+        now=now,
+    )
+    assert result["emitted"] == 1

@@ -273,6 +273,97 @@ async def _handle_pending_text(update: Update, router: Router, redis: Redis, tex
     return True
 
 
+# Presence-override intent: phrases like "I'm not home", "I left",
+# "I'm home", "I'm back" that the user wants to set the system's idea
+# of their presence directly. Without this, the chat's LLM router
+# typically replied with "noted" but did nothing observable.
+_PRESENCE_AWAY_PHRASES = (
+    "i'm not home",
+    "im not home",
+    "i am not home",
+    "i'm out",
+    "im out",
+    "i left",
+    "i've left",
+    "ive left",
+    "i'm gone",
+    "im gone",
+    "i'm away",
+    "im away",
+)
+_PRESENCE_HOME_PHRASES = (
+    "i'm home",
+    "im home",
+    "i am home",
+    "i'm back",
+    "im back",
+    "i'm in",
+    "im in",
+    "i've arrived",
+    "ive arrived",
+)
+PRESENCE_OVERRIDE_TTL_SECONDS = 6 * 60 * 60  # 6h, then auto-clears
+
+
+def _presence_intent(text: str) -> str | None:
+    """Return 'home' / 'not_home' if the message matches a presence override
+    phrase, else None. Case-insensitive whole-line match (allows trailing
+    punctuation/whitespace) so we don't trigger on 'I'm not home yet but
+    on my way back' style sentences."""
+    cleaned = text.strip().casefold().rstrip(".!?")
+    for phrase in _PRESENCE_AWAY_PHRASES:
+        if cleaned == phrase or cleaned == phrase + " now":
+            return "not_home"
+    for phrase in _PRESENCE_HOME_PHRASES:
+        if cleaned == phrase or cleaned == phrase + " now":
+            return "home"
+    return None
+
+
+async def _handle_presence_override(
+    update: Update,
+    redis: Redis,
+    knowledge_graph: Any | None,
+    proposal_store: Any | None,
+    text: str,
+) -> bool:
+    """If text matches a presence-override phrase, set a redis key the
+    _people_home() helper consults and reply. Returns True if handled."""
+    intent = _presence_intent(text)
+    if intent is None:
+        return False
+    member = await _member_for_update(update, knowledge_graph, proposal_store, redis)
+    name = (member or {}).get("name") if member else None
+    if not name:
+        await _reply(
+            update,
+            "I don't know which person you are yet — link your Telegram to a "
+            "household member first.",
+        )
+        return True
+    key = f"policy:override:presence:{name}"
+    try:
+        await redis.set(key, intent, ex=PRESENCE_OVERRIDE_TTL_SECONDS)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("presence_override_set_failed", error=str(exc))
+        await _reply(update, "I couldn't save that — try again in a moment.")
+        return True
+    if intent == "not_home":
+        await _reply(
+            update,
+            f"Got it — marking {name} as not home for the next 6h. I'll skip "
+            "welcome-home pings and pre-bedtime nudges until your phone "
+            "actually returns.",
+        )
+    else:
+        await _reply(
+            update,
+            f"Welcome back, {name}. Noted you're home; clearing any away "
+            "override.",
+        )
+    return True
+
+
 def _make_text(
     allowed_ids: set[int],
     router: Router,
@@ -285,6 +376,10 @@ def _make_text(
             return
         text = update.message.text or ""
         if await _handle_pending_text(update, router, redis, text):
+            return
+        if await _handle_presence_override(
+            update, redis, knowledge_graph, proposal_store, text
+        ):
             return
         user_id = str(update.effective_user.id)
         member = await _member_for_update(update, knowledge_graph, proposal_store, redis)

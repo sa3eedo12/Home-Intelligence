@@ -177,17 +177,35 @@ async def scan_pre_bedtime(
     redis: Any,
     pool: Any | None = None,
     lights_observer: Any | None = None,
+    people_home_fetch: Any = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Run one pre-bedtime scan. Returns a structured-log-friendly dict.
 
     ``redis`` is used for once-per-day-per-tier dedup so a 15-min scheduler
     cadence doesn't spam multiple nudges within the same tier window.
+
+    ``people_home_fetch`` (optional async callable) returns the current
+    list of people home. When supplied AND it returns an empty list, the
+    scan no-ops with reason='nobody_home' — nudging someone to wind down
+    the lights when they're not there is just noise. The dedup flag is
+    NOT set in this case so the scanner re-evaluates as soon as anyone
+    returns.
     """
     now = (now or datetime.now(UTC)).astimezone(UTC)
     windows = await load_member_windows(pool)
     if not windows:
         return {"emitted": 0, "skipped": "no_member_windows"}
+
+    if people_home_fetch is not None:
+        try:
+            people_home = await people_home_fetch()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pre_bedtime_people_home_failed", error=str(exc))
+            people_home = None
+        if people_home is not None and not people_home:
+            logger.info("pre_bedtime_skipped", reason="nobody_home")
+            return {"emitted": 0, "skipped": "nobody_home"}
 
     snapshot: dict[str, Any] = {"count": 0, "lights": []}
     if lights_observer is not None and hasattr(lights_observer, "snapshot"):

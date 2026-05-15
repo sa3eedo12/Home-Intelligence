@@ -78,6 +78,46 @@ class LightsObserver(Observer):
         elif not state.on:
             state.since = None
 
+    def seed_from_ha_states(self, states: list[dict[str, Any]]) -> int:
+        """Bootstrap the in-memory state map from a snapshot of HA's
+        /api/states response. Without this, the observer was blind to
+        any light that was already on at orchestrator boot — the
+        bedtime nudge said '1 light on' when HA actually had 5 on.
+
+        Returns the count of lights seeded (any state, not just 'on').
+        Idempotent — re-seeding overwrites the entry.
+        """
+        seeded = 0
+        for raw in states or []:
+            if not isinstance(raw, dict):
+                continue
+            entity_id = str(raw.get("entity_id") or "")
+            if not entity_id or domain_of(entity_id) != "light":
+                continue
+            attrs = raw.get("attributes") or {}
+            if isinstance(attrs, dict):
+                friendly = str(attrs.get("friendly_name") or entity_id)
+            else:
+                friendly = entity_id
+            if _looks_like_bedtime_irrelevant(entity_id, friendly):
+                continue
+            normalized = normalized_state(raw.get("state"))
+            if normalized in {None, "", "unknown", "unavailable"}:
+                continue
+            state = remember_bounded(
+                self._states, entity_id, _LightState, MAX_TRACKED_ENTITIES
+            )
+            state.friendly_name = friendly
+            state.on = normalized == ON_STATE
+            if state.on:
+                # We don't know precisely when it turned on; use last_changed
+                # if HA provided it, else now.
+                state.since = parse_datetime(raw.get("last_changed")) or datetime.now(UTC)
+            else:
+                state.since = None
+            seeded += 1
+        return seeded
+
     def snapshot(self) -> dict[str, Any]:
         """Return a count + list of currently-on lights for callers that
         want to ask 'how many lights are on right now?' Used by the
