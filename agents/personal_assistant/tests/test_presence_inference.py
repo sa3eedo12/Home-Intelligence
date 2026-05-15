@@ -224,3 +224,115 @@ async def test_presence_returns_store_last_left_at_prefers_observer_since() -> N
     query, entity_id = conn.fetchrow.await_args.args
     assert "presence.changed" in query
     assert entity_id == "device_tracker.saeed_phone"
+
+
+# ── _person_from + welcome message hardening ─────────────────────────────
+
+
+def test_person_from_collapses_consecutive_duplicate_tokens() -> None:
+    """REGRESSION: 'Welcome home, SAEED-PC SAEED-PC' was reaching Telegram
+    because the observer's friendly_name carried duplicated tokens."""
+    from tools.presence_inference import _person_from
+
+    assert _person_from(None, "SAEED-PC SAEED-PC") is None  # rejected as device
+    assert _person_from(None, "Saeed Saeed") == "Saeed"
+    assert _person_from(None, "Jude Jude Jude") == "Jude"
+
+
+def test_person_from_rejects_device_names() -> None:
+    """PCs/laptops/desktops should not be welcomed home as people."""
+    from tools.presence_inference import _person_from
+
+    assert _person_from("device_tracker.saeed_pc", None) is None
+    assert _person_from(None, "Saeeds-Laptop") is None
+    assert _person_from(None, "Office iMac") is None
+    assert _person_from(None, "Workstation") is None
+
+
+def test_person_from_keeps_human_names() -> None:
+    from tools.presence_inference import _person_from
+
+    assert _person_from("person.saeed", None) == "Saeed"
+    assert _person_from(None, "Saeed") == "Saeed"
+    assert _person_from(None, "Jude Smith") == "Jude Smith"
+
+
+@pytest.mark.asyncio
+async def test_infer_presence_return_skips_for_device_name(monkeypatch) -> None:
+    """Even if a device tracker bypasses the observer's authority gate
+    and reaches infer_presence_return, the welcome should NOT fire."""
+    from tools import presence_inference
+
+    async def _pool() -> object:
+        return object()
+
+    monkeypatch.setattr(presence_inference, "_pool", _pool)
+    monkeypatch.setattr(
+        presence_inference,
+        "PresenceReturnsStore",
+        lambda _pool: _FakePresenceReturnsStore(),
+    )
+
+    result = await presence_inference.infer_presence_return(
+        entity_id="device_tracker.saeed_pc",
+        person="SAEED-PC SAEED-PC",
+        state="home",
+        since="2026-05-14T18:12:00+00:00",
+    )
+
+    assert result["ok"] is True
+    assert result["ignored"] is True
+    assert result["reason"] == "non_person_entity"
+
+
+@pytest.mark.asyncio
+async def test_infer_presence_return_caps_implausibly_long_away_time(
+    monkeypatch,
+) -> None:
+    """REGRESSION: after orchestrator restart, last_left_at could pull
+    a stale not_home from days ago, producing 'gone 24h' when the user
+    was actually only out for 10min. Cap and reset to None above 18h."""
+    from datetime import datetime as _dt
+
+    from tools import presence_inference
+
+    class _StaleStore:
+        async def last_left_at(self, _entity_id):
+            return _dt(2026, 5, 13, 14, 0, tzinfo=UTC)  # ~24h ago
+
+        async def confirmed_context_history(self, *_args, **_kwargs):
+            return []
+
+        async def insert_return(self, **_kwargs):
+            return 99
+
+    async def _pool() -> object:
+        return object()
+
+    monkeypatch.setattr(presence_inference, "_pool", _pool)
+    monkeypatch.setattr(presence_inference, "PresenceReturnsStore", lambda _pool: _StaleStore())
+
+    result = await presence_inference.infer_presence_return(
+        entity_id="device_tracker.saeeds_iphone",
+        person="Saeed",
+        state="home",
+        since="2026-05-14T14:12:00+00:00",
+    )
+
+    # Welcome still fires (real phone, real person), but 'gone Xh' is gone
+    assert result["ok"] is True
+    assert result.get("ignored") is not True
+    summary = result["summary"]
+    # Should NOT contain a "gone NNh" hint after the cap kicked in
+    assert "gone" not in summary.casefold()
+
+
+class _FakePresenceReturnsStore:
+    async def last_left_at(self, _entity_id):
+        return None
+
+    async def confirmed_context_history(self, *_args, **_kwargs):
+        return []
+
+    async def insert_return(self, **_kwargs):
+        return 1

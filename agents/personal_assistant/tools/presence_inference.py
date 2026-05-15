@@ -295,12 +295,61 @@ def _payload_from(payload: dict[str, Any] | None, kwargs: dict[str, Any]) -> dic
 
 
 def _person_from(entity_id: str | None, raw: Any) -> str | None:
+    """Resolve the friendly person name to use in welcome messages.
+
+    Defends against:
+      - "SAEED-PC SAEED-PC" double-name (HA friendly_name + observer
+        emit composing the same string twice). Collapses any
+        consecutive duplicate token of >=3 chars.
+      - device-y names (...PC, ...laptop, ...desktop) leaking into a
+        welcome message — those are PCs, not people. Returns None so
+        the caller can decide to skip the welcome entirely.
+    """
+    name: str | None = None
     if raw not in (None, ""):
-        return str(raw)
-    if not entity_id:
+        name = str(raw).strip()
+    elif entity_id:
+        slug = entity_id.split(".", 1)[-1].replace("_", " ").strip()
+        name = slug.title() if slug else None
+    if not name:
         return None
-    name = entity_id.split(".", 1)[-1].replace("_", " ").strip()
-    return name.title() if name else None
+    # Collapse consecutive duplicate tokens like "SAEED-PC SAEED-PC".
+    tokens = name.split()
+    deduped: list[str] = []
+    for tok in tokens:
+        if deduped and tok.casefold() == deduped[-1].casefold():
+            continue
+        deduped.append(tok)
+    name = " ".join(deduped)
+    # Reject device-y names. PCs/laptops shouldn't be welcomed home as people.
+    haystack = name.casefold()
+    # Match either bounded ('-pc', ' pc') or as a whole-token equal to a
+    # bare device word like 'workstation' / 'laptop'. Without the bare-token
+    # check, a HA friendly_name set to just 'Workstation' (no punctuation)
+    # would slip through.
+    bare_tokens = {tok.strip("- ") for tok in _DEVICE_NAME_TOKENS}
+    name_tokens = {t.casefold() for t in name.replace("-", " ").split()}
+    if any(suffix in haystack for suffix in _DEVICE_NAME_TOKENS):
+        return None
+    if name_tokens & bare_tokens:
+        return None
+    return name
+
+
+_DEVICE_NAME_TOKENS: tuple[str, ...] = (
+    "-pc",
+    " pc",
+    "-laptop",
+    " laptop",
+    "-macbook",
+    " macbook",
+    "-imac",
+    " imac",
+    "-desktop",
+    " desktop",
+    "-workstation",
+    " workstation",
+)
 
 
 @tool("infer_presence_return", side_effects=True)
@@ -315,6 +364,16 @@ async def infer_presence_return(
 
     entity_id = str(data.get("entity_id") or "") or None
     person = _person_from(entity_id, data.get("person"))
+    if person is None:
+        # _person_from rejected the name (looked like a device, not a person).
+        # Without this gate we'd send "Welcome home, SAEED-PC" — bogus.
+        return {
+            "ok": True,
+            "ignored": True,
+            "reason": "non_person_entity",
+            "summary": "",
+            "keyboard": [],
+        }
     returned_at = (
         _parse_iso(data.get("returned_at")) or _parse_iso(data.get("since")) or datetime.now(UTC)
     )
@@ -343,6 +402,15 @@ async def infer_presence_return(
             "summary": "",
             "keyboard": [],
         }
+    # Cap suspiciously-large gone times. Without this, after an orchestrator
+    # restart the last_left_at lookup can pull a stale 'not_home' from days
+    # ago, producing absurd "Welcome home, gone 24h" messages when the user
+    # was actually only out for 10 minutes. Above 18h we treat the gone-time
+    # as unknown rather than reporting a bogus number.
+    MAX_PLAUSIBLE_AWAY_MIN = int(os.environ.get("PRESENCE_MAX_AWAY_MIN", "1080"))  # 18h
+    if away_minutes is not None and away_minutes > MAX_PLAUSIBLE_AWAY_MIN:
+        away_minutes = None
+        left_at = None
 
     history = await store.confirmed_context_history(person, limit_days=30)
     context, confidence, reasoning = _infer(

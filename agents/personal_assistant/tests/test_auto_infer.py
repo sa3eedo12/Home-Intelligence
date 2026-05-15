@@ -38,6 +38,13 @@ class _FakeStore:
         assert hours == 1
         return self.count
 
+    async def recent_for_inference(
+        self, *, source_kind: str, inference: str, hours: int = 6
+    ) -> int:
+        # Default fixture returns 0 (no dedup hit); individual tests can
+        # subclass / monkeypatch to simulate a dedup hit.
+        return getattr(self, "_dedup_count", 0)
+
     async def correction_counts(
         self, *, source_kind: str, days: int = 7
     ) -> dict[str, int]:
@@ -569,3 +576,72 @@ async def test_correction_lookup_failure_does_not_block_inference(monkeypatch) -
     assert result["ok"] is True
     assert result.get("skipped") is not True
     assert result["auto_inference_id"] == 77
+
+
+# ── Cross-entity device-level dedup ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dedup_skips_when_same_inference_already_recent(monkeypatch) -> None:
+    """REGRESSION: one physical TV exposes 4 HA entities; without
+    dedup the auto_infer persisted 4 separate "left X on for 6h past
+    bedtime" rows. The dedup_key from the rule producer + the store's
+    recent_for_inference lookup collapses these to a single row."""
+    store = _FakeStore(count=0)
+    store._dedup_count = 1  # simulate "we already inserted one in last 6h"
+
+    async def _store() -> _FakeStore:
+        return store
+
+    async def _fail_infer(_context: str) -> dict[str, Any]:
+        raise AssertionError("LLM must NOT be called when dedup hits")
+
+    monkeypatch.setattr(auto_infer, "_auto_store", _store)
+    monkeypatch.setattr(auto_infer.infer_tool, "infer", _fail_infer)
+
+    result = await auto_infer.auto_infer_observer_event(
+        agent="observer.tv",
+        kind="entertainment.left_on",
+        summary="some other TV entity also left on",
+        ts="2026-05-14T22:00:00+00:00",
+        payload={
+            "entity_id": "media_player.34_odyssey_oled_g8_2",
+            "friendly_name": "OLED G8",
+            "on_hours": 6.0,
+            "reason": "past_bedtime",
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["skipped"] is True
+    assert result["reason"] == "dedup_within_window"
+    assert result["dedup_key"] == "entertainment.left_on:past_bedtime"
+    assert store.insert_calls == []
+
+
+@pytest.mark.asyncio
+async def test_dedup_does_not_block_first_emission(monkeypatch) -> None:
+    """First inference for a kind+key passes through normally."""
+    store = _FakeStore(count=0)
+    # _dedup_count defaults to 0 → no hit
+    async def _store() -> _FakeStore:
+        return store
+
+    monkeypatch.setattr(auto_infer, "_auto_store", _store)
+
+    result = await auto_infer.auto_infer_observer_event(
+        agent="observer.tv",
+        kind="entertainment.left_on",
+        summary="first TV alert today",
+        ts="2026-05-14T22:00:00+00:00",
+        payload={
+            "entity_id": "media_player.living_room_tv",
+            "friendly_name": "Living Room TV",
+            "on_hours": 6.0,
+            "reason": "past_bedtime",
+        },
+    )
+
+    assert result["ok"] is True
+    assert result.get("skipped") is not True
+    assert store.insert_calls

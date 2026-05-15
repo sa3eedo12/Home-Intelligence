@@ -220,7 +220,33 @@ def _matches_tv(change: Any) -> bool:
             str(change.attributes.get("device_class") or ""),
         ]
     ).casefold()
+    # Blocklist: substrings that look TV-related but are NOT the TV itself.
+    # Without this, switch.sound_sensor_tv_sound_detection matched on "tv"
+    # and triggered "TV left on for 6h" notifications. Same defensive
+    # filter the lights observer uses.
+    if any(kw in haystack for kw in TV_FALSE_POSITIVE_KEYWORDS):
+        return False
     return "tv" in haystack or "monitor" in haystack
+
+
+# Substrings that indicate a switch/light entity is associated with a TV
+# (so it matches the loose 'tv' substring) but is NOT the TV's power/state.
+# Adding a new keyword here is the right move whenever a false positive
+# surfaces in production.
+TV_FALSE_POSITIVE_KEYWORDS: tuple[str, ...] = (
+    "sound_sensor",
+    "sound_detection",
+    "remote_control",
+    "child_lock",
+    "indicator",
+    "status_led",
+    "backlight",
+    "ambient",
+    "bias_light",
+    "screen_share",
+    "energy",
+    "power_consumption",
+)
 
 
 def _is_on_state(entity_id: str, state: str | None) -> bool:

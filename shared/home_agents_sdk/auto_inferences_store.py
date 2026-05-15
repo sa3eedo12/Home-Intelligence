@@ -167,6 +167,42 @@ class AutoInferencesStore:
             )
         return int(value or 0)
 
+    async def recent_for_inference(
+        self, *, source_kind: str, inference: str, hours: int = 6
+    ) -> int:
+        """Count recent auto_inferences with the same source_kind whose
+        inference text matches ``inference`` (case-insensitive).
+
+        Used for device-level dedup: when the same physical TV exposes
+        multiple HA entities, the rule path emits one inference per
+        entity_id (e.g. 'left media_player.living_room_tv on for 6h',
+        'left media_player.34_odyssey_oled_g8_2 on for 6h'). The
+        inference text is the user-visible string; collapsing on it
+        catches duplicates that share the same hardware even when the
+        entity_ids differ.
+        """
+        if not self._ready or self.pool is None:
+            return 0
+        clean_kind = (source_kind or "").strip()
+        clean_inference = (inference or "").strip()
+        if not clean_kind or not clean_inference:
+            return 0
+        bounded_hours = _bounded_int(hours, default=6, low=1, high=24 * 7)
+        async with self.pool.acquire() as conn:
+            value = await conn.fetchval(
+                """
+                SELECT count(*)
+                  FROM auto_inferences
+                 WHERE source_kind = $1
+                   AND lower(inference) = lower($2)
+                   AND created_at >= now() - ($3::int * interval '1 hour')
+                """,
+                clean_kind,
+                clean_inference,
+                bounded_hours,
+            )
+        return int(value or 0)
+
     async def correction_counts(
         self, *, source_kind: str, days: int = 7
     ) -> dict[str, int]:

@@ -184,3 +184,42 @@ async def test_correction_counts_returns_zeros_for_empty_kind() -> None:
     # Empty kind is malformed input; return empty without hitting the DB
     assert counts == {"confirmed": 0, "rejected": 0, "skipped": 0}
     assert pool.conn.fetch_args is None
+
+
+@pytest.mark.asyncio
+async def test_recent_for_inference_returns_count() -> None:
+    """Counts existing rows with same source_kind+inference in window."""
+    pool = _FakePool()
+    store = AutoInferencesStore(pool=pool)
+
+    n = await store.recent_for_inference(
+        source_kind="entertainment.left_on",
+        inference="left Living Room TV on for 6.0h past your usual bedtime",
+        hours=6,
+    )
+
+    assert n == 4
+    assert pool.conn.fetchval_args == (
+        "entertainment.left_on",
+        "left Living Room TV on for 6.0h past your usual bedtime",
+        6,
+    )
+
+
+@pytest.mark.asyncio
+async def test_recent_for_inference_returns_zero_on_empty_inputs() -> None:
+    pool = _FakePool()
+    store = AutoInferencesStore(pool=pool)
+
+    assert await store.recent_for_inference(source_kind="", inference="x", hours=6) == 0
+    assert (
+        await store.recent_for_inference(source_kind="x", inference="   ", hours=6) == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_recent_for_inference_returns_zero_with_no_pool() -> None:
+    store = AutoInferencesStore(pool=None)
+    assert (
+        await store.recent_for_inference(source_kind="x", inference="y", hours=6) == 0
+    )

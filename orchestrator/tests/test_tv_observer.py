@@ -118,8 +118,10 @@ async def test_tv_observer_tracks_switch_and_light_tv_entities() -> None:
     observer = _CaptureTv(max_on_hours=1, sleep_times=[time(22, 0)])
 
     await observer.handle(_tv_payload("on", "2026-01-01T21:00:00+00:00", "switch.den_tv_power"))
+    # Use a non-blocklisted monitor light: the bedtime nudge should still
+    # fire for an actual desk-monitor power switch (not a backlight).
     await observer.handle(
-        _tv_payload("on", "2026-01-01T21:00:00+00:00", "light.office_monitor_backlight")
+        _tv_payload("on", "2026-01-01T21:00:00+00:00", "light.office_monitor")
     )
     await observer.handle(
         {
@@ -132,7 +134,7 @@ async def test_tv_observer_tracks_switch_and_light_tv_entities() -> None:
     assert len(observer.emitted) == 2
     assert {item[2]["entity_id"] for item in observer.emitted} == {
         "switch.den_tv_power",
-        "light.office_monitor_backlight",
+        "light.office_monitor",
     }
 
 
@@ -233,3 +235,76 @@ def test_normalize_sleep_windows_pairs_bare_times_with_default_wake() -> None:
 
     windows = _normalize_sleep_windows([time(22, 0), "23:30"])
     assert windows == [(time(22, 0), DEFAULT_WAKE_TIME), (time(23, 30), DEFAULT_WAKE_TIME)]
+
+
+# ── False-positive entity-id keyword blocklist ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_tv_observer_ignores_sound_sensor_with_tv_in_name() -> None:
+    """REGRESSION: switch.sound_sensor_tv_sound_detection triggered
+    'TV left on for 6h' notifications because 'tv' was in the name.
+    The blocklist must reject anything matching 'sound_sensor',
+    'remote_control', 'backlight', etc."""
+    observer = _CaptureTv(max_on_hours=1, sleep_times=[time(22, 0)])
+
+    await observer.handle({
+        "entity_id": "switch.sound_sensor_tv_sound_detection",
+        "state": "on",
+        "ts": "2026-01-01T21:00:00+00:00",
+        "attributes": {"friendly_name": "Sound Sensor TV Sound Detection"},
+    })
+    await observer.handle(
+        _tv_payload("paused", "2026-01-01T22:05:00+00:00")
+    )
+
+    # The sound sensor must not show up; only the real TV (none in this
+    # test, since we only fed in a sound sensor) should be tracked.
+    assert all(
+        e[2]["entity_id"] != "switch.sound_sensor_tv_sound_detection"
+        for e in observer.emitted
+    )
+
+
+@pytest.mark.asyncio
+async def test_tv_observer_ignores_tv_remote_control_and_indicators() -> None:
+    """All known false-positive keywords must be filtered."""
+    observer = _CaptureTv(max_on_hours=1, sleep_times=[time(22, 0)])
+    false_positives = [
+        ("switch.living_room_tv_remote_control", "TV Remote Control"),
+        ("light.tv_backlight", "TV Backlight"),
+        ("switch.tv_indicator", "TV Indicator"),
+        ("switch.tv_status_led", "TV Status LED"),
+        ("light.bias_light_tv", "Bias Light TV"),
+        ("sensor.tv_energy", "TV Energy"),
+    ]
+    for entity_id, fname in false_positives:
+        await observer.handle({
+            "entity_id": entity_id,
+            "state": "on",
+            "ts": "2026-01-01T21:00:00+00:00",
+            "attributes": {"friendly_name": fname},
+        })
+    await observer.handle(_tv_payload("paused", "2026-01-01T22:05:00+00:00"))
+
+    tracked_ids = {e[2]["entity_id"] for e in observer.emitted}
+    for entity_id, _ in false_positives:
+        assert entity_id not in tracked_ids, f"{entity_id} must be filtered"
+
+
+@pytest.mark.asyncio
+async def test_tv_observer_still_tracks_legitimate_tv_switch() -> None:
+    """The blocklist must not over-fire — a legitimate switch with
+    'tv' in the name (e.g. switch.den_tv_power) MUST still be tracked."""
+    observer = _CaptureTv(max_on_hours=1, sleep_times=[time(22, 0)])
+
+    await observer.handle({
+        "entity_id": "switch.den_tv_power",
+        "state": "on",
+        "ts": "2026-01-01T21:00:00+00:00",
+        "attributes": {"friendly_name": "Den TV Power"},
+    })
+    await observer.handle(_tv_payload("paused", "2026-01-01T22:05:00+00:00"))
+
+    tracked_ids = {e[2]["entity_id"] for e in observer.emitted}
+    assert "switch.den_tv_power" in tracked_ids

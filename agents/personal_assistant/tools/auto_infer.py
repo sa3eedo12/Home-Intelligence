@@ -24,6 +24,13 @@ SKIP_KINDS = {
 }
 DEFAULT_MIN_CONFIDENCE = 0.5
 DEFAULT_HOURLY_CAP = 5
+# Cross-entity / cross-time dedup window for rule-based inferences.
+# A "TV left on past bedtime" event firing from 4 different HA entities
+# (media_player + 2 switches + 1 sensor for one physical TV) should
+# collapse to a single auto_inference. 6h is generous enough to absorb
+# observer-cooldown bursts but short enough that "left TV on" tomorrow
+# evening is still allowed to fire.
+DEDUP_LOOKBACK_HOURS = 6
 UNUSUAL_TERMS = (
     "unusual",
     "unexpected",
@@ -242,10 +249,20 @@ def _summary_for(inference: str, envelope: dict[str, Any], reason: str) -> str:
 # stop — skip the LLM entirely and emit a high-confidence inference straight
 # from the envelope. The LLM stays as the fallback for novel kinds.
 #
-# Each producer takes the envelope and returns ``(inference, confidence,
-# rule_id)`` if it can interpret the event, or ``None`` to defer to the LLM.
+# Each producer takes the envelope and returns
+# ``(inference, confidence, rule_id, dedup_key)`` if it can interpret the
+# event, or ``None`` to defer to the LLM.
+#
+# dedup_key is a stable signature INDEPENDENT of HA entity-id quirks: the
+# same physical TV often surfaces as multiple entities (media_player,
+# switch.power, sensor.sound_detection) and each fires a separate
+# observer event. Without a per-device dedup key the auto_infer would
+# persist 3-4 near-identical rows for one real "TV left on" situation.
 
-RuleProducer = Callable[[dict[str, Any]], "tuple[str, float, str] | None"]
+RuleProducer = Callable[
+    [dict[str, Any]],
+    "tuple[str, float, str, str] | None",
+]
 
 
 def _hh_mm(ts: Any) -> str:
@@ -265,7 +282,9 @@ def _coerce_float(value: Any) -> float | None:
         return None
 
 
-def _entertainment_left_on_rule(envelope: dict[str, Any]) -> tuple[str, float, str] | None:
+def _entertainment_left_on_rule(
+    envelope: dict[str, Any],
+) -> tuple[str, float, str, str] | None:
     payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
     name = (
         payload.get("friendly_name")
@@ -283,24 +302,53 @@ def _entertainment_left_on_rule(envelope: dict[str, Any]) -> tuple[str, float, s
         text = f"left {name} on for {on_hours:.1f}h{suffix}"
     else:
         text = f"left {name} on{suffix}"
-    return text, 0.85, "rule:entertainment.left_on"
+    # Dedup key: collapse all entities of any single TV into one signature.
+    # 'past_bedtime' from any of 4 entity_ids → same key → only one
+    # auto_inference persisted per evening.
+    dedup_key = f"entertainment.left_on:{reason or 'unknown'}"
+    return text, 0.85, "rule:entertainment.left_on", dedup_key
 
 
-def _sleep_likely_asleep_rule(envelope: dict[str, Any]) -> tuple[str, float, str] | None:
+def _sleep_likely_asleep_rule(
+    envelope: dict[str, Any],
+) -> tuple[str, float, str, str] | None:
     when = _hh_mm(envelope.get("ts")) or "tonight"
-    return f"went to bed around {when}", 0.7, "rule:sleep.likely_asleep"
+    return (
+        f"went to bed around {when}",
+        0.7,
+        "rule:sleep.likely_asleep",
+        f"sleep.likely_asleep:{when}",
+    )
 
 
-def _sleep_likely_awake_rule(envelope: dict[str, Any]) -> tuple[str, float, str] | None:
+def _sleep_likely_awake_rule(
+    envelope: dict[str, Any],
+) -> tuple[str, float, str, str] | None:
     when = _hh_mm(envelope.get("ts")) or "this morning"
-    return f"woke up around {when}", 0.7, "rule:sleep.likely_awake"
+    return (
+        f"woke up around {when}",
+        0.7,
+        "rule:sleep.likely_awake",
+        f"sleep.likely_awake:{when}",
+    )
 
 
-def _anomaly_detected_rule(envelope: dict[str, Any]) -> tuple[str, float, str] | None:
+def _anomaly_detected_rule(
+    envelope: dict[str, Any],
+) -> tuple[str, float, str, str] | None:
     summary = str(envelope.get("summary") or "").strip().rstrip(".")
     if not summary:
         return None
-    return f"saw something unusual: {summary}", 0.65, "rule:anomaly.detected"
+    # Dedup key: anomaly_type from payload, fall back to first 50 chars of
+    # summary so the same anomaly firing repeatedly only proposes once.
+    payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+    anomaly_type = str(payload.get("anomaly_type") or summary[:50])
+    return (
+        f"saw something unusual: {summary}",
+        0.65,
+        "rule:anomaly.detected",
+        f"anomaly.detected:{anomaly_type}",
+    )
 
 
 RULE_BASED_INFERENCES: dict[str, RuleProducer] = {
@@ -313,8 +361,12 @@ RULE_BASED_INFERENCES: dict[str, RuleProducer] = {
 
 def _rule_based_inference(
     envelope: dict[str, Any],
-) -> tuple[str, float, str] | None:
-    """Return the deterministic inference for ``envelope.kind``, if any."""
+) -> tuple[str, float, str, str] | None:
+    """Return the deterministic inference for ``envelope.kind``, if any.
+
+    Returns a 4-tuple (inference, confidence, rule_id, dedup_key) where
+    dedup_key is a stable signature for cross-entity dedup.
+    """
     kind = str(envelope.get("kind") or "").strip()
     producer = RULE_BASED_INFERENCES.get(kind)
     if producer is None:
@@ -487,8 +539,9 @@ async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
     # what closes the auto_inferences=0 gap — the LLM's prompt is biased
     # toward refusing every event, but for known kinds we don't need it at all.
     rule = _rule_based_inference(envelope)
+    dedup_key: str | None = None
     if rule is not None:
-        inference, confidence, rule_id = rule
+        inference, confidence, rule_id, dedup_key = rule
         proposed_action = _build_record_event_action(inference, envelope, rule_id)
         inference_source = rule_id
     else:
@@ -504,6 +557,37 @@ async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
         inference = str(inference_result.get("inference") or "").strip()
         proposed_action = _normalize_action(inference_result.get("proposed_action"))
         inference_source = "llm"
+
+    # Cross-entity dedup: when the rule path emits a stable dedup_key,
+    # check whether the same signature was already persisted in the last
+    # DEDUP_HOURS hours and skip if so. Without this, one physical TV
+    # exposed as 4 HA entities produces 4 near-identical inferences for
+    # one real "TV left on" situation. dedup_key is None on the LLM path
+    # (text varies too much to be a reliable signature there).
+    if dedup_key is not None:
+        try:
+            existing = await store.recent_for_inference(
+                source_kind=source_kind,
+                inference=inference,
+                hours=DEDUP_LOOKBACK_HOURS,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("auto_infer_dedup_lookup_failed", error=str(exc))
+            existing = 0
+        if existing > 0:
+            logger.info(
+                "auto_infer_skipped",
+                source_kind=source_kind,
+                reason="dedup_within_window",
+                dedup_key=dedup_key,
+                existing=existing,
+            )
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "dedup_within_window",
+                "dedup_key": dedup_key,
+            }
 
     min_conf = _adjusted_min_confidence(corrections)
     if (
