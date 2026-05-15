@@ -261,6 +261,52 @@ class ReflectionStore:
                 return 0
         return int(value or 0)
 
+    async def proposal_dismissal_signal(
+        self, *, kind: str, days: int = 14
+    ) -> dict[str, int]:
+        """Return {dismissed, accepted, auto_confirmed} counts for ``kind``
+        in the last ``days`` days.
+
+        Used by the proposal feedback loop: if the user keeps dismissing
+        proposals of a given kind, the reflector should back off on
+        emitting more of them. Same shape as
+        ``AutoInferencesStore.correction_counts`` so the calling code
+        looks symmetric across the two layers.
+        """
+        empty = {"dismissed": 0, "accepted": 0, "auto_confirmed": 0}
+        if not kind or not kind.strip():
+            return dict(empty)
+        async with self._connection("proposal_dismissal_signal") as conn:
+            if conn is None:
+                return dict(empty)
+            try:
+                rows = await conn.fetch(
+                    """
+                    SELECT status, count(*)::int AS n
+                      FROM proposals
+                     WHERE kind = $1
+                       AND status IN ('dismissed', 'accepted', 'auto_confirmed')
+                       AND COALESCE(resolved_at, created_at) >= now()
+                           - ($2::int * interval '1 day')
+                     GROUP BY status
+                    """,
+                    kind.strip(),
+                    max(1, min(days, 90)),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "reflection_store_query_failed",
+                    operation="proposal_dismissal_signal",
+                    error=str(exc),
+                )
+                return dict(empty)
+        out = dict(empty)
+        for row in rows:
+            status = str(row["status"])
+            if status in out:
+                out[status] = int(row["n"])
+        return out
+
     async def add_proposal(
         self,
         *,

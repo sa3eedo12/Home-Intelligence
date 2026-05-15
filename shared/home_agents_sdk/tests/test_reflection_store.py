@@ -193,3 +193,59 @@ async def test_count_proposals_returns_zero_on_db_error() -> None:
 async def test_count_proposals_returns_zero_when_no_pool() -> None:
     store = ReflectionStore(None)
     assert await store.count_proposals(status="pending") == 0
+
+
+# ── Proposal dismissal-signal feedback loop ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_proposal_dismissal_signal_returns_per_status_breakdown() -> None:
+    conn = MagicMock()
+    conn.fetch = AsyncMock(
+        return_value=[
+            {"status": "dismissed", "n": 6},
+            {"status": "accepted", "n": 1},
+        ]
+    )
+    store = ReflectionStore(_pool_with(conn))
+
+    signal = await store.proposal_dismissal_signal(kind="code_change", days=14)
+
+    assert signal == {"dismissed": 6, "accepted": 1, "auto_confirmed": 0}
+    assert conn.fetch.await_args.args[-2:] == ("code_change", 14)
+
+
+@pytest.mark.asyncio
+async def test_proposal_dismissal_signal_returns_zeros_on_empty_kind() -> None:
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[])
+    store = ReflectionStore(_pool_with(conn))
+
+    signal = await store.proposal_dismissal_signal(kind="   ", days=14)
+
+    assert signal == {"dismissed": 0, "accepted": 0, "auto_confirmed": 0}
+    conn.fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_proposal_dismissal_signal_returns_zeros_on_db_error() -> None:
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=Exception("db down"))
+    store = ReflectionStore(_pool_with(conn))
+
+    signal = await store.proposal_dismissal_signal(kind="cleanup_action")
+    assert signal == {"dismissed": 0, "accepted": 0, "auto_confirmed": 0}
+
+
+@pytest.mark.asyncio
+async def test_proposal_dismissal_signal_clamps_days_window() -> None:
+    """Bounded between 1 and 90 days so a malformed call can't query
+    infinite history."""
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[])
+    store = ReflectionStore(_pool_with(conn))
+
+    await store.proposal_dismissal_signal(kind="x", days=0)
+    assert conn.fetch.await_args.args[-1] == 1
+    await store.proposal_dismissal_signal(kind="x", days=9999)
+    assert conn.fetch.await_args.args[-1] == 90

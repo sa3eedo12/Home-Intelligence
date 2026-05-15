@@ -199,6 +199,87 @@ def _slug(value: str) -> str:
     return slug[:48] or "habit"
 
 
+# Words/phrases that signal a code_change proposal is grounded in a
+# real, measurable problem rather than speculative ("might be a
+# problem"). The reflector LLM is too eager to suggest jitter / caching
+# / retry caps for normal traffic; gate code_change behind one of these.
+_CONCRETE_PROBLEM_TERMS = (
+    "error",
+    "exception",
+    "traceback",
+    "stack trace",
+    "crashed",
+    "crash",
+    "panic",
+    "failed",
+    "failure",
+    "timeout",
+    "timed out",
+    "5xx",
+    "500 ",
+    "503",
+    "504",
+    "regression",
+    "spike",
+    "leak",
+    "deadlock",
+    "stuck",
+    "hung",
+    "data loss",
+    "duplicate ",
+    "missing ",
+    "incorrect",
+)
+# Speculation markers — when the rationale leans on these without any
+# concrete-problem term, it's the LLM guessing at improvements.
+_SPECULATIVE_TERMS = (
+    "potential",
+    "may indicate",
+    "might indicate",
+    "could be",
+    "could indicate",
+    "suggests a potential",
+    "thundering herd",
+    "if this pattern",
+    "if these result",
+    "if other agents",
+    "to prevent",
+    "to optimize",
+    "to avoid",
+)
+MIN_CODE_CHANGE_EVIDENCE = 5
+# Per-kind back-off: if the user has dismissed >= N proposals of a given
+# kind in the last M days WITHOUT accepting any, the reflector pauses
+# emitting more of that kind. Closes the observe -> infer -> CORRECT
+# loop for the proposal layer (mirrors auto_infer's correction memory).
+PROPOSAL_BACKOFF_DISMISSALS = 5
+PROPOSAL_BACKOFF_DAYS = 14
+
+
+def _has_concrete_code_change_evidence(
+    rationale: str, evidence_event_ids: list[int]
+) -> bool:
+    """Return True if a code_change proposal is grounded enough to keep.
+
+    Two gates:
+      1. At least MIN_CODE_CHANGE_EVIDENCE distinct event citations.
+         Speculative 'might be a problem' suggestions typically cite
+         3 or fewer events.
+      2. The rationale must contain a concrete-problem term (error,
+         timeout, regression...) OR have NO speculation hedging.
+    """
+    if len(evidence_event_ids) < MIN_CODE_CHANGE_EVIDENCE:
+        return False
+    rationale_lower = rationale.lower()
+    has_concrete = any(term in rationale_lower for term in _CONCRETE_PROBLEM_TERMS)
+    has_speculation = any(term in rationale_lower for term in _SPECULATIVE_TERMS)
+    if has_concrete:
+        return True
+    # No concrete keyword AND no speculation hedging is rare but allowed
+    # — the LLM might just describe the problem in plain language.
+    return not has_speculation
+
+
 class NightlyReflector:
     def __init__(
         self,
@@ -636,10 +717,28 @@ class NightlyReflector:
         if not evidence_event_ids and not evidence_keys:
             logger.warning("reflection_proposal_missing_evidence", title=title)
             return None
+        rationale = str(item.get("rationale") or "").strip()
+        if kind == "code_change" and not _has_concrete_code_change_evidence(
+            rationale, evidence_event_ids
+        ):
+            # Most code_change proposals from the LLM are speculative
+            # ("add jitter", "cap retries", "add caching") with no actual
+            # bug behind them — they cite ~3 events of normal traffic and
+            # invent a 'might be a problem' rationale. Require at least 5
+            # cited events AND a measurable-problem keyword in the
+            # rationale, so we only persist code_change suggestions that
+            # actually point to evidence of a real problem.
+            logger.info(
+                "reflection_proposal_filtered_speculative",
+                title=title,
+                evidence_count=len(evidence_event_ids),
+                kind=kind,
+            )
+            return None
         return {
             "kind": kind,
             "title": title,
-            "rationale": str(item.get("rationale") or "").strip(),
+            "rationale": rationale,
             "evidence_event_ids": evidence_event_ids,
             "evidence_keys": evidence_keys,
             "confidence": _clamp_confidence(item.get("confidence")),
@@ -653,10 +752,37 @@ class NightlyReflector:
         self, proposals: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         applied: list[dict[str, Any]] = []
+        # Per-kind dismissal counts in the last 14 days. If the user has
+        # rejected >= BACKOFF_DISMISSALS proposals of a given kind, we
+        # stop emitting more of that kind for now (they'll resume once
+        # rolling-window dismissals drop below the threshold). Same
+        # 'closes the loop' pattern as user-correction memory in
+        # auto_infer.
+        signal_cache: dict[str, dict[str, int]] = {}
         for proposal in proposals:
+            kind = str(proposal.get("kind") or "")
             evidence_count = len(proposal.get("evidence_event_ids") or []) + len(
                 proposal.get("evidence_keys") or []
             )
+            if kind not in signal_cache:
+                try:
+                    signal_cache[kind] = await self.store.proposal_dismissal_signal(
+                        kind=kind, days=PROPOSAL_BACKOFF_DAYS
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("reflection_proposal_signal_failed", error=str(exc))
+                    signal_cache[kind] = {"dismissed": 0, "accepted": 0, "auto_confirmed": 0}
+            signal = signal_cache[kind]
+            if signal.get("dismissed", 0) >= PROPOSAL_BACKOFF_DISMISSALS and signal.get(
+                "accepted", 0
+            ) + signal.get("auto_confirmed", 0) == 0:
+                logger.info(
+                    "reflection_proposal_backoff",
+                    kind=kind,
+                    title=proposal.get("title"),
+                    signal=signal,
+                )
+                continue
             # Auto-confirm safe inferences with reasonable backing. Tightened
             # in 2026-05: was habit_inference only, threshold 0.95 + 5
             # evidence — too strict (nothing ever qualified). Then 0.85 + 3
@@ -664,7 +790,6 @@ class NightlyReflector:
             # inferences on the floor. Now: 0.75 + 3, which auto-promotes
             # the typical "User likely watches TV around 20:30" kind of
             # signal while still gating obvious guesses (< 0.75).
-            kind = proposal.get("kind") or ""
             auto_confirm = (
                 kind in {"habit_inference", "preference_inference", "routine_inference"}
                 and float(proposal.get("confidence") or 0.0) >= 0.75
