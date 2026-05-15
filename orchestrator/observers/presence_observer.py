@@ -95,6 +95,15 @@ class PresenceObserver(Observer):
         # (or via the dashboard) and changes take effect within a minute,
         # no orchestrator restart required.
         self._member_links: dict[str, str] = {}
+        # Per-member authoritative entity. When a member has a person.*
+        # entity in their tracker list, that's the ONLY entity that fires
+        # presence.changed events for them — individual device_trackers
+        # become silent (still tracked for state consistency, but every
+        # phone/PC/laptop transition stops spamming "Saeed is now home").
+        # Without this, a 5-tracker setup like Saeed's emits a presence
+        # event every time any one device flaps, producing bogus
+        # welcome-home messages and masking real arrivals.
+        self._authoritative_entity_for_member: dict[str, str] = {}
         self._member_links_ts: float = 0.0
 
     async def _refresh_member_links(self) -> None:
@@ -102,6 +111,11 @@ class PresenceObserver(Observer):
 
         Stored under attributes JSONB as either ``["device_tracker.x", ...]``
         or ``{"tracker_entity_ids": ["device_tracker.x", ...]}``.
+
+        Also computes per-member authoritative entity: when a member has a
+        ``person.*`` entity in their list, that becomes the SINGLE source
+        of truth for their presence; other device_trackers stay tracked
+        for state but stop firing emit_event.
         """
         pool = None
         if self.event_log_store is not None:
@@ -117,6 +131,7 @@ class PresenceObserver(Observer):
             self.logger.warning("presence_member_link_query_failed", error=str(exc))
             return
         new_links: dict[str, str] = {}
+        member_to_trackers: dict[str, list[str]] = {}
         for row in rows:
             attrs = row["attributes"] or {}
             if isinstance(attrs, str):
@@ -134,7 +149,16 @@ class PresenceObserver(Observer):
                 tracker_ids = [s.strip() for s in raw.split(",") if s.strip()]
             for eid in tracker_ids:
                 new_links[eid] = row["name"]
+            member_to_trackers[row["name"]] = tracker_ids
+        # Compute per-member authoritative entity
+        new_authority: dict[str, str] = {}
+        for member_name, trackers in member_to_trackers.items():
+            person_entities = [t for t in trackers if domain_of(t) == "person"]
+            if person_entities:
+                # Prefer the first person.* entity — there's normally just one
+                new_authority[member_name] = person_entities[0]
         self._member_links = new_links
+        self._authoritative_entity_for_member = new_authority
         self._member_links_ts = time.monotonic()
 
     async def _ensure_member_links_fresh(self) -> None:
@@ -166,6 +190,22 @@ class PresenceObserver(Observer):
             return
         # Prefer the household_member.name when the entity is linked.
         person = self._member_links.get(change.entity_id) or change.friendly_name
+        # Per-member authority gate: when the member has a person.* entity
+        # linked, ONLY that entity is allowed to fire presence.changed.
+        # Without this, every individual device_tracker.* transition (a
+        # phone leaving WiFi, the saeed_pc going to sleep, etc.) emits
+        # bogus "X is now home/not_home" events even though the
+        # consolidated person.* state hasn't changed.
+        authoritative = self._authoritative_entity_for_member.get(person)
+        if authoritative and change.entity_id != authoritative:
+            self.logger.debug(
+                "presence_emit_suppressed_non_authoritative",
+                person=person,
+                entity_id=change.entity_id,
+                authoritative=authoritative,
+                new_state=new_state,
+            )
+            return
         await self.emit_event(
             "presence.changed",
             f"{person} is now {new_state}",

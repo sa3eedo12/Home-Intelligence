@@ -184,3 +184,101 @@ async def test_presence_hard_blocks_pcs_and_laptops_even_in_allowlist(monkeypatc
         f"PC/laptop entities should be hard-blocked: got "
         f"{[e[1]['entity_id'] for e in observer.emitted]}"
     )
+
+
+# ── Per-member authority — person.* trumps device_tracker.* ─────────────
+
+
+@pytest.mark.asyncio
+async def test_per_member_authority_only_person_entity_fires() -> None:
+    """REGRESSION (Saeed): with 5 trackers linked (person.saeed +
+    saeeds_iphone + saeeds_iphone_2 + saeed_pc + saeed_sp11), every
+    individual device_tracker flap was emitting 'Saeed is now home/
+    not_home' even though person.saeed (the consolidated state) hadn't
+    changed. Result: bogus welcome-home messages, missed real arrivals.
+
+    With the per-member authority gate, only person.saeed is allowed
+    to emit; the other trackers stay silent.
+    """
+    observer = _CapturePresence()
+    observer._member_links = {
+        "person.saeed": "Saeed",
+        "device_tracker.saeeds_iphone": "Saeed",
+        "device_tracker.saeed_sp11": "Saeed",
+    }
+    observer._authoritative_entity_for_member = {"Saeed": "person.saeed"}
+    observer._member_links_ts = 9e18
+
+    # Authoritative entity transitions → emit
+    await observer.handle({
+        "entity_id": "person.saeed",
+        "old_state": "not_home", "state": "home",
+        "ts": "x", "attributes": {"friendly_name": "Saeed"},
+    })
+
+    # Non-authoritative trackers transition → suppress
+    await observer.handle({
+        "entity_id": "device_tracker.saeeds_iphone",
+        "old_state": "home", "state": "not_home",
+        "ts": "x", "attributes": {"friendly_name": "Saeed iPhone"},
+    })
+    await observer.handle({
+        "entity_id": "device_tracker.saeed_sp11",
+        "old_state": "home", "state": "not_home",
+        "ts": "x", "attributes": {"friendly_name": "Saeed SP11"},
+    })
+
+    assert len(observer.emitted) == 1
+    assert observer.emitted[0][1]["entity_id"] == "person.saeed"
+    assert observer.emitted[0][1]["state"] == "home"
+
+
+@pytest.mark.asyncio
+async def test_no_authority_means_all_trackers_can_emit() -> None:
+    """When a member has NO person.* in their tracker list, every
+    individual device_tracker remains authoritative — backwards-
+    compatible with the simpler setups."""
+    observer = _CapturePresence()
+    observer._member_links = {
+        "device_tracker.jude_phone": "Jude",
+    }
+    observer._authoritative_entity_for_member = {}  # no person.* linked
+    observer._member_links_ts = 9e18
+
+    await observer.handle({
+        "entity_id": "device_tracker.jude_phone",
+        "old_state": "not_home", "state": "home",
+        "ts": "x", "attributes": {"friendly_name": "Jude Phone"},
+    })
+
+    assert len(observer.emitted) == 1
+    assert observer.emitted[0][1]["person"] == "Jude"
+
+
+@pytest.mark.asyncio
+async def test_authority_gate_does_not_block_unrelated_members() -> None:
+    """A non-authoritative tracker for member A doesn't block a
+    legitimate transition for member B."""
+    observer = _CapturePresence()
+    observer._member_links = {
+        "person.saeed": "Saeed",
+        "device_tracker.saeeds_iphone": "Saeed",
+        "device_tracker.jude_phone": "Jude",
+    }
+    observer._authoritative_entity_for_member = {"Saeed": "person.saeed"}
+    observer._member_links_ts = 9e18
+
+    # Saeed's iphone (not authoritative) → suppress
+    await observer.handle({
+        "entity_id": "device_tracker.saeeds_iphone",
+        "old_state": "home", "state": "not_home",
+        "ts": "x", "attributes": {"friendly_name": "Saeed iPhone"},
+    })
+    # Jude's phone (no person.* linked → authoritative by default) → emit
+    await observer.handle({
+        "entity_id": "device_tracker.jude_phone",
+        "old_state": "not_home", "state": "home",
+        "ts": "x", "attributes": {"friendly_name": "Jude Phone"},
+    })
+
+    assert [e[1]["person"] for e in observer.emitted] == ["Jude"]

@@ -147,13 +147,44 @@ def _habitual_label(history: list[str]) -> tuple[str | None, str]:
     return None, ""
 
 
+def _guess_from_cycle_name(cycle_name: str | None) -> tuple[str | None, str]:
+    """Map an authoritative HA cycle-name sensor value to a canonical label.
+
+    Where ``_guess_from_program`` is a fuzzy keyword match on whatever
+    arbitrary attribute the integration exposes, this is the explicit
+    cycle-name sensor (e.g. ``sensor.washer_cycle = "Colors"``) wired
+    in by the user. A direct hit on a CANDIDATE_LABEL maps 1:1, then we
+    fall through to the program-keyword logic.
+    """
+    if not cycle_name:
+        return None, ""
+    text = cycle_name.casefold().strip()
+    for label in CANDIDATE_LABELS:
+        if label in text or text in label:
+            return label, f"cycle name '{cycle_name}' matches '{label}'"
+    # Fall back to fuzzy keyword detection on the cycle name.
+    label, reason = _guess_from_program(cycle_name)
+    if label:
+        return label, f"cycle name '{cycle_name}' → {reason}"
+    return None, ""
+
+
 def _infer(
     *,
     duration_seconds: int | None,
     program: str | None,
     history: list[str],
+    cycle_name: str | None = None,
 ) -> tuple[str, float, str]:
-    """Combine signals into a single best guess + confidence + reasoning blob."""
+    """Combine signals into a single best guess + confidence + reasoning blob.
+
+    Order of preference:
+      1. cycle_name (HA cycle sensor wired in by user) → confidence 0.95
+      2. program (fuzzy attribute heuristic) → confidence 0.75
+      3. duration bucket → confidence 0.55
+      4. habitual override (only bumps when it agrees) → +0.10
+    """
+    cycle_label, cycle_reason = _guess_from_cycle_name(cycle_name)
     program_label, program_reason = _guess_from_program(program)
     duration_label, duration_reason = _bucket_for_duration(duration_seconds)
     habit_label, habit_reason = _habitual_label(history)
@@ -162,8 +193,16 @@ def _infer(
     label: str | None = None
     confidence = 0.0
 
-    # Strongest signal: the user wrote the program name on the washer panel.
-    if program_label:
+    # Strongest signal: HA cycle-name sensor reported by the appliance itself.
+    if cycle_label:
+        label = cycle_label
+        confidence = 0.95
+        reasons.append(cycle_reason)
+        if duration_label and duration_label != cycle_label:
+            # Mild penalty for disagreement — still take the cycle name.
+            reasons.append(f"(duration suggested {duration_label}, deferring to cycle name)")
+    # Next strongest: the user wrote the program name on the washer panel.
+    elif program_label:
         label = program_label
         confidence = 0.75
         reasons.append(program_reason)
@@ -231,6 +270,8 @@ async def infer_cycle_load(
     entity_id = data.get("entity_id")
     program_raw = data.get("program")
     program = str(program_raw) if program_raw not in (None, "") else None
+    cycle_name_raw = data.get("cycle_name")
+    cycle_name = str(cycle_name_raw) if cycle_name_raw not in (None, "") else None
     brand_raw = data.get("brand")
     brand = str(brand_raw) if brand_raw not in (None, "") else None
     duration_seconds = _coerce_int(data.get("duration_seconds"))
@@ -247,6 +288,7 @@ async def infer_cycle_load(
         duration_seconds=duration_seconds,
         program=program,
         history=history,
+        cycle_name=cycle_name,
     )
     cycle_load_id = await store.insert_guess(
         appliance=appliance,

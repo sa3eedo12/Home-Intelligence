@@ -152,3 +152,88 @@ async def test_washer_does_not_dedup_across_different_devices() -> None:
     for eid, name in entities:
         await observer.handle(_payload_for(eid, "stop", "2026-01-01T09:30:00+00:00", name))
     assert len(observer.emitted) == 2
+
+
+# ── Cycle-name capture from sensor.<x>_cycle ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_washer_observer_captures_cycle_name_into_payload() -> None:
+    """User wired sensor.washer_cycle in HA which exposes the actual
+    cycle name (e.g. 'Colors', 'Bedding'). The observer should remember
+    it and attach it to the cycle_completed payload so the inference
+    layer doesn't have to guess from duration."""
+    observer = _CaptureWasher()
+
+    # The HA sensor.washer_cycle goes from idle → "Colors" before the
+    # cycle starts running.
+    await observer.handle({
+        "entity_id": "sensor.washer_cycle",
+        "old_state": "none",
+        "state": "Colors",
+        "ts": "2026-05-15T10:00:00+00:00",
+        "attributes": {"friendly_name": "Washer Cycle"},
+    })
+    # Then the canonical machine_state goes to running.
+    await observer.handle({
+        "entity_id": "sensor.washer_machine_state",
+        "old_state": "stop",
+        "state": "run",
+        "ts": "2026-05-15T10:00:30+00:00",
+        "attributes": {"friendly_name": "Washer Machine state"},
+    })
+    # Cycle completes.
+    await observer.handle({
+        "entity_id": "sensor.washer_machine_state",
+        "old_state": "run",
+        "state": "stop",
+        "ts": "2026-05-15T11:30:00+00:00",
+        "attributes": {"friendly_name": "Washer Machine state"},
+    })
+
+    # The cycle_completed event should carry cycle_name AND have it in
+    # the program field (program=cycle_name when both supplied) so the
+    # inference layer prefers it.
+    completions = [e for e in observer.emitted if e[0] == "appliance.cycle_completed"]
+    assert len(completions) == 1
+    payload = completions[0][2]
+    assert payload["cycle_name"] == "Colors"
+    assert payload["program"] == "Colors"
+
+
+@pytest.mark.asyncio
+async def test_washer_observer_ignores_garbage_cycle_states() -> None:
+    """sensor.<x>_cycle = 'none' / 'unknown' / 'unavailable' must not
+    overwrite a previously valid name."""
+    observer = _CaptureWasher()
+
+    await observer.handle({
+        "entity_id": "sensor.washer_cycle",
+        "old_state": "none",
+        "state": "Bedding",
+        "ts": "2026-05-15T10:00:00+00:00",
+        "attributes": {"friendly_name": "Washer Cycle"},
+    })
+    await observer.handle({
+        "entity_id": "sensor.washer_cycle",
+        "old_state": "Bedding",
+        "state": "unknown",
+        "ts": "2026-05-15T10:00:01+00:00",
+        "attributes": {"friendly_name": "Washer Cycle"},
+    })
+    await observer.handle({
+        "entity_id": "sensor.washer_machine_state",
+        "old_state": "stop",
+        "state": "run",
+        "ts": "2026-05-15T10:00:30+00:00",
+        "attributes": {"friendly_name": "Washer Machine state"},
+    })
+    await observer.handle({
+        "entity_id": "sensor.washer_machine_state",
+        "old_state": "run",
+        "state": "stop",
+        "ts": "2026-05-15T11:30:00+00:00",
+        "attributes": {"friendly_name": "Washer Machine state"},
+    })
+    payload = observer.emitted[-1][2]
+    assert payload["cycle_name"] == "Bedding"

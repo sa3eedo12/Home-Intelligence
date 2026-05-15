@@ -276,3 +276,102 @@ async def test_infer_cycle_load_kwargs_override_payload(
         program="Delicates",
     )
     assert captured["program"] == "Delicates"
+
+
+# ── Authoritative cycle_name signal ──────────────────────────────────────
+
+
+def test_cycle_name_is_strongest_signal() -> None:
+    """When sensor.washer_cycle reports 'Bedding', the inference should
+    take it directly with high confidence — even if duration would
+    suggest something else."""
+    label, conf, reason = _infer(
+        duration_seconds=40 * 60,  # would map to 'delicates'
+        program=None,
+        history=[],
+        cycle_name="Bedding",
+    )
+    assert label == "bedding"
+    assert conf >= 0.9
+    assert "cycle name 'Bedding'" in reason
+
+
+def test_cycle_name_falls_through_to_program_keywords_for_fuzzy_names() -> None:
+    """Samsung's 'Bubble Soak Color Care' should still resolve via the
+    fuzzy program-keyword map when no direct CANDIDATE_LABEL match."""
+    label, conf, reason = _infer(
+        duration_seconds=60 * 60,
+        program=None,
+        history=[],
+        cycle_name="Bubble Soak Color Care",
+    )
+    assert label == "colors"
+    assert conf >= 0.9
+    assert "cycle name" in reason
+
+
+def test_no_cycle_name_falls_back_to_program_path() -> None:
+    """Unchanged backwards-compat: when cycle_name is None, the program
+    + duration logic still works as before."""
+    label, conf, reason = _infer(
+        duration_seconds=2700,
+        program="Cotton",
+        history=[],
+        cycle_name=None,
+    )
+    assert label == "colors"
+    assert conf >= 0.7
+    assert "program 'Cotton'" in reason
+
+
+def test_cycle_name_unknown_falls_through_to_duration() -> None:
+    """A cycle name we can't match shouldn't lock in a wrong label."""
+    label, conf, reason = _infer(
+        duration_seconds=2700,
+        program=None,
+        history=[],
+        cycle_name="MyCustomMode42",
+    )
+    # No match → duration takes over
+    assert label == "colors"
+    assert conf < 0.95
+
+
+@pytest.mark.asyncio
+async def test_infer_cycle_load_persists_cycle_name(monkeypatch) -> None:
+    """End-to-end: when the observer envelope carries cycle_name,
+    infer_cycle_load uses it AND records it in the persisted row."""
+    from tools.cycle_loads import infer_cycle_load
+
+    captured: dict = {}
+
+    class FakeStore:
+        def __init__(self, pool: object) -> None:
+            self.pool = pool
+
+        async def confirmed_label_history(self, *, appliance: str, limit: int = 15):
+            return []
+
+        async def insert_guess(self, **kwargs: object) -> int:
+            captured.update(kwargs)
+            return 50
+
+    async def fake_pool() -> object:
+        return object()
+
+    monkeypatch.setattr("tools.cycle_loads._pool", fake_pool)
+    monkeypatch.setattr("tools.cycle_loads.CycleLoadsStore", FakeStore)
+
+    result = await infer_cycle_load(
+        appliance="washer",
+        entity_id="sensor.washer_machine_state",
+        duration_seconds=5400,
+        cycle_name="Bedding",
+        ended_at="2026-05-15T11:00:00Z",
+    )
+
+    assert result["ok"] is True
+    assert result["confidence"] >= 0.9
+    # Persisted reasoning trail mentions the cycle name
+    assert "cycle name" in captured["guessed_reasoning"].lower()
+    assert captured["guessed_label"] == "bedding"
