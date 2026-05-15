@@ -412,11 +412,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         return await advisor.run_once()
 
     async def _send_reflection_digest(inputs: dict[str, Any]) -> dict[str, Any]:
-        # Wake-time-relative gating: when called by the scheduler (no chat_id
-        # in inputs) we only fire if NOW is within ``minutes_after_wake`` of
-        # any member's wake_time AND we haven't already sent today. Manual
-        # invocation (with chat_id) bypasses both checks so /admin endpoints
-        # and explicit user requests still work.
+        """Generate (if needed) + send the morning brief.
+
+        Delivery model (user explicit ask): the brief should NEVER be silently
+        dropped. The scheduler runs this every 15 min. Logic per call:
+
+          - Manual invocation (chat_id in inputs OR force=True) → just send
+            (used by /admin/run-job and explicit user requests).
+          - Otherwise: if today's brief was already sent, skip silently.
+          - Otherwise: ensure a brief exists for today (run_once if needed).
+          - Otherwise: if any member is past their wake_time, deliver the
+            brief now (or as soon as quiet hours end — the brief.morning
+            topic is whitelisted in policies.allow_during_quiet so the
+            policy engine lets it through immediately at wake_time).
+          - Otherwise (still pre-wake): skip with reason='before_wake' — the
+            next 15-min tick will re-check.
+
+        Net effect: if quiet hours run 00:30 → 09:00 and wake_time is 09:00,
+        the brief generates whenever the cron fires (06:30) and waits in
+        the queue until 09:00, then lands in your Telegram chat at the first
+        post-09:00 scheduler tick.
+        """
         from .member_windows import (
             already_fired_today,
             any_member_in_post_wake,
@@ -427,24 +443,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         manual_chat_id = inputs.get("chat_id")
         force = bool(inputs.get("force"))
         if manual_chat_id is None and not force:
+            if await already_fired_today(redis, "morning_brief.send"):
+                return {"ok": True, "skipped": True, "reason": "already_sent_today"}
+            # Wide window: any time from wake_time onwards counts. We want
+            # the brief to land as soon as the user is plausibly awake even
+            # if they slept past the usual hour. The 15-min scheduler tick
+            # will keep retrying until success or a fresh day rolls over.
             try:
-                minutes_after = int(os.environ.get("MORNING_BRIEF_AFTER_WAKE_MIN", "30"))
+                window_minutes = int(os.environ.get("MORNING_BRIEF_WINDOW_MIN", "720"))  # 12h
             except ValueError:
-                minutes_after = 30
-            try:
-                window_minutes = int(os.environ.get("MORNING_BRIEF_WINDOW_MIN", "60"))
-            except ValueError:
-                window_minutes = 60
+                window_minutes = 720
             windows = await load_member_windows(pool)
             member = (
-                any_member_in_post_wake(windows, minutes_after=minutes_after + window_minutes)
+                any_member_in_post_wake(windows, minutes_after=window_minutes)
                 if windows
                 else None
             )
             if windows and member is None:
-                return {"ok": True, "skipped": True, "reason": "outside_wake_window"}
-            if await already_fired_today(redis, "morning_brief.send"):
-                return {"ok": True, "skipped": True, "reason": "already_sent_today"}
+                return {"ok": True, "skipped": True, "reason": "before_wake"}
 
         tg_app_ref = tg_app_holder.get("app")
         if tg_app_ref is None:
@@ -577,6 +593,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     activity_aggregator = ActivityAggregator(redis)
     await activity_aggregator.start()
+    # Expose a coroutine the SSE stream can poll for live "Who's home"
+    # updates. Without this, dashboard.html.j2's people_home string was
+    # rendered server-side at page load and never updated; users who left
+    # the house kept showing as home until they manually refreshed.
+    app.state.people_home_fetch = lambda: _people_home(app)
 
     async def _warm_models() -> None:
         """Send a tiny inference to Ollama on startup so the first user

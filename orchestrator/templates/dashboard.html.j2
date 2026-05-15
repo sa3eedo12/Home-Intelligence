@@ -66,7 +66,7 @@
           </div>
           <time id="current-time" class="current-time">--:--</time>
           <div class="hero-facts">
-            <span><strong>Who's home</strong>{{ people_home|join(', ') if people_home else 'Presence learning' }}</span>
+            <span><strong>Who's home</strong><span id="people-home-value" data-empty-text="Presence learning">{{ people_home|join(', ') if people_home else 'Presence learning' }}</span></span>
             <span><strong>Quiet</strong>{{ status.quiet_override or 'auto' }}</span>
           </div>
           <article class="narrative hero-narrative" id="curator-narrative" aria-live="polite">

@@ -14,6 +14,7 @@
   const haBridgeProblem = document.getElementById('ha-bridge-problem');
   const observationsList = document.getElementById('observations-list');
   const observationsCount = document.getElementById('observations-count');
+  const peopleHomeValue = document.getElementById('people-home-value');
   const policiesDetails = document.getElementById('active-policies');
   const policiesJson = document.getElementById('policies-json');
   const policiesStatus = document.getElementById('policies-status');
@@ -194,6 +195,13 @@
     if (lastUpdated && record.generated_at) lastUpdated.textContent = record.generated_at;
   }
 
+  function applyPresence(event) {
+    if (!peopleHomeValue) return;
+    const list = Array.isArray(event.people_home) ? event.people_home : [];
+    const empty = peopleHomeValue.dataset.emptyText || 'Presence learning';
+    peopleHomeValue.textContent = list.length > 0 ? list.join(', ') : empty;
+  }
+
   function renderHaBridge(status) {
     const enabled = status.enabled !== false;
     const connected = Boolean(status.connected);
@@ -332,6 +340,7 @@
     es.addEventListener('snapshot', (msg) => { try { (JSON.parse(msg.data).agents || []).forEach(applyTileSnapshot); } catch (_e) { /* ignore */ } });
     es.addEventListener('activity', (msg) => { try { applyActivityEvent(JSON.parse(msg.data)); } catch (_e) { /* ignore */ } });
     es.addEventListener('curator', (msg) => { try { applyCurator(JSON.parse(msg.data)); } catch (_e) { /* ignore */ } });
+    es.addEventListener('presence', (msg) => { try { applyPresence(JSON.parse(msg.data)); } catch (_e) { /* ignore */ } });
     es.addEventListener('heartbeat', () => setConn('online', 'live'));
   }
 

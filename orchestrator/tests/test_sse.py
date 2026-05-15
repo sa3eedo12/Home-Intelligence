@@ -64,3 +64,80 @@ async def test_sse_initial_snapshot_event_format() -> None:
 # multiplexer is unreliable due to fakeredis blocking-xread semantics, so we
 # do not duplicate that coverage here.
 
+
+
+# ── Presence event stream (regression) ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sse_emits_presence_event_when_people_home_changes() -> None:
+    """REGRESSION: dashboard's 'Who's home' string was rendered server-side
+    and never updated. User left house at 21:00, dashboard kept showing
+    them as home for hours. SSE now polls people_home_fetch and pushes
+    a 'presence' event whenever the list changes."""
+    fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    agg = ActivityAggregator(fake)
+    await agg.start()
+
+    # Fake fetcher that flips after first call to simulate "user left"
+    state = {"calls": 0}
+
+    async def fake_people_home() -> list[str]:
+        state["calls"] += 1
+        return ["Saeed"] if state["calls"] == 1 else []
+
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            activity_aggregator=agg,
+            redis=fake,
+            people_home_fetch=fake_people_home,
+        )
+    )
+    request = _FakeRequest(app)
+
+    response = await dashboard_stream(request)
+    body_iter = response.body_iterator.__aiter__()
+
+    # Drain events until we see a presence event with Saeed home, then
+    # one with empty list.
+    seen_presence: list[list[str]] = []
+    try:
+        for _ in range(40):  # generous bound
+            chunk = await body_iter.__anext__()
+            if isinstance(chunk, (bytes, bytearray)):
+                chunk = chunk.decode("utf-8")
+            if "event: presence" in chunk:
+                data_line = next(
+                    line for line in chunk.splitlines() if line.startswith("data:")
+                )
+                data = json.loads(data_line[5:].strip())
+                seen_presence.append(data.get("people_home", []))
+                if len(seen_presence) >= 2:
+                    request._disconnected = True
+                    break
+    finally:
+        request._disconnected = True
+
+    assert len(seen_presence) >= 2
+    assert seen_presence[0] == ["Saeed"]
+    assert seen_presence[1] == []
+
+
+@pytest.mark.asyncio
+async def test_sse_no_presence_event_without_fetch_provider() -> None:
+    """When people_home_fetch is not wired (older deployments / tests)
+    the SSE stream still works, just without presence events."""
+    fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    agg = ActivityAggregator(fake)
+    await agg.start()
+    app = SimpleNamespace(state=SimpleNamespace(activity_aggregator=agg, redis=fake))
+
+    request = _FakeRequest(app)
+    response = await dashboard_stream(request)
+    body_iter = response.body_iterator.__aiter__()
+    # First chunk is always the snapshot — confirm we get it cleanly.
+    chunk = await body_iter.__anext__()
+    if isinstance(chunk, (bytes, bytearray)):
+        chunk = chunk.decode("utf-8")
+    assert chunk.startswith("event: snapshot")
+    request._disconnected = True
