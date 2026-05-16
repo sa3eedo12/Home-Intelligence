@@ -113,3 +113,33 @@ async def test_generate_keep_alive_passthrough(monkeypatch) -> None:
     payload = _FakeAsyncClient.last_payload
     assert payload is not None
     assert payload["keep_alive"] == -1
+
+
+@pytest.mark.asyncio
+async def test_embed_passes_small_num_ctx_for_vulkan(monkeypatch) -> None:
+    """bge-m3's default n_ctx is 8192, which requests a ~4.4 GiB compute
+    buffer that exceeds Vulkan's 4 GiB per-allocation limit and panics
+    with 'failed to allocate compute pp buffers'. The embed call must
+    cap num_ctx at 512 so it survives on the Vulkan backend."""
+    _FakeAsyncClient.last_payload = None
+
+    class _EmbedResp(_FakeResponse):
+        def __init__(self) -> None:
+            super().__init__({"embedding": [0.1, 0.2, 0.3]})
+
+    class _EmbedClient(_FakeAsyncClient):
+        async def post(self, _url: str, json: dict) -> _FakeResponse:
+            _FakeAsyncClient.last_payload = json
+            return _EmbedResp()
+
+    monkeypatch.setattr("home_agents_sdk.llm.httpx.AsyncClient", _EmbedClient)
+
+    client = OllamaClient("http://ollama:11434")
+    out = await client.embed("hello world", model="bge-m3")
+
+    payload = _FakeAsyncClient.last_payload
+    assert payload is not None
+    assert payload["model"] == "bge-m3"
+    assert payload["prompt"] == "hello world"
+    assert payload.get("options", {}).get("num_ctx") == 512
+    assert out == [0.1, 0.2, 0.3]

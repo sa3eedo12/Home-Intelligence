@@ -87,10 +87,22 @@ class OllamaClient:
             return resp.json()
 
     async def embed(self, text: str, model: str = "bge-m3") -> list[float]:
+        # num_ctx=512 keeps the compute buffer under Vulkan's 4 GiB
+        # per-allocation limit. bge-m3's default n_ctx is 8192 which
+        # asks Ollama for a ~4.4 GiB buffer and crashes on Vulkan with
+        # "failed to allocate compute pp buffers". 512 is the standard
+        # sentence-embedder context and ample for our event-log /
+        # knowledge-graph entries (a few sentences each). The ROCm
+        # backend never hit this limit, so the bug only surfaced after
+        # the Vulkan switch.
         async with httpx.AsyncClient(timeout=_ollama_timeout()) as client:
             resp = await client.post(
                 f"{self.base_url}/api/embeddings",
-                json={"model": model, "prompt": text},
+                json={
+                    "model": model,
+                    "prompt": text,
+                    "options": {"num_ctx": 512},
+                },
             )
             resp.raise_for_status()
             data = resp.json()
