@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from home_agents_sdk.llm import OllamaClient
+
+
+class _FakeResponse:
+    def __init__(self, body: dict[str, Any]) -> None:
+        self._body = body
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, Any]:
+        return self._body
+
+
+class _FakeAsyncClient:
+    """Captures the post payload + timeout so tests can assert on them."""
+
+    last_payload: dict[str, Any] | None = None
+    last_timeout: Any = None
+
+    def __init__(self, *, timeout: Any = None, **_: Any) -> None:
+        _FakeAsyncClient.last_timeout = timeout
+
+    async def __aenter__(self) -> "_FakeAsyncClient":
+        return self
+
+    async def __aexit__(self, *_args: Any) -> bool:
+        return False
+
+    async def post(self, _url: str, json: dict[str, Any]) -> _FakeResponse:
+        _FakeAsyncClient.last_payload = json
+        return _FakeResponse({"message": {"content": "ok"}})
+
+
+@pytest.mark.asyncio
+async def test_chat_keep_alive_passthrough(monkeypatch) -> None:
+    """keep_alive=-1 must reach Ollama so the model gets pinned in memory.
+    Without this the orchestrator boot warmer cannot keep the 35B
+    reasoner resident."""
+    _FakeAsyncClient.last_payload = None
+    monkeypatch.setattr("home_agents_sdk.llm.httpx.AsyncClient", _FakeAsyncClient)
+
+    client = OllamaClient("http://ollama:11434")
+    await client.chat(
+        messages=[{"role": "user", "content": "warm"}],
+        model="qwen3.6:35b-a3b",
+        keep_alive=-1,
+        think=False,
+    )
+
+    payload = _FakeAsyncClient.last_payload
+    assert payload is not None
+    assert payload["keep_alive"] == -1
+    assert payload["think"] is False
+    assert payload["model"] == "qwen3.6:35b-a3b"
+
+
+@pytest.mark.asyncio
+async def test_chat_keep_alive_omitted_by_default(monkeypatch) -> None:
+    """keep_alive must NOT appear in the payload when caller didn't
+    set it — otherwise we'd accidentally pin every model the
+    orchestrator calls. Ollama's per-call default (KEEP_ALIVE env or
+    5m) should take over."""
+    _FakeAsyncClient.last_payload = None
+    monkeypatch.setattr("home_agents_sdk.llm.httpx.AsyncClient", _FakeAsyncClient)
+
+    client = OllamaClient("http://ollama:11434")
+    await client.chat(
+        messages=[{"role": "user", "content": "hi"}],
+        model="qwen3:8b",
+    )
+
+    payload = _FakeAsyncClient.last_payload
+    assert payload is not None
+    assert "keep_alive" not in payload
+
+
+@pytest.mark.asyncio
+async def test_chat_timeout_override(monkeypatch) -> None:
+    """timeout=600 is required for the reasoner warmer because the 35B
+    cold-load can exceed the default 180s OLLAMA_TIMEOUT."""
+    _FakeAsyncClient.last_timeout = None
+    monkeypatch.setattr("home_agents_sdk.llm.httpx.AsyncClient", _FakeAsyncClient)
+
+    client = OllamaClient("http://ollama:11434")
+    await client.chat(
+        messages=[{"role": "user", "content": "warm"}],
+        model="qwen3.6:35b-a3b",
+        timeout=600.0,
+    )
+
+    assert _FakeAsyncClient.last_timeout == 600.0
+
+
+@pytest.mark.asyncio
+async def test_generate_keep_alive_passthrough(monkeypatch) -> None:
+    _FakeAsyncClient.last_payload = None
+    monkeypatch.setattr("home_agents_sdk.llm.httpx.AsyncClient", _FakeAsyncClient)
+
+    client = OllamaClient("http://ollama:11434")
+    await client.generate(
+        prompt="warm",
+        model="qwen3.6:35b-a3b",
+        keep_alive=-1,
+    )
+
+    payload = _FakeAsyncClient.last_payload
+    assert payload is not None
+    assert payload["keep_alive"] == -1

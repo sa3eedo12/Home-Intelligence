@@ -30,6 +30,8 @@ class OllamaClient:
         temperature: float = 0.2,
         response_format: str | None = None,
         think: bool | None = None,
+        keep_alive: int | str | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
@@ -44,7 +46,14 @@ class OllamaClient:
         # structured-JSON generation that doesn't benefit from chain-of-thought.
         if think is not None:
             payload["think"] = think
-        async with httpx.AsyncClient(timeout=_ollama_timeout()) as client:
+        # keep_alive controls how long Ollama keeps the model resident
+        # after the call. -1 = pin forever (until ollama restart). Used
+        # by the orchestrator startup warmer to keep the 35B reasoner
+        # always available without paying the 3-minute cold-load tax.
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
+        effective_timeout = timeout if timeout is not None else _ollama_timeout()
+        async with httpx.AsyncClient(timeout=effective_timeout) as client:
             resp = await client.post(f"{self.base_url}/api/chat", json=payload)
             resp.raise_for_status()
             return resp.json()
@@ -56,6 +65,8 @@ class OllamaClient:
         temperature: float = 0.2,
         response_format: str | None = None,
         think: bool | None = None,
+        keep_alive: int | str | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
@@ -67,7 +78,10 @@ class OllamaClient:
             payload["format"] = response_format
         if think is not None:
             payload["think"] = think
-        async with httpx.AsyncClient(timeout=_ollama_timeout()) as client:
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
+        effective_timeout = timeout if timeout is not None else _ollama_timeout()
+        async with httpx.AsyncClient(timeout=effective_timeout) as client:
             resp = await client.post(f"{self.base_url}/api/generate", json=payload)
             resp.raise_for_status()
             return resp.json()

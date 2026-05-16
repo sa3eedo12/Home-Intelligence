@@ -635,7 +635,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async def _warm_models() -> None:
         """Send a tiny inference to Ollama on startup so the first user
         request doesn't pay the cold-load tax. Best-effort; never blocks
-        startup if Ollama is slow."""
+        startup if Ollama is slow.
+
+        The reasoner (35B MoE, ~23 GB) takes ~3 minutes to cold-load and
+        is only used by the nightly reflection job. Without a pin it
+        would be unloaded long before the next reflection run, forcing
+        reflection to silently fall back to the 8B (which is what's been
+        happening). We warm it once at boot with keep_alive=-1 so it
+        stays resident until Ollama restarts."""
         for model in {router_model, default_model}:
             if not model:
                 continue
@@ -648,6 +655,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.info("orchestrator_warm_model_ok", model=model)
             except Exception as exc:
                 logger.info("orchestrator_warm_model_skipped", model=model, error=str(exc))
+
+        reasoner = os.environ.get("REASONER_MODEL")
+        if reasoner and reasoner not in {router_model, default_model}:
+            try:
+                await llm.chat(
+                    messages=[{"role": "user", "content": "warm"}],
+                    model=reasoner,
+                    temperature=0.0,
+                    think=False,
+                    keep_alive=-1,
+                    timeout=600.0,
+                )
+                logger.info("orchestrator_warm_reasoner_pinned", model=reasoner)
+            except Exception as exc:
+                logger.info(
+                    "orchestrator_warm_reasoner_failed",
+                    model=reasoner,
+                    error=str(exc),
+                )
 
     warmup_task = asyncio.create_task(_warm_models(), name="orchestrator-warmup")
 
