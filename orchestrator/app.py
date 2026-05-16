@@ -657,17 +657,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.info("orchestrator_warm_model_skipped", model=model, error=str(exc))
 
         reasoner = os.environ.get("REASONER_MODEL")
+        # keep_alive=-1 pins the model in VRAM forever. Disabled by
+        # default because Strix Halo iGPUs with a large BIOS UMA
+        # carveout have <10 GiB of dynamic-allocatable VRAM (the UMA
+        # region is hidden from ROCm's allocator), which causes the 35B
+        # load to OOM. Set REASONER_KEEP_ALIVE=-1 in .env to opt back
+        # in once you've confirmed ROCm reports >30 GiB available
+        # (`docker logs ollama | grep "gpu memory"`).
+        reasoner_keep_alive_raw = os.environ.get("REASONER_KEEP_ALIVE", "").strip()
         if reasoner and reasoner not in {router_model, default_model}:
+            warm_kwargs: dict[str, Any] = {
+                "messages": [{"role": "user", "content": "warm"}],
+                "model": reasoner,
+                "temperature": 0.0,
+                "think": False,
+                "timeout": 600.0,
+            }
+            if reasoner_keep_alive_raw:
+                try:
+                    warm_kwargs["keep_alive"] = int(reasoner_keep_alive_raw)
+                except ValueError:
+                    warm_kwargs["keep_alive"] = reasoner_keep_alive_raw
             try:
-                await llm.chat(
-                    messages=[{"role": "user", "content": "warm"}],
+                await llm.chat(**warm_kwargs)
+                logger.info(
+                    "orchestrator_warm_reasoner_ok",
                     model=reasoner,
-                    temperature=0.0,
-                    think=False,
-                    keep_alive=-1,
-                    timeout=600.0,
+                    pinned=bool(reasoner_keep_alive_raw),
                 )
-                logger.info("orchestrator_warm_reasoner_pinned", model=reasoner)
             except Exception as exc:
                 logger.info(
                     "orchestrator_warm_reasoner_failed",
