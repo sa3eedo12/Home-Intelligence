@@ -37,6 +37,23 @@ class HAClient:
             resp = await client.get(
                 f"{self._base_url}/api/states/{entity_id}", headers=self._headers
             )
+            # HA returns 404 when the entity_id doesn't exist. The LLM
+            # router frequently hallucinates plausible-sounding ids
+            # (sensor.power_usage, climate.bedroom_thermostat) that don't
+            # exist in this household. Returning a structured "not_found"
+            # response lets the LLM apologise gracefully instead of the
+            # agent throwing a 500 that surfaces as a raw HTTP error in
+            # Telegram.
+            if resp.status_code == 404:
+                return {
+                    "error": "entity_not_found",
+                    "entity_id": entity_id,
+                    "hint": (
+                        "The Home Assistant entity does not exist. The id "
+                        "may have been guessed; use list_entities to find "
+                        "the correct one before calling get_entity_state."
+                    ),
+                }
             resp.raise_for_status()
             return resp.json()
 

@@ -113,6 +113,46 @@ capabilities:
     inputs: {}
     side_effects: false
     cost: small
+  - id: climate_status
+    description: >-
+      Report the state of thermostats / HVAC units (current and target
+      temperature, mode, supported modes). Pass area (e.g. "bedroom",
+      "living room", "office") to scope to one room. Use this for ANY
+      thermostat / temperature / AC / heating question — it correctly
+      resolves the area without needing the user to know entity_ids.
+    inputs:
+      area: "string?"
+    side_effects: false
+    cost: small
+  - id: climate_set_temperature
+    description: >-
+      Set the target temperature on a thermostat / AC / heater. Use this
+      for requests like "reduce the bedroom temperature to 22", "make
+      the living room cooler", "set the AC to 23". Always pass an area
+      (e.g. "bedroom") so the right physical thermostat is selected —
+      multiple rooms have a "Thermostat" so you cannot rely on entity_id
+      guessing. Returns the old vs new target and whether it was
+      clamped to the device's min/max range.
+    inputs:
+      temperature: number
+      area: "string?"
+      entity_id: "string?"
+    side_effects: true
+    require_confirmation: false
+    cost: small
+  - id: climate_set_mode
+    description: >-
+      Set HVAC mode (off, cool, heat, auto, dry, fan_only) on a
+      thermostat. Use for "turn off the bedroom AC", "switch the
+      living room to cool", "set heating in the office". Pass an area
+      so the right thermostat is targeted.
+    inputs:
+      mode: string
+      area: "string?"
+      entity_id: "string?"
+    side_effects: true
+    require_confirmation: false
+    cost: small
 subscribes:
   - events.home
 publishes:

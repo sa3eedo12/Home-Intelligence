@@ -35,9 +35,11 @@ def test_manifest_and_tools_consistent():
     import tools.anomaly as _anomaly
     import tools.appliance as _appliance
     import tools.area as _area
+    import tools.climate as _climate
     import tools.core as _core
     import tools.doorbell as _doorbell
     import tools.ha_mcp_client as _ha_mcp
+    import tools.lights_control as _lights
     import tools.scenes as _scenes
     import tools.suggest as _suggest
 
@@ -45,7 +47,18 @@ def test_manifest_and_tools_consistent():
     # decorators.  This makes the test order-independent regardless of what
     # other tests imported beforehand.
     clear_tools()
-    for mod in (_core, _scenes, _doorbell, _anomaly, _suggest, _ha_mcp, _appliance, _area):
+    for mod in (
+        _core,
+        _scenes,
+        _doorbell,
+        _anomaly,
+        _suggest,
+        _ha_mcp,
+        _appliance,
+        _area,
+        _lights,
+        _climate,
+    ):
         importlib.reload(mod)
 
     tools = list_tools()
@@ -64,6 +77,12 @@ def test_manifest_and_tools_consistent():
         "suggest_automation",
         "ha.introspect",
         "recent_appliance_activity",
+        "lights_off",
+        "lights_on",
+        "lights_status",
+        "climate_status",
+        "climate_set_temperature",
+        "climate_set_mode",
     ]
     for cap_id in expected:
         assert cap_id in tools, f"Missing @tool registration for capability: {cap_id}"

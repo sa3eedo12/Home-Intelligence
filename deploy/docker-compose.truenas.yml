@@ -171,6 +171,13 @@ services:
   orchestrator:
     image: ghcr.io/sa3eedo12/home-intelligence/orchestrator:latest
     env_file: .env
+    environment:
+      # Pin the 35B reasoner in VRAM forever so the nightly reflection
+      # run doesn't pay the 3-minute cold-load tax. Inlined here (not
+      # in .env) because docker compose's env_file parser was dropping
+      # negative-integer values when read from the project .env on
+      # this host.
+      REASONER_KEEP_ALIVE: "-1"
     user: "568:568"
     ports:
       # Dashboard exposed on the LAN. TrueNAS users can change the host port

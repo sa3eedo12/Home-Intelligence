@@ -142,3 +142,37 @@ async def test_get_areas_template_failure_falls_back_empty(client):
     )
 
     assert await client.get_areas() == []
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_state_404_returns_structured_error_not_raise(client):
+    """When the LLM hallucinates an entity_id, HA returns 404. We must
+    NOT raise — that surfaces as an agent 500 and a raw HTTP error to
+    the user in Telegram. Return a structured dict the LLM can apologise
+    over instead."""
+    respx.get("http://homeassistant.local:8123/api/states/sensor.power_usage").mock(
+        return_value=httpx.Response(404)
+    )
+    result = await client.get_state("sensor.power_usage")
+    assert result == {
+        "error": "entity_not_found",
+        "entity_id": "sensor.power_usage",
+        "hint": (
+            "The Home Assistant entity does not exist. The id "
+            "may have been guessed; use list_entities to find "
+            "the correct one before calling get_entity_state."
+        ),
+    }
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_get_state_real_500_still_raises(client):
+    """A real HA server error (not a 404) should still propagate so we
+    don't silently swallow infrastructure problems."""
+    respx.get("http://homeassistant.local:8123/api/states/light.kitchen").mock(
+        return_value=httpx.Response(500)
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.get_state("light.kitchen")
