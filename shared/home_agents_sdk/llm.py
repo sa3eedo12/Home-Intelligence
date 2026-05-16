@@ -33,6 +33,19 @@ class OllamaClient:
         keep_alive: int | str | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
+        """Send a chat completion request to Ollama.
+
+        ⚠ DO NOT add num_ctx to options. Models are loaded at boot with
+        their training default context (262144 for the 35B, 40960 for
+        the 8B). Passing a different num_ctx forces Ollama to RELOAD
+        the model with the new context — on the 35B this is a ~170s
+        stall. If you genuinely need a different context budget, set
+        OLLAMA_CONTEXT_LENGTH globally and let the boot warmer pick it
+        up. The embed() method below is the one exception: bge-m3 must
+        cap num_ctx at 512 to fit inside Vulkan's 4 GiB allocation
+        limit, and bge-m3 is only ever called for embeddings (single
+        ctx everywhere) so the reload risk doesn't apply.
+        """
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
