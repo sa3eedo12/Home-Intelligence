@@ -66,7 +66,7 @@ services:
     networks: [agents]
 
   ollama:
-    image: ollama/ollama:rocm
+    image: ollama/ollama:latest
     restart: unless-stopped
     env_file: .env
     devices:
@@ -76,21 +76,29 @@ services:
       - "44"   # video (default GID on most Debian-based hosts)
       - "107"  # render (default GID on most Debian-based hosts)
     environment:
-      # Radeon 890M (gfx1150). Fallback if needed: 11.0.0
-      HSA_OVERRIDE_GFX_VERSION: "11.5.1"
-      # Keep models warm all day. The N5 Pro has 96GB RAM so eviction
-      # cost (60-180s reload) is far worse than the memory cost.
+      # Vulkan backend via RADV beats ROCm on Strix Point: it sees the
+      # full 32 GB BIOS UMA carveout + GTT (63 GiB available vs ROCm's
+      # 6.1 GiB after the BIOS bump), supports native gfx1150 detection
+      # without HSA_OVERRIDE workarounds, and on our hardware actually
+      # runs ~18% FASTER on the 35B (17.4 t/s vs 14.7 t/s on ROCm).
+      # ROCm's HSA allocator treats the UMA carveout as opaque on this
+      # consumer iGPU; Vulkan via mesa/radv addresses it natively.
+      OLLAMA_VULKAN: "1"
+      # Keep models warm all day. The N5 Pro has 96GB RAM (62 GiB OS-
+      # visible after the 32 GB BIOS UMA carveout) so eviction cost
+      # (60-180s reload) is far worse than the memory cost.
       OLLAMA_KEEP_ALIVE: 24h
       OLLAMA_NUM_PARALLEL: "2"
-      # Allow all four models (qwen3.6:35b-a3b ~23GB, qwen3:8b ~5GB,
-      # qwen3:0.6b ~0.5GB, bge-m3 ~1GB = ~30GB total) to stay loaded.
+      # Allow all four models (qwen3.6:35b-a3b ~34GB runtime, qwen3:8b
+      # ~11GB, qwen3:0.6b ~1.5GB, bge-m3 ~1.2GB = ~48GB total) to stay
+      # loaded simultaneously inside the 63 GiB Vulkan pool.
       OLLAMA_MAX_LOADED_MODELS: "4"
       OLLAMA_FLASH_ATTENTION: "1"
       OLLAMA_NO_ANALYTICS: "1"
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:
-      # Recent ollama:rocm images have stripped `curl`; use the ollama
+      # Recent ollama images have stripped `curl`; use the ollama
       # binary itself which is guaranteed to be present.
       test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
       interval: 10s
