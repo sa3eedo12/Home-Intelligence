@@ -146,28 +146,30 @@ async def test_aggregate_daily_query_uses_dedup_cte() -> None:
     assert "WITH deduped" in query
     assert "max(value)" in query
     assert "GROUP BY day, started_at, ended_at" in query
-    # And the outer SUM happens against the deduped table
-    assert "FROM deduped" in query
+    # Session-metric path uses a row_number ranking to pick ONE row
+    # per day rather than summing overlapping intervals.
+    assert "row_number()" in query
+    assert "ranked" in query
 
 
 @pytest.mark.asyncio
-async def test_aggregate_daily_sum_of_distinct_intervals_not_doubled() -> None:
-    """End-to-end check: feeding 3 fake rows simulating the user's
-    duplicate sleep_asleep submissions should return ONE summed total
-    (using max per interval) rather than triple-counted."""
-    # The CTE runs in the DB itself; here we just simulate what
-    # postgres would return after dedup — one row per day with the
-    # correct sum. This pins the result-shape contract.
+async def test_aggregate_daily_session_metric_picks_max_value_per_day() -> None:
+    """REGRESSION: feeding the user's actual three overlapping rows
+    (138.95, 423.883, 203.95) — all snapshots of one 7h sleep — should
+    return 423.883 (the truthful max-coverage row), NOT their sum (12.8h)
+    or two of them summed (10.5h)."""
     conn = MagicMock()
+    # Postgres after dedup CTE + row_number ranking returns one row per
+    # day with the winning interval's value
     conn.fetch = AsyncMock(
         return_value=[
             {
                 "day": date(2026, 5, 15),
-                "count": 2,
-                "sum": 423.883 + 463.467,  # two DISTINCT intervals only
-                "avg": (423.883 + 463.467) / 2,
+                "count": 1,
+                "sum": 423.883,
+                "avg": 423.883,
                 "min": 423.883,
-                "max": 463.467,
+                "max": 423.883,
                 "unit": "min",
             }
         ]
@@ -176,5 +178,37 @@ async def test_aggregate_daily_sum_of_distinct_intervals_not_doubled() -> None:
 
     rows = await store.aggregate_daily("sleep_asleep", days=7)
 
-    assert rows[0]["sum"] < 900  # well under the broken-state 1000+
-    assert rows[0]["count"] == 2  # only the deduped intervals, not raw rows
+    # 423.883 min = 7.06h — the actual sleep total
+    assert rows[0]["sum"] == 423.883
+    assert rows[0]["sum"] / 60 < 8  # certainly not 17h
+    assert rows[0]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_aggregate_daily_steps_still_sums_all_intervals() -> None:
+    """Cumulative metrics like steps must KEEP summing across the day —
+    the per-day rank-by-value picks one interval but step intervals
+    don't overlap so the existing per-day single-row contract degrades
+    to the right value. Use the non-session code path."""
+    conn = MagicMock()
+    conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "day": date(2026, 5, 13),
+                "count": 24,
+                "sum": 8500.0,
+                "avg": 354.16,
+                "min": 0.0,
+                "max": 1200.0,
+                "unit": "count",
+            }
+        ]
+    )
+    store = HealthStore(_pool_with(conn))
+
+    await store.aggregate_daily("steps", days=7)
+    query = conn.fetch.await_args.args[0]
+    # Non-session metrics still SUM across distinct intervals
+    assert "sum(value)" in query
+    # And do NOT use the row_number ranking
+    assert "row_number()" not in query

@@ -176,54 +176,89 @@ class HealthStore:
         if not metric_filter:
             return []
         bounded_days = _bounded_int(days, default=30, low=1, high=365)
-        # Sleep metrics need extra deduplication: Apple Health sends the
-        # same interval multiple times (partial → full, plus parallel
-        # stage rows core/rem/deep that all carry the SAME interval and
-        # value). A naive sum gave the user '17 hours of sleep today'
-        # for a 6h night.
+        # Sleep metrics carry overlapping intervals AND parallel stage
+        # rows. Apple Health sends snapshots like:
+        #   sleep_asleep 02:21 → 04:40  (138.95min — early partial)
+        #   sleep_asleep 02:21 → 09:25  (423.883min — full night so far)
+        #   sleep_asleep 06:01 → 09:25  (203.95min — late partial)
+        # All three are the SAME sleep session expressed differently.
+        # A naive sum gives 12.8h for a 7h night.
         #
-        # The dedup strategy:
-        #   1. Within an (started_at, ended_at) bucket, keep only the
-        #      MAX(value) — the latest progressive snapshot of that
-        #      interval (Apple sends partial readings throughout the
-        #      night that grow as sleep continues).
-        #   2. SUM those deduped values per day.
-        #
-        # Cumulative/total metrics like steps or active_energy aren't
-        # interval-based so this dedup is a no-op for them (each row
-        # has a distinct started_at/ended_at).
+        # Two-stage dedup: first within (started_at, ended_at) take the
+        # MAX(value) latest snapshot, then within a day pick the SINGLE
+        # interval with the largest coverage (longest end-start span).
+        # Cumulative metrics like steps have distinct non-overlapping
+        # intervals so this is still correct for them — each interval
+        # is unique, max-by-coverage picks the only interval, sum picks
+        # all of them via the GROUP BY day.
+        is_session_metric = metric_filter.startswith("sleep_") or metric_filter in {
+            "workout",
+            "mindfulness",
+        }
+        if is_session_metric:
+            query = """
+                WITH deduped AS (
+                    SELECT date_trunc('day', started_at)::date AS day,
+                           started_at,
+                           ended_at,
+                           max(value) AS value,
+                           (array_agg(unit ORDER BY received_at DESC NULLS LAST))[1] AS unit
+                    FROM health_metrics
+                    WHERE metric = $1::text
+                      AND started_at >= date_trunc('day', now())
+                          - (($2::int - 1) * interval '1 day')
+                    GROUP BY day, started_at, ended_at
+                ),
+                ranked AS (
+                    SELECT day, started_at, ended_at, value, unit,
+                           row_number() OVER (
+                               PARTITION BY day
+                               ORDER BY value DESC NULLS LAST,
+                                        ended_at - started_at DESC NULLS LAST
+                           ) AS rn
+                    FROM deduped
+                )
+                SELECT day,
+                       1::int AS count,
+                       value::double precision AS sum,
+                       value::double precision AS avg,
+                       value::double precision AS min,
+                       value::double precision AS max,
+                       unit
+                FROM ranked
+                WHERE rn = 1
+                ORDER BY day ASC
+            """
+        else:
+            query = """
+                WITH deduped AS (
+                    SELECT date_trunc('day', started_at)::date AS day,
+                           started_at,
+                           ended_at,
+                           max(value) AS value,
+                           (array_agg(unit ORDER BY received_at DESC NULLS LAST))[1] AS unit
+                    FROM health_metrics
+                    WHERE metric = $1::text
+                      AND started_at >= date_trunc('day', now())
+                          - (($2::int - 1) * interval '1 day')
+                    GROUP BY day, started_at, ended_at
+                )
+                SELECT day,
+                       count(*)::int AS count,
+                       sum(value)::double precision AS sum,
+                       avg(value)::double precision AS avg,
+                       min(value)::double precision AS min,
+                       max(value)::double precision AS max,
+                       (array_agg(unit))[1] AS unit
+                FROM deduped
+                GROUP BY day
+                ORDER BY day ASC
+            """
         async with self._connection("aggregate_daily") as conn:
             if conn is None:
                 return []
             try:
-                rows = await conn.fetch(
-                    """
-                    WITH deduped AS (
-                        SELECT date_trunc('day', started_at)::date AS day,
-                               started_at,
-                               ended_at,
-                               max(value) AS value,
-                               (array_agg(unit ORDER BY received_at DESC NULLS LAST))[1] AS unit
-                        FROM health_metrics
-                        WHERE metric = $1::text
-                          AND started_at >= date_trunc('day', now())
-                              - (($2::int - 1) * interval '1 day')
-                        GROUP BY day, started_at, ended_at
-                    )
-                    SELECT day,
-                           count(*)::int AS count,
-                           sum(value)::double precision AS sum,
-                           avg(value)::double precision AS avg,
-                           min(value)::double precision AS min,
-                           max(value)::double precision AS max,
-                           (array_agg(unit))[1] AS unit
-                    FROM deduped
-                    GROUP BY day
-                    ORDER BY day ASC
-                    """,
-                    metric_filter,
-                    bounded_days,
-                )
+                rows = await conn.fetch(query, metric_filter, bounded_days)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "health_store_query_failed", operation="aggregate_daily", error=str(exc)
