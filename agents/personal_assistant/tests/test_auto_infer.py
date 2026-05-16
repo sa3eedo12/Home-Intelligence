@@ -340,6 +340,8 @@ async def test_rule_based_sleep_likely_asleep_uses_event_time(monkeypatch) -> No
     async def _fail_infer(_context: str) -> dict[str, Any]:
         raise AssertionError("LLM must NOT be called when a rule matches")
 
+    # Pin TZ so the test is deterministic regardless of dev machine.
+    monkeypatch.setenv("TZ", "Asia/Dubai")
     monkeypatch.setattr(auto_infer, "_auto_store", _store)
     monkeypatch.setattr(auto_infer.infer_tool, "infer", _fail_infer)
 
@@ -353,7 +355,10 @@ async def test_rule_based_sleep_likely_asleep_uses_event_time(monkeypatch) -> No
 
     assert result["ok"] is True
     assert result["auto_inference_id"] == 77
-    assert "23:35" in result["inference"]
+    # 23:35 UTC = 03:35 in Asia/Dubai — the inference must render LOCAL time
+    # not UTC. Regression: user saw "lightbulb turned on at 06:53:14" when
+    # local was 10:53; the rendering used to skip the TZ conversion.
+    assert "03:35" in result["inference"]
     assert store.insert_calls[0]["source_kind"] == "sleep.likely_asleep"
 
 
@@ -645,3 +650,29 @@ async def test_dedup_does_not_block_first_emission(monkeypatch) -> None:
     assert result["ok"] is True
     assert result.get("skipped") is not True
     assert store.insert_calls
+
+
+# ── Timezone conversion in LLM context (REGRESSION) ─────────────────────
+
+
+def test_context_for_infer_converts_envelope_ts_to_local(monkeypatch) -> None:
+    """REGRESSION: user saw 'lightbulb turned on at 06:53:14' when the
+    actual local time was 10:53. The envelope's ts was UTC and the LLM
+    repeated it verbatim. _context_for_infer must now hand the LLM the
+    LOCAL ISO string + a hint that the timezone is local."""
+    monkeypatch.setenv("TZ", "Asia/Dubai")
+    envelope = {
+        "agent": "observer.device_activity",
+        "kind": "device.state_changed",
+        "summary": "💡 The lightbulb was turned on",
+        "ts": "2026-05-16T06:53:14+00:00",  # UTC
+        "payload": {
+            "entity_id": "light.lightbulb",
+            "on_since": "2026-05-16T06:53:14+00:00",
+        },
+    }
+    ctx = auto_infer._context_for_infer(envelope, "unhandled_observer_event")
+    # The LOCAL time string must appear; the bare UTC '06:53' must NOT.
+    assert "10:53" in ctx
+    assert "Asia/Dubai" in ctx
+    assert "all timestamps below are LOCAL time" in ctx

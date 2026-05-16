@@ -5,6 +5,7 @@ import os
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from home_agents_sdk import tool
@@ -210,18 +211,58 @@ def _worth_inferring(envelope: dict[str, Any]) -> tuple[bool, str]:
     return True, "unhandled_observer_event"
 
 
+def _to_local_iso(ts: Any) -> str:
+    """Convert any UTC-bearing timestamp string to the user's local ISO string.
+
+    Returns the input verbatim if it can't be parsed. The LLM sees these
+    timestamps verbatim — when they're UTC the model dutifully repeats UTC
+    in its inference text ('lightbulb turned on at 06:53:14' when local
+    was 10:53). Pre-converting fixes that without changing the model.
+    """
+    if not isinstance(ts, str) or not ts:
+        return ts if isinstance(ts, str) else ""
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return ts
+    try:
+        return parsed.astimezone(ZoneInfo(_local_tz_name())).isoformat()
+    except ZoneInfoNotFoundError:
+        return ts
+
+
+def _envelope_with_local_ts(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of envelope with every timestamp string
+    converted to local time. Used before serialising into the LLM
+    context so the model never sees raw UTC and repeats it."""
+    out = dict(envelope)
+    if "ts" in out:
+        out["ts"] = _to_local_iso(out["ts"])
+    payload = out.get("payload")
+    if isinstance(payload, dict):
+        slim = dict(payload)
+        for key in ("ts", "since", "on_since", "started_at", "ended_at"):
+            if key in slim:
+                slim[key] = _to_local_iso(slim[key])
+        out["payload"] = slim
+    return out
+
+
 def _context_for_infer(envelope: dict[str, Any], reason: str) -> str:
     kind = str(envelope.get("kind") or "unknown")
     agent = str(envelope.get("agent") or "observer")
     summary = str(envelope.get("summary") or "")
+    local_envelope = _envelope_with_local_ts(envelope)
+    tz_name = _local_tz_name()
     return (
         "Auto-inference candidate from an observer event. Be conservative and only "
         "propose one memory if this event strongly supports it.\n"
+        f"User timezone: {tz_name} — all timestamps below are LOCAL time, not UTC.\n"
         f"Source agent: {agent}\n"
         f"Source kind: {kind}\n"
         f"Observer summary: {summary}\n"
         f"Why it was considered: {reason}\n"
-        f"Full observer envelope JSON: {_compact_json(envelope)}"
+        f"Full observer envelope JSON: {_compact_json(local_envelope)}"
     )
 
 
@@ -265,14 +306,30 @@ RuleProducer = Callable[
 ]
 
 
+def _local_tz_name() -> str:
+    return os.environ.get("TZ") or os.environ.get("USER_TZ") or "Asia/Dubai"
+
+
 def _hh_mm(ts: Any) -> str:
+    """Render a UTC ISO timestamp as HH:MM in the USER's local timezone.
+
+    REGRESSION: previously returned UTC time. User saw 'The lightbulb
+    was turned on at 06:53:14' when actual local time was 10:53 (UTC+4).
+    Now converts to the configured TZ (defaults to Asia/Dubai) before
+    formatting. Same fix should be applied wherever a raw HA / event_log
+    ts string is rendered into user-facing text.
+    """
     if not isinstance(ts, str):
         return ""
     try:
         parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         return ""
-    return parsed.strftime("%H:%M")
+    try:
+        local = parsed.astimezone(ZoneInfo(_local_tz_name()))
+    except ZoneInfoNotFoundError:
+        local = parsed
+    return local.strftime("%H:%M")
 
 
 def _coerce_float(value: Any) -> float | None:
