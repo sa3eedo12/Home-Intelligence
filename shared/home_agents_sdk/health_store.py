@@ -176,23 +176,48 @@ class HealthStore:
         if not metric_filter:
             return []
         bounded_days = _bounded_int(days, default=30, low=1, high=365)
+        # Sleep metrics need extra deduplication: Apple Health sends the
+        # same interval multiple times (partial → full, plus parallel
+        # stage rows core/rem/deep that all carry the SAME interval and
+        # value). A naive sum gave the user '17 hours of sleep today'
+        # for a 6h night.
+        #
+        # The dedup strategy:
+        #   1. Within an (started_at, ended_at) bucket, keep only the
+        #      MAX(value) — the latest progressive snapshot of that
+        #      interval (Apple sends partial readings throughout the
+        #      night that grow as sleep continues).
+        #   2. SUM those deduped values per day.
+        #
+        # Cumulative/total metrics like steps or active_energy aren't
+        # interval-based so this dedup is a no-op for them (each row
+        # has a distinct started_at/ended_at).
         async with self._connection("aggregate_daily") as conn:
             if conn is None:
                 return []
             try:
                 rows = await conn.fetch(
                     """
-                    SELECT date_trunc('day', started_at)::date AS day,
+                    WITH deduped AS (
+                        SELECT date_trunc('day', started_at)::date AS day,
+                               started_at,
+                               ended_at,
+                               max(value) AS value,
+                               (array_agg(unit ORDER BY received_at DESC NULLS LAST))[1] AS unit
+                        FROM health_metrics
+                        WHERE metric = $1::text
+                          AND started_at >= date_trunc('day', now())
+                              - (($2::int - 1) * interval '1 day')
+                        GROUP BY day, started_at, ended_at
+                    )
+                    SELECT day,
                            count(*)::int AS count,
                            sum(value)::double precision AS sum,
                            avg(value)::double precision AS avg,
                            min(value)::double precision AS min,
                            max(value)::double precision AS max,
-                           (array_agg(unit ORDER BY started_at DESC))[1] AS unit
-                    FROM health_metrics
-                    WHERE metric = $1::text
-                      AND started_at >= date_trunc('day', now())
-                          - (($2::int - 1) * interval '1 day')
+                           (array_agg(unit))[1] AS unit
+                    FROM deduped
                     GROUP BY day
                     ORDER BY day ASC
                     """,
