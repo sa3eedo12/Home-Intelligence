@@ -89,22 +89,50 @@ def test_format_catalog_marks_side_effecting():
 
 
 @pytest.mark.asyncio
-async def test_resolves_on_first_step():
-    """The 8B immediately decides it can answer from prior context."""
+async def test_resolves_only_after_tool_call_succeeds():
+    """Anti-fabrication: the escalator MUST have called at least one
+    tool before resolving. A zero-tool resolution would mean the 8B
+    invented an answer — same fabrication class we fixed in chat.py."""
     llm = _llm_returning(
+        # Step 1: call status tool
+        '{"action": "tool_call", "agent": "ha", "capability": "climate_status",'
+        ' "inputs": {"area": "bedroom"}}',
+        # Step 2: use observation to compose reply
         '{"action": "resolved", "reply": "Bedroom is 24°C currently."}'
     )
-    registry = _registry([
-        {"agent": "ha", "id": "climate_status", "description": "thermostat status"},
-    ])
+    registry = _registry(
+        caps=[{"agent": "ha", "id": "climate_status", "description": "thermostat status"}],
+        dispatch_results={
+            ("ha", "climate_status"): {"thermostats": [{"area": "Bedroom", "current": 24}]},
+        },
+    )
     esc = Escalator(llm=llm, registry=registry, model="qwen3:8b")
 
     resolution, path = await esc.resolve("what is the bedroom temperature?")
 
     assert resolution is not None
     assert resolution["reply"] == "Bedroom is 24°C currently."
-    assert path[-1]["stage"] == "resolved"
-    assert path[-1]["outcome"] == "ok"
+    assert len(resolution["tools_used"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_zero_tool_resolution_treated_as_giveup():
+    """If the LLM jumps straight to 'resolved' without any tool call,
+    treat it as fabrication and give up cleanly."""
+    llm = _llm_returning(
+        '{"action": "resolved", "reply": "The thermostat is set to 22°C."}',
+    )
+    registry = _registry(
+        caps=[{"agent": "ha", "id": "climate_status", "description": "status"}],
+    )
+    esc = Escalator(llm=llm, registry=registry, model="qwen3:8b")
+
+    resolution, path = await esc.resolve("what is the bedroom temperature?")
+
+    # Must NOT trust the unsubstantiated claim
+    assert resolution is None
+    assert path[-1]["outcome"] == "no_tool_used_suspect_fabrication"
+    assert "set to 22" in path[-1]["reply_preview"]
 
 
 @pytest.mark.asyncio
@@ -234,14 +262,18 @@ async def test_llm_exception_terminates_cleanly():
 
 @pytest.mark.asyncio
 async def test_bad_json_response_nudges_once_then_continues():
-    """The model sometimes returns prose. We nudge once, then if it
-    still produces garbage we let max_iterations terminate."""
+    """The model sometimes returns prose. We nudge once, then it
+    eventually calls a tool + resolves."""
     llm = _llm_returning(
         "I think we should look at the lights first",  # not JSON
+        '{"action": "tool_call", "agent": "ha", "capability": "lights_off",'
+        ' "inputs": {}}',
         '{"action": "resolved", "reply": "All lights off."}',
     )
-    registry = _registry(caps=[{"agent": "ha", "id": "lights_off",
-                                "description": "off"}])
+    registry = _registry(
+        caps=[{"agent": "ha", "id": "lights_off", "description": "off"}],
+        dispatch_results={("ha", "lights_off"): {"ok": True}},
+    )
     esc = Escalator(llm=llm, registry=registry, model="qwen3:8b")
 
     resolution, path = await esc.resolve("turn off lights")

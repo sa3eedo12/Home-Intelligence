@@ -294,6 +294,26 @@ class Escalator:
                         "outcome": "empty_reply",
                     })
                     return None, escalation_path
+                # Anti-fabrication guard: if the escalator declares
+                # "resolved" without having called ANY tool, that's
+                # the 8b inventing a result. Same class of bug as the
+                # chat tool fabrication we fixed — never trust an
+                # unsubstantiated action-completion claim. Reading the
+                # reply text would also fail because the model can
+                # write convincing fake confirmations. So we just
+                # treat zero-tool resolutions as give_up.
+                if not tools_used:
+                    logger.warning(
+                        "escalator_resolved_without_tool_call_treating_as_giveup",
+                        reply_preview=reply[:200],
+                    )
+                    escalation_path.append({
+                        "iter": iteration,
+                        "stage": "resolved",
+                        "outcome": "no_tool_used_suspect_fabrication",
+                        "reply_preview": reply[:200],
+                    })
+                    return None, escalation_path
                 escalation_path.append({
                     "iter": iteration,
                     "stage": "resolved",
