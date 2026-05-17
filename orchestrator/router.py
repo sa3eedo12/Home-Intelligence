@@ -299,7 +299,22 @@ class Router:
 
         if agent is None or capability is None:
             fallback = await self._semantic_fallback(text)
-            if fallback is not None:
+            # CRITICAL: even if semantic search matched, if it landed
+            # on the conversational catch-all for a request that looks
+            # like real intent (action verb OR device query), we must
+            # still try the escalator. The semantic index treats
+            # 'personal_assistant.chat' as semantically close to almost
+            # everything, which used to bypass the escalator for
+            # phrasings like 'what's the battery percentage of my car?'
+            # and let the chat tool fabricate answers.
+            fallback_is_chat_catchall = (
+                fallback is not None
+                and fallback.get("agent") == "personal_assistant"
+                and fallback.get("capability") == "chat"
+            )
+            if fallback is not None and not (
+                fallback_is_chat_catchall and _should_escalate(text)
+            ):
                 agent = fallback["agent"]
                 capability = fallback["capability"]
                 escalation_path.append({
@@ -309,6 +324,13 @@ class Router:
                     "capability": capability,
                 })
             else:
+                if fallback_is_chat_catchall:
+                    escalation_path.append({
+                        "stage": "semantic_fallback",
+                        "outcome": "matched_chat_but_escalating",
+                        "agent": fallback["agent"],
+                        "capability": fallback["capability"],
+                    })
                 # Escalator gets a shot BEFORE chat-catchall. The 8B
                 # with iterative tool use can often resolve what the
                 # 0.6b router couldn't: ambiguous areas, multi-step

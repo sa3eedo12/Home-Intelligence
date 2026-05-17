@@ -251,3 +251,42 @@ async def test_gap_store_failure_does_NOT_break_user_reply() -> None:
             "Gap-store failure must not propagate to user — wrap "
             "record_gap calls in try/except in router.handle."
         )
+
+
+@pytest.mark.asyncio
+async def test_semantic_fallback_to_chat_for_device_query_still_escalates() -> None:
+    """Live-fired bug: 'What is the battery percentage of my car?'
+    Classifier returns nulls. Semantic search returns personal_assistant.chat
+    (closest match). Without this fix the escalator was skipped and chat
+    fabricated 'Make sure your car is powered on'. With this fix, we
+    detect the chat-catchall semantic match for a device-query intent
+    and still invoke the escalator."""
+    npu_resp = _make_npu_response(None, None, {})
+
+    def cap_lookup(agent, capability):
+        if (agent, capability) == ("personal_assistant", "chat"):
+            return {"description": "chat"}
+        return None
+
+    router, gap_store = _make_router_with_gap_store(
+        npu_response=npu_resp,
+        capability_lookup=cap_lookup,
+        dispatch_response={"reply": "fabricated answer", "already_natural": True},
+        semantic_results=[
+            {"score": 0.99, "payload": {"agent": "personal_assistant", "capability": "chat"}}
+        ],
+    )
+    # No escalator wired in this fixture, so escalator path is skipped
+    # and we fall through to chat — but the chat catchall MUST be
+    # reached via the escalate-then-fallback path, not the semantic
+    # shortcut. That means the gap row gets recorded.
+    await router.handle("What is the battery percentage of my car?", "user1")
+
+    # Gap MUST be recorded — the device query slipped through to chat
+    gap_store.record_gap.assert_awaited()
+    call = gap_store.record_gap.await_args.kwargs
+    assert call["failure_reason"] in {
+        "chat_fallback_for_action_verb",
+        "escalator_no_tool_proposed",
+        "escalator_max_iterations",
+    }
