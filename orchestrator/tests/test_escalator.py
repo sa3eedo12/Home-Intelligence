@@ -266,3 +266,35 @@ def test_map_exhausted_outcome_to_failure_reason():
         [{"stage": "give_up", "reason": "x"}]
     ) == "escalator_no_tool_proposed"
     assert map_exhausted_outcome_to_failure_reason([]) == "escalator_no_tool_proposed"
+
+
+@pytest.mark.asyncio
+async def test_strips_agent_prefix_from_capability():
+    """The 8b sometimes returns capability='home_automation.climate_status'
+    instead of just 'climate_status'. Strip the prefix defensively so
+    we don't waste iterations bouncing through invalid_capability."""
+    llm = _llm_returning(
+        # Buggy call with doubled prefix
+        '{"action": "tool_call", "agent": "home_automation", '
+        '"capability": "home_automation.climate_status", "inputs": {}}',
+        '{"action": "resolved", "reply": "Bedroom is 24°C."}',
+    )
+    registry = _registry(
+        caps=[{"agent": "home_automation", "id": "climate_status",
+               "description": "thermostat status"}],
+        dispatch_results={
+            ("home_automation", "climate_status"): {"thermostats": [
+                {"area": "Bedroom", "current": 24, "target": 23.5}
+            ]},
+        },
+    )
+    esc = Escalator(llm=llm, registry=registry, model="qwen3:8b")
+
+    resolution, path = await esc.resolve("what's the bedroom temperature?")
+
+    assert resolution is not None
+    # First step should be a successful tool_call (NOT invalid_capability)
+    tool_steps = [p for p in path if p.get("stage") == "tool_call"]
+    assert len(tool_steps) == 1
+    assert tool_steps[0]["outcome"] == "ok"
+    assert tool_steps[0]["capability"] == "climate_status"

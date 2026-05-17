@@ -74,9 +74,21 @@ ON EACH STEP, respond with ONE compact JSON object — no prose, no code fences.
 3. When you cannot make progress — no tool fits the request, every tool you tried errored, or you need user clarification:
    {"action": "give_up", "reason": "<short reason>", "suggested_tool_spec": {<optional tool spec the system should add>}}
 
+CRITICAL CAPABILITY FORMAT:
+The catalog lists capabilities as "agent.capability_id: description".
+When calling a tool, pass them SEPARATELY:
+  - agent: the part BEFORE the first dot (e.g., "home_automation")
+  - capability: the part AFTER the first dot (e.g., "climate_status", "lights_off")
+NEVER include the agent name inside the capability field.
+
+Examples:
+  Catalog line:    "home_automation.climate_status: thermostat status"
+  Correct call:    {"action": "tool_call", "agent": "home_automation", "capability": "climate_status", ...}
+  WRONG call:      {"action": "tool_call", "agent": "home_automation", "capability": "home_automation.climate_status", ...}
+
 Rules:
-- Use ONLY capability ids from the provided catalog. Never invent.
-- Prefer read-only discovery tools (list_entities, climate_status, lights_status, get_entity_state) before any side-effecting tool.
+- Use ONLY capability ids from the provided catalog. Never invent. Never prepend the agent name.
+- Prefer read-only discovery tools (list_entities, climate_status, lights_status, get_entity_state, list_areas) before any side-effecting tool.
 - After each tool result you see "OBSERVATION:" — use that to refine your next step.
 - If a side-effecting tool succeeds, immediately respond with "resolved".
 - If you've tried 2 tools and made no progress, lean toward "give_up" with a useful suggested_tool_spec rather than thrashing.
@@ -325,6 +337,16 @@ class Escalator:
             inputs = step.get("inputs") or {}
             if not isinstance(inputs, dict):
                 inputs = {}
+
+            # Defensive normalisation: the 8b sometimes includes the
+            # agent name in the capability field (despite the prompt
+            # forbidding it). Strip a leading "<agent>." if present so
+            # the call still works instead of bouncing through
+            # invalid_capability and burning an iteration.
+            if isinstance(capability, str) and agent and isinstance(agent, str):
+                prefix = f"{agent}."
+                if capability.startswith(prefix):
+                    capability = capability[len(prefix):]
 
             if not agent or not capability:
                 escalation_path.append({

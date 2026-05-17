@@ -273,6 +273,19 @@ class Router:
                     )
                     return {"reply": escalator_resolved["reply"]}
 
+                # Compute the failure_reason from the escalator's terminal
+                # step BEFORE we append chat_catchall to the path — otherwise
+                # the mapper sees chat_catchall instead of the escalator's
+                # give_up / exhausted outcome.
+                escalator_failure_reason: str | None = None
+                if self._escalator is not None:
+                    from .escalator import (
+                        map_exhausted_outcome_to_failure_reason,
+                    )
+                    escalator_failure_reason = (
+                        map_exhausted_outcome_to_failure_reason(escalation_path)
+                    )
+
                 # Escalator gave up (or wasn't wired) — fall through to
                 # the existing chat catch-all or generic decline.
                 if self._registry.get_capability("personal_assistant", "chat") is not None:
@@ -291,16 +304,10 @@ class Router:
                     # narratives. With this gap row + the chat.py refusal,
                     # the loop closes around real user pain points.
                     if _is_action_verb_request(text):
-                        # Pick the most informative failure_reason given
-                        # the escalator's outcome (if it ran).
-                        failure_reason = "chat_fallback_for_action_verb"
-                        if self._escalator is not None:
-                            from .escalator import (
-                                map_exhausted_outcome_to_failure_reason,
-                            )
-                            failure_reason = map_exhausted_outcome_to_failure_reason(
-                                escalation_path
-                            )
+                        failure_reason = (
+                            escalator_failure_reason
+                            or "chat_fallback_for_action_verb"
+                        )
                         await self._record_gap_safe(
                             user_text=text,
                             failure_reason=failure_reason,
