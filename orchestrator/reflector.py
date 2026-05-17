@@ -981,17 +981,18 @@ class NightlyReflector:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                model=self.reasoner_model,
+                # Use the 8B fallback model for refinement, NOT the 35B.
+                # The 35B sustained 10-minute timeouts under back-to-back
+                # refinement load on the live N5 Pro — it can do
+                # one-shot deep reasoning but the iGPU thrashes under
+                # repeated 5+ minute calls. The 8B finishes a
+                # refinement in 30-60s, runs the whole batch in ~10
+                # min, and still produces a much sharper proposal
+                # than the daytime escalator's filing.
+                model=self.fallback_model,
                 response_format="json",
-                # Was think=True with timeout=600 — that consistently
-                # blew past the timeout on the live N5 Pro (35B with
-                # thinking + entity catalog is 1000+ output tokens at
-                # 14 t/s = >70s + prefill = often >5 min). Refinement
-                # is pattern transformation, not deep reasoning — the
-                # 35B without thinking still produces much better
-                # results than the daytime 8B with limited context.
                 think=False,
-                timeout=300.0,
+                timeout=180.0,
             )
         except Exception as exc:
             logger.warning(

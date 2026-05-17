@@ -180,11 +180,11 @@ async def test_handles_llm_exception_gracefully():
 
 
 @pytest.mark.asyncio
-async def test_uses_think_false_for_refinement():
-    """Refinement uses think=False — earlier think=True consistently
-    timed out on the 35B (think tokens + entity catalog = 5+ min per
-    proposal). think=False still produces much better results than
-    the daytime 8B with limited context."""
+async def test_uses_8b_for_refinement_not_35b():
+    """Refinement uses the 8B fallback model, not the 35B reasoner.
+    35B sustained 10-min timeouts under back-to-back refinement on
+    the live N5 Pro. 8B finishes in 30-60s and still produces a
+    much sharper proposal than the daytime escalator's filing."""
     rough = [{
         "id": 80,
         "kind": "code_change",
@@ -204,8 +204,9 @@ async def test_uses_think_false_for_refinement():
 
     chat_call = reflector.llm.chat.await_args_list[0]
     assert chat_call.kwargs["think"] is False
-    assert chat_call.kwargs["model"] == "qwen3.6:35b-a3b"
-    assert chat_call.kwargs["timeout"] == 300.0
+    # Explicitly the fallback (8B), NOT the reasoner (35B)
+    assert chat_call.kwargs["model"] == "qwen3:8b"
+    assert chat_call.kwargs["timeout"] == 180.0
 
 
 @pytest.mark.asyncio
