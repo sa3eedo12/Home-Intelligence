@@ -183,8 +183,10 @@ def test_known_failure_reasons_documented() -> None:
         "invalid_capability",
         "dispatch_failed",
         "chat_fallback_for_action_verb",
+        "chat_fallback_for_device_query",
         "escalator_max_iterations",
         "escalator_all_tools_errored",
         "escalator_no_tool_proposed",
         "chat_refused_action_verb",
+        "chat_refused_device_query",
     }

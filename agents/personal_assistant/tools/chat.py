@@ -56,9 +56,57 @@ _ACTION_VERB_GUARD = re.compile(
     re.IGNORECASE,
 )
 
+# Device-query guard: catches questions about specific home devices,
+# vehicles, environmental readings that the LLM might fabricate answers
+# for. Examples that fired this bug live:
+#   "what's the battery percentage of my car?"
+#   "is the bedroom door locked?"
+# The LLM, given no real data, invents "make sure your car is powered
+# on" or claims device states. Refuse + log so the system records the
+# gap and the user gets the truth.
+#
+# Match logic: question word + home/device noun in the same text.
+# Pure chit-chat ("how are you doing?") has the question word but no
+# device noun, so it passes through unmolested.
+_QUESTION_GUARD = re.compile(
+    r"\b(what(?:'?s)?|where(?:'?s)?|which|how|when|is|are|has|have|does|did|do)\b",
+    re.IGNORECASE,
+)
+_DEVICE_NOUN_GUARD = re.compile(
+    r"\b("
+    # vehicles
+    r"car|cars|vehicle|truck|bike|scooter|battery|ev|charger|charging|"
+    # rooms
+    r"bedroom|kitchen|living\s+room|office|bathroom|garage|hallway|entryway|"
+    # devices
+    r"light|lights|lamp|bulb|"
+    r"thermostat|temperature|ac|heating|hvac|fan|"
+    r"blind|blinds|curtain|curtains|shade|shades|shutter|"
+    r"door|doors|lock|locks|"
+    r"tv|television|speaker|music|media|player|"
+    r"camera|doorbell|"
+    r"sensor|motion|presence|"
+    r"washer|dryer|dishwasher|oven|fridge|microwave|appliance|"
+    r"vacuum|roomba|"
+    r"sprinkler|water|irrigation|"
+    r"alarm|security|"
+    r"humidity|air\s+quality|co2|brightness|"
+    r"status|state|level|percentage|setting|mode|reading"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def _is_action_verb(text: str) -> bool:
     return bool(text) and bool(_ACTION_VERB_GUARD.search(text))
+
+
+def _is_device_query(text: str) -> bool:
+    """True if the text is a question about a specific home device or
+    reading. We refuse these to prevent fabrication."""
+    if not text:
+        return False
+    return bool(_QUESTION_GUARD.search(text)) and bool(_DEVICE_NOUN_GUARD.search(text))
 
 
 _HONEST_REFUSAL = (
@@ -66,6 +114,14 @@ _HONEST_REFUSAL = (
     "I've logged it so it can be added. Try rephrasing more directly "
     "(e.g., 'turn off bedroom lights', 'set bedroom AC to 22'), or "
     "ask me to check the dashboard for what I can already do."
+)
+
+_HONEST_QUERY_REFUSAL = (
+    "I don't have a tool to look that up right now. I won't make up "
+    "an answer — I've logged your question so the missing tool can "
+    "be added. For now, you can check the device directly or rephrase "
+    "if you meant a specific Home Assistant entity (e.g., 'is "
+    "light.bedroom on?')."
 )
 
 
@@ -86,9 +142,22 @@ def _chat_model() -> str:
 @tool("chat")
 async def chat(text: str) -> dict[str, Any]:
     """Conversational fallback. Returns a natural-language reply directly."""
-    # Guard: if the router fell through to chat for an action-verb
-    # request, refuse to fabricate. The router has already recorded a
-    # capability_gap row for this and the user deserves the truth.
+    # Guard 1: device-status queries — refuse to fabricate state readings.
+    # Checked BEFORE action-verb because words like "warm" and "cool"
+    # appear in both lists but a question word + device noun unambiguously
+    # signals a query ("how warm is the office?") not an action.
+    if _is_device_query(text):
+        logger.info(
+            "chat_refused_device_query",
+            text_preview=text[:120],
+        )
+        return {
+            "reply": _HONEST_QUERY_REFUSAL,
+            "already_natural": True,
+            "refused_device_query": True,
+        }
+
+    # Guard 2: action-verb requests — refuse to fabricate execution.
     if _is_action_verb(text):
         logger.info(
             "chat_refused_action_verb",

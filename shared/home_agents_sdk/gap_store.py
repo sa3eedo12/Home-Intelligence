@@ -40,6 +40,11 @@ KNOWN_FAILURE_REASONS = {
     # router.py: classifier picked personal_assistant.chat for an action verb
     # ("turn off", "reduce", "set", "increase", "open", "close", "play", etc.)
     "chat_fallback_for_action_verb",
+    # router.py: classifier picked chat for a device-status QUESTION
+    # ("what's the battery percentage of my car", "is the bedroom door
+    # locked") that didn't match a tool. Often points at a missing
+    # status capability rather than a missing action capability.
+    "chat_fallback_for_device_query",
     # escalator.py: ReAct loop hit max iterations without producing a tool call
     "escalator_max_iterations",
     # escalator.py: every tool the escalator tried returned an error
@@ -48,6 +53,9 @@ KNOWN_FAILURE_REASONS = {
     "escalator_no_tool_proposed",
     # chat.py: chat tool detected an action verb and refused to fabricate
     "chat_refused_action_verb",
+    # chat.py: chat tool detected a device-status query and refused to
+    # fabricate state readings
+    "chat_refused_device_query",
 }
 
 

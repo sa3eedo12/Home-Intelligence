@@ -88,6 +88,77 @@ def _is_action_verb_request(text: str) -> bool:
     return any(p.search(text) for p in _ACTION_VERB_PATTERNS)
 
 
+# Device-query detection: questions ABOUT a specific home thing that
+# would be a real query to HA (status, attributes) but the router
+# can't match a capability. Examples:
+#   - "what's the battery percentage of my car?"
+#   - "is the bedroom light on?"
+#   - "how warm is the office?"
+#   - "what's the door status?"
+# These are NOT action verbs but ARE concrete device questions, and
+# letting chat answer them produces fabricated narratives ("Make sure
+# your car is powered on..."). We want the escalator to try first,
+# and if it can't resolve, record a gap.
+#
+# Pattern shape: question-word (what/where/which/is/are/how/when/has/have/does/did)
+# followed by at least one home-noun-ish word in the text.
+_QUESTION_WORD_PATTERN = re.compile(
+    r"\b(what(?:'?s)?|where(?:'?s)?|which|how|when|is|are|has|have|does|did|do)\b",
+    re.IGNORECASE,
+)
+
+# Words that strongly imply the user is asking about a home device,
+# sensor, vehicle, appliance, or environmental reading. Broad on purpose
+# — false positives just send an extra request through the escalator
+# (10-30s overhead, then escalator gives up gracefully). False negatives
+# let the chat tool fabricate.
+_HOME_NOUN_PATTERN = re.compile(
+    r"\b("
+    # vehicles
+    r"car|cars|vehicle|truck|bike|scooter|battery|ev|charger|charging|"
+    # rooms / spaces
+    r"bedroom|kitchen|living\s+room|office|bathroom|garage|hallway|entryway|"
+    # devices
+    r"light|lights|lamp|bulb|"
+    r"thermostat|temperature|ac|heating|hvac|fan|"
+    r"blind|blinds|curtain|curtains|shade|shades|shutter|"
+    r"door|doors|lock|locks|"
+    r"tv|television|speaker|music|media|player|"
+    r"camera|doorbell|"
+    r"sensor|motion|presence|"
+    r"washer|dryer|dishwasher|oven|fridge|microwave|appliance|"
+    r"vacuum|roomba|"
+    r"sprinkler|water|irrigation|"
+    r"alarm|security|"
+    # environmental readings
+    r"humidity|air\s+quality|co2|brightness|"
+    # status concepts
+    r"status|state|level|percentage|setting|mode|reading"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_device_query(text: str) -> bool:
+    """True if the user's text is a question about a specific home
+    device, vehicle, or environmental reading. Triggers escalator +
+    gap recording when no capability matches, so we never let chat
+    fabricate answers about home state."""
+    if not text:
+        return False
+    has_question_word = bool(_QUESTION_WORD_PATTERN.search(text))
+    has_home_noun = bool(_HOME_NOUN_PATTERN.search(text))
+    return has_question_word and has_home_noun
+
+
+def _should_escalate(text: str) -> bool:
+    """Trigger escalation for any text that looks like a real user
+    intent the router couldn't satisfy: action verbs OR device queries.
+    Chit-chat ('how are you', 'tell me a joke') is excluded because
+    it has a question word but no home noun."""
+    return _is_action_verb_request(text) or _is_device_query(text)
+
+
 def _is_conversational_shortcut(text: str) -> bool:
     return any(p.match(text) for p in _FAST_PATH_PATTERNS)
 
@@ -243,12 +314,12 @@ class Router:
                 # 0.6b router couldn't: ambiguous areas, multi-step
                 # composition, picking the right tool from a noisy
                 # catalog. Only invoked when the escalator is wired
-                # AND the request is an action verb OR the classifier
-                # picked something invalid (signals real intent that
-                # failed to route, not just chit-chat).
+                # AND the request looks like real intent that needs
+                # resolution (action verb OR specific device query) OR
+                # the classifier picked something invalid.
                 escalator_resolved = None
                 if self._escalator is not None and (
-                    _is_action_verb_request(text) or invalid_capability_attempted
+                    _should_escalate(text) or invalid_capability_attempted
                 ):
                     try:
                         escalator_resolved, esc_path = await self._escalator.resolve(
@@ -297,13 +368,15 @@ class Router:
                         "stage": "chat_catchall",
                         "outcome": "matched",
                     })
-                    # Record a gap when chat-catchall fires for an action-
-                    # verb request. This is the hallucination root cause: a
-                    # tiny router model couldn't compose the right tool call
-                    # and the catch-all chat tool used to invent execution
-                    # narratives. With this gap row + the chat.py refusal,
-                    # the loop closes around real user pain points.
-                    if _is_action_verb_request(text):
+                    # Record a gap when chat-catchall fires for a
+                    # request that looks like real intent (action verb
+                    # OR device query). This is the hallucination root
+                    # cause: a tiny router model couldn't compose the
+                    # right tool call and the catch-all chat tool used
+                    # to invent execution narratives. With this gap row
+                    # + the chat.py refusal, the loop closes around
+                    # real user pain points.
+                    if _should_escalate(text):
                         failure_reason = (
                             escalator_failure_reason
                             or "chat_fallback_for_action_verb"
