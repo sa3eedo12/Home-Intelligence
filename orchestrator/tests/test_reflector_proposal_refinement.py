@@ -180,9 +180,11 @@ async def test_handles_llm_exception_gracefully():
 
 
 @pytest.mark.asyncio
-async def test_uses_think_true_for_refinement():
-    """Refinement uses think=True because we're in the nightly window
-    where latency doesn't matter and we want deep reasoning."""
+async def test_uses_think_false_for_refinement():
+    """Refinement uses think=False — earlier think=True consistently
+    timed out on the 35B (think tokens + entity catalog = 5+ min per
+    proposal). think=False still produces much better results than
+    the daytime 8B with limited context."""
     rough = [{
         "id": 80,
         "kind": "code_change",
@@ -200,14 +202,10 @@ async def test_uses_think_true_for_refinement():
 
     await reflector._refine_proposals()
 
-    # First llm.chat call is the catalog dispatch (which we mocked
-    # registry.dispatch separately). Actually no — registry.dispatch
-    # is for the catalog, not LLM. So the FIRST llm.chat call IS the
-    # refinement.
     chat_call = reflector.llm.chat.await_args_list[0]
-    assert chat_call.kwargs["think"] is True
+    assert chat_call.kwargs["think"] is False
     assert chat_call.kwargs["model"] == "qwen3.6:35b-a3b"
-    assert chat_call.kwargs["timeout"] == 600.0
+    assert chat_call.kwargs["timeout"] == 300.0
 
 
 @pytest.mark.asyncio

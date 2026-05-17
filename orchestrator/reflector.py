@@ -881,11 +881,13 @@ class NightlyReflector:
         the reasoner. Groups by area + domain. Used as grounding
         context so the 35B can recognize naming patterns ('han_*' is
         a vehicle's sensors) and propose tools that reference real
-        entities, not invented ones."""
+        entities, not invented ones.
+
+        Capped tightly at ~80 entities total because larger catalogs
+        push the 35B prompt past comfortable processing time
+        (refinement should be <2 min, not 10+ min)."""
         from .registry import CapabilityRegistry  # noqa: F401 — used reflectively
         try:
-            # Call home_automation.list_entities through the registry
-            # to get the same view the escalator sees.
             result = await self.registry.dispatch(
                 "home_automation",
                 "list_entities",
@@ -899,21 +901,23 @@ class NightlyReflector:
         if isinstance(result, dict) and "result" in result:
             payload = result["result"]
         by_area = (payload or {}).get("by_area") or {}
-        # Compact: just entity_id per area, capped at 200 entries total
-        # to keep prompt under 35B's effective context window.
+        # Compact: one line per entity, max 80 total. Within each area
+        # we sort entity_ids alphabetically so the same area appears
+        # in deterministic order across runs.
         lines = []
         total = 0
         for area, ents in sorted(by_area.items()):
-            if total >= 200:
-                lines.append("  (truncated)")
+            if total >= 80:
+                lines.append(f"  (truncated: {sum(len(v) for v in by_area.values()) - total} more entities not shown)")
                 break
+            sorted_ents = sorted(ents, key=lambda e: e.get("entity_id") or "")
             lines.append(f"# {area}:")
-            for e in ents[:30]:
-                if total >= 200:
+            for e in sorted_ents:
+                if total >= 80:
                     break
                 eid = e.get("entity_id") or ""
                 name = e.get("name") or ""
-                lines.append(f"  {eid}  {name}")
+                lines.append(f"  {eid}  ({name})" if name else f"  {eid}")
                 total += 1
         return "\n".join(lines)
 
@@ -979,17 +983,24 @@ class NightlyReflector:
                 ],
                 model=self.reasoner_model,
                 response_format="json",
-                # think=True is OK here — we're in the nightly window
-                # so latency doesn't matter. Letting the 35B think
-                # often produces noticeably better refinements.
-                think=True,
-                timeout=600.0,
+                # Was think=True with timeout=600 — that consistently
+                # blew past the timeout on the live N5 Pro (35B with
+                # thinking + entity catalog is 1000+ output tokens at
+                # 14 t/s = >70s + prefill = often >5 min). Refinement
+                # is pattern transformation, not deep reasoning — the
+                # 35B without thinking still produces much better
+                # results than the daytime 8B with limited context.
+                think=False,
+                timeout=300.0,
             )
         except Exception as exc:
             logger.warning(
                 "refine_proposal_llm_failed",
                 proposal_id=proposal.get("id"),
-                error=str(exc),
+                # Include the exception type because httpx.ReadTimeout
+                # has an empty str() representation, making the log
+                # useless for debugging.
+                error=f"{type(exc).__name__}: {exc!s}",
             )
             return None
 
