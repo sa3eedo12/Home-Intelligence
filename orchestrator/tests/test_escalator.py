@@ -407,3 +407,54 @@ def test_extract_entity_ids_rejects_unknown_domains():
     assert "some.random" not in out
     # "user.id" doesn't either
     assert "user.id" not in out
+
+
+def test_filter_relevant_entities_drops_unrelated():
+    """The live EV test harvested 39 entities including HA update
+    sensors and iPhone batteries. Filter must drop entities whose
+    entity_id contains NONE of the user's tokens."""
+    from orchestrator.escalator import _filter_relevant_entities
+    harvested = [
+        "update.button_card_update",
+        "update.ultra_card_update",
+        "sensor.saeeds_deebot_unit_care_lifespan",
+        "sensor.raspberry_pi_3_battery_level",
+        "sensor.saeeds_iphone_battery_level",
+        "sensor.han_battery_level",
+        "sensor.han_range",
+        "binary_sensor.han_charging",
+    ]
+    out = _filter_relevant_entities(
+        harvested, "What is the battery percentage of my car?"
+    )
+    # Update entities (no token match) dropped
+    assert "update.button_card_update" not in out
+    # Battery entities kept (token=battery matches)
+    assert "sensor.han_battery_level" in out
+    assert "sensor.raspberry_pi_3_battery_level" in out  # imperfect but acceptable
+    # 'car' / 'battery' both stopwords-free; deebot doesn't match either
+    assert "sensor.saeeds_deebot_unit_care_lifespan" not in out
+
+
+def test_filter_relevant_entities_falls_back_when_no_match():
+    """If filtering drops everything, keep the original list rather
+    than produce a proposal with zero evidence."""
+    from orchestrator.escalator import _filter_relevant_entities
+    out = _filter_relevant_entities(
+        ["sensor.han_battery_level"], "tell me a joke"
+    )
+    # 'joke' doesn't appear in any harvested entity but we keep the
+    # entity so the proposal still has SOMETHING to cite
+    assert out == ["sensor.han_battery_level"]
+
+
+def test_filter_relevant_entities_strips_stopwords():
+    """Stopwords like 'the', 'is', 'percentage' shouldn't be used as
+    match tokens — they'd match too much."""
+    from orchestrator.escalator import _filter_relevant_entities
+    out = _filter_relevant_entities(
+        ["sensor.something_irrelevant"], "what is the percentage"
+    )
+    # All input words are stopwords; the filter falls back to original
+    # rather than dropping the only entity
+    assert out == ["sensor.something_irrelevant"]

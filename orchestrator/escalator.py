@@ -235,6 +235,52 @@ def _extract_entity_ids(value: Any) -> list[str]:
     return found
 
 
+# Words to strip when extracting "relevant tokens" from user text for
+# filtering harvested entity_ids. These are too generic to indicate
+# which entities are actually about the request.
+_STOPWORDS = frozenset({
+    "what", "whats", "is", "are", "the", "a", "an", "of", "my", "your",
+    "in", "on", "at", "to", "for", "with", "by", "and", "or", "but",
+    "do", "does", "did", "can", "could", "would", "should", "would",
+    "please", "tell", "me", "i", "you", "we", "they", "this", "that",
+    "these", "those", "right", "now", "today", "currently", "any",
+    "some", "all", "how", "much", "many", "where", "when", "which",
+    "level", "state", "status", "value", "percentage", "percent",
+})
+
+
+def _filter_relevant_entities(entity_ids: list[str], user_text: str) -> list[str]:
+    """Filter harvested entity_ids down to those whose entity_id
+    contains a token from the user's request. Without this,
+    list_entities-style mass dumps pollute proposal evidence with
+    hundreds of unrelated entities.
+
+    Strategy:
+    - Tokenize user_text on non-alnum, lowercase, drop stopwords
+    - Tokenize each entity_id on the domain dot AND underscore (so
+      'sensor.han_battery_level' becomes {'han','battery','level'})
+    - Keep an entity if any user token (length >= 3) matches any
+      entity token (WORD-level, not substring — so 'car' matches
+      'car' but not 'card').
+    - If filtering would drop everything, fall back to the unfiltered
+      list rather than producing an empty proposal evidence section.
+    """
+    if not entity_ids:
+        return []
+    raw_tokens = re.findall(r"[a-z0-9]+", user_text.lower())
+    tokens = {t for t in raw_tokens if len(t) >= 3 and t not in _STOPWORDS}
+    if not tokens:
+        return list(entity_ids)
+    kept = []
+    for eid in entity_ids:
+        # Strip the domain prefix then split on underscores into words
+        _, _, after_dot = eid.partition(".")
+        eid_words = set(after_dot.lower().split("_"))
+        if tokens & eid_words:
+            kept.append(eid)
+    return kept or list(entity_ids)
+
+
 class Escalator:
     def __init__(
         self,
@@ -544,11 +590,22 @@ class Escalator:
             outcome_kind = "no_tool_proposed"
         else:
             outcome_kind = "max_iterations"
+
+        # Filter the harvested entities down to those plausibly related
+        # to the user's request. Without this, list_entities-style mass
+        # dumps would pollute the proposal evidence with hundreds of
+        # unrelated entity_ids (iPhone batteries, RPi sensors, etc.).
+        # Heuristic: keep entities whose entity_id contains ANY token
+        # from the user_text (after stripping common words).
+        relevant_discovered = _filter_relevant_entities(
+            discovered_entity_ids, text
+        )
         escalation_path.append({
             "iter": self._max_iterations + 1,
             "stage": "exhausted",
             "outcome": outcome_kind,
-            "discovered_entities": list(discovered_entity_ids),
+            "discovered_entities": relevant_discovered,
+            "discovered_total": len(discovered_entity_ids),
             "last_observation_preview": (last_observation or "")[:300],
         })
         # Also emit a synthetic give_up record so the router's
@@ -556,7 +613,7 @@ class Escalator:
         # use the harvested discovery context. Without this, an
         # exhausted run with rich entity discovery wouldn't trigger a
         # proposal even though the evidence is sitting right there.
-        if discovered_entity_ids and outcome_kind == "max_iterations":
+        if relevant_discovered and outcome_kind == "max_iterations":
             escalation_path.append({
                 "iter": self._max_iterations + 1,
                 "stage": "give_up",
@@ -564,7 +621,7 @@ class Escalator:
                     "Exhausted iterations after discovering related "
                     "entities but failing to compose a clean reply."
                 ),
-                "discovered_entities": list(discovered_entity_ids),
+                "discovered_entities": relevant_discovered,
                 "suggested_tool_spec": None,
             })
         logger.info(
