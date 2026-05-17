@@ -180,11 +180,18 @@ async def test_handles_llm_exception_gracefully():
 
 
 @pytest.mark.asyncio
-async def test_uses_35b_with_long_timeout_for_refinement():
-    """Refinement uses the 35B reasoner with a 30-min timeout. We're
-    in the nightly window — we have hours. The 35B produces sharper
-    refinements when given time; Ollama itself has no hard request
-    limit so the model genuinely keeps generating."""
+async def test_uses_8b_with_180s_timeout_for_batch_refinement():
+    """Batch refinement uses the 8B fallback model with a 180s timeout.
+
+    The 35B reasoner deadlocks under sustained back-to-back calls
+    (Vulkan/RADV: GPU sits at 0% busy while the request hangs at the
+    network layer). The 8B (qwen3:8b) finishes a refinement in 30-60s
+    with genuinely good quality — proven on real hardware to refine
+    9 proposals in ~3 minutes including correctly narrowing
+    "27 batteries" to the actual EV sensors.
+
+    The 35B is reserved for ONE single-shot synthesis call per night
+    in _synthesize_nightly_brief, where the deadlock doesn't trigger."""
     rough = [{
         "id": 80,
         "kind": "code_change",
@@ -204,9 +211,9 @@ async def test_uses_35b_with_long_timeout_for_refinement():
 
     chat_call = reflector.llm.chat.await_args_list[0]
     assert chat_call.kwargs["think"] is False
-    # 35B reasoner now with 30-min budget (Ollama has no hard limit)
-    assert chat_call.kwargs["model"] == "qwen3.6:35b-a3b"
-    assert chat_call.kwargs["timeout"] == 1800.0
+    # 8B batch refinement — 35B hits Vulkan/RADV deadlock on sustained calls
+    assert chat_call.kwargs["model"] == "qwen3:8b"
+    assert chat_call.kwargs["timeout"] == 180.0
 
 
 @pytest.mark.asyncio

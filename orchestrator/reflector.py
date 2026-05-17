@@ -407,6 +407,38 @@ class NightlyReflector:
                 [],
                 proposals,
             )
+            self._status["phase"] = "synthesize_nightly_brief"
+            # ONE 35B call per night that reads everything that just
+            # ran and produces a headline + tomorrow's attention item.
+            # The 35B is reserved for this single-shot synthesis
+            # because it deadlocks under sustained back-to-back calls
+            # (Vulkan/RADV: GPU sits at 0% busy). A single call is
+            # safe — and the quality lift over the 8B is worth it
+            # when the output becomes the morning brief headline.
+            #
+            # _phase doesn't support kwargs, so we wrap the call
+            # ourselves to get the same error-containment behavior.
+            try:
+                synthesis = await self._synthesize_nightly_brief(
+                    refined_proposals=refined_proposals,
+                    gap_proposals=gap_proposals,
+                    proposals=proposals,
+                    health_summary=health_summary,
+                    patterns=patterns,
+                    correlations=correlations,
+                    knowledge_gaps=gaps,
+                )
+            except Exception as exc:
+                error_repr = f"{type(exc).__name__}: {exc!s}".strip().rstrip(":")
+                logger.warning(
+                    "reflection_phase_failed",
+                    phase="synthesize_nightly_brief",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    error_repr=error_repr,
+                )
+                errors.append({"phase": "synthesize_nightly_brief", "error": error_repr})
+                synthesis = {}
             self._status["phase"] = "save_brief"
             body = self._build_brief_body(
                 evidence,
@@ -419,6 +451,7 @@ class NightlyReflector:
                 correlations=correlations,
                 gap_proposals=gap_proposals,
                 refined_proposals=refined_proposals,
+                nightly_synthesis=synthesis,
             )
             brief_id = await self._phase("save_brief", self._save_brief, errors, 0, body)
             body["brief_id"] = brief_id
@@ -989,21 +1022,25 @@ class NightlyReflector:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                # 35B reasoner with the full HA entity catalog for
-                # grounding. We're in the nightly window — generous
-                # timeout because: (a) we have 7-8 hours, (b) the 35B
-                # produces noticeably sharper refinements than the 8B
-                # when given time to think, (c) Ollama itself has no
-                # hard request limit so the model genuinely keeps
-                # generating until done.
+                # 8B for batch refinement. We learned the hard way that
+                # the 35B (qwen3.6:35b-a3b) hits a Vulkan/RADV deadlock
+                # under sustained back-to-back calls: GPU sits at 0%
+                # busy while the request hangs at the network layer for
+                # the full client timeout. The 8B (qwen3:8b) finishes a
+                # refinement in 30-60s with genuinely good quality —
+                # 9 proposals refined in ~3 minutes on real hardware,
+                # with proposal #59 correctly narrowing "27 batteries"
+                # down to the actual BYD HAN sensors.
                 #
-                # If this still doesn't complete in 30 min, the fallback
-                # path (catch Exception) returns None and the proposal
-                # stays unrefined for the next nightly run.
-                model=self.reasoner_model,
+                # The 35B is still used ONCE per nightly run in
+                # _synthesize_nightly_brief — a single-shot call works
+                # fine because the deadlock only triggers under
+                # sustained load. See plan.md "Known limitations" for
+                # the full RADV deadlock writeup.
+                model=self.fallback_model,
                 response_format="json",
                 think=False,
-                timeout=1800.0,  # 30 minutes
+                timeout=180.0,
             )
         except Exception as exc:
             logger.warning(
@@ -1053,7 +1090,153 @@ class NightlyReflector:
             "title": title,
             "rationale": rationale,
             "confidence": confidence,
-            "notes": notes or "refined by 35B",
+            "notes": notes or "refined by 8B",
+        }
+
+    async def _synthesize_nightly_brief(
+        self,
+        *,
+        refined_proposals: list[dict[str, Any]],
+        gap_proposals: list[dict[str, Any]],
+        proposals: list[dict[str, Any]],
+        health_summary: dict[str, Any],
+        patterns: list[dict[str, Any]],
+        correlations: list[dict[str, Any]],
+        knowledge_gaps: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        """ONE 35B call per nightly run, after every other phase has run.
+
+        The 35B (qwen3.6:35b-a3b) deadlocks under sustained back-to-back
+        calls (Vulkan/RADV: GPU sits at 0% busy while requests hang at
+        the network layer). But a single-shot call works fine — the
+        deadlock is specific to sustained load.
+
+        So we use it where it matters most: synthesizing everything
+        that just happened into ONE coherent paragraph that becomes
+        the headline of the morning brief. Quality over quantity:
+        one big think, not 50 small ones.
+
+        Returns a dict with `headline` (1-2 sentence summary) and
+        `attention` (what most deserves the user's eyes tomorrow).
+        Returns an empty dict if the call fails — the brief still
+        renders fine without the synthesis."""
+
+        def _trim(items: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
+            """Take top N items, stripping verbose fields. The 35B has
+            generous context but the synthesis prompt has a budget."""
+            out: list[dict[str, Any]] = []
+            for item in items[:n]:
+                if not isinstance(item, dict):
+                    continue
+                out.append({
+                    k: v for k, v in item.items()
+                    if k in {
+                        "id", "kind", "title", "confidence",
+                        "rationale", "notes", "changed",
+                        "key", "description",
+                    } and v is not None
+                })
+            return out
+
+        # If literally nothing happened, skip the call — no need to
+        # burn a 35B invocation on emptiness.
+        total_signals = (
+            len(refined_proposals) + len(gap_proposals) + len(proposals)
+            + len(patterns) + len(correlations) + len(knowledge_gaps)
+        )
+        if total_signals == 0:
+            logger.info("reflection_synthesis_skipped_no_signals")
+            return {}
+
+        system = (
+            "You are the nightly synthesis engine for a local home AI "
+            "assistant. Every other reflection phase has just finished. "
+            "Your job: read ALL the night's outputs and produce ONE "
+            "paragraph the user should read first thing in the morning.\n\n"
+            "Focus on:\n"
+            "- What patterns emerged that cut across multiple phases\n"
+            "- What the system genuinely LEARNED tonight (not just listed)\n"
+            "- What ONE thing most deserves the user's attention tomorrow\n"
+            "- Connect refined proposals to gap_proposals when they're "
+            "  about the same underlying capability gap\n\n"
+            "Reply with ONE JSON object — no prose, no code fences:\n"
+            '{\n'
+            '  "headline": "<1-2 sentence summary, plain English>",\n'
+            '  "attention": "<the single most important thing for tomorrow>",\n'
+            '  "patterns": "<cross-phase insights worth noting, or empty>"\n'
+            "}\n\n"
+            "Be specific, not generic. Reference actual proposal titles "
+            "and entity names. If nothing notable happened, say so "
+            "honestly — don't manufacture importance."
+        )
+
+        payload = {
+            "refined_proposals": _trim(refined_proposals, 20),
+            "capability_gap_proposals": _trim(gap_proposals, 10),
+            "other_proposals": _trim(proposals, 20),
+            "knowledge_gaps": _trim(knowledge_gaps, 10),
+            "hourly_patterns": patterns[:10],
+            "correlations": correlations[:10],
+            "health_summary": health_summary,
+        }
+        user = (
+            "Tonight's reflection outputs:\n"
+            f"{_json_compact(payload)}\n\n"
+            "Now produce the synthesis JSON."
+        )
+
+        try:
+            # 35B single-shot. Deadlock only triggers under sustained
+            # load — one call per night is safe. Generous timeout
+            # because: (a) nightly window has hours, (b) Ollama itself
+            # has no hard request limit, (c) think=False keeps it from
+            # over-deliberating.
+            response = await self.llm.chat(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                model=self.reasoner_model,
+                response_format="json",
+                think=False,
+                timeout=1800.0,
+            )
+        except Exception as exc:
+            logger.warning(
+                "reflection_synthesis_llm_failed",
+                error=f"{type(exc).__name__}: {exc!s}",
+                model=self.reasoner_model,
+            )
+            return {}
+
+        content = (response.get("message") or {}).get("content") or ""
+        try:
+            parsed = _extract_json(content)
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning(
+                "reflection_synthesis_bad_json",
+                error=str(exc),
+                content_preview=content[:200],
+            )
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+
+        headline = str(parsed.get("headline") or "").strip()
+        attention = str(parsed.get("attention") or "").strip()
+        patterns_note = str(parsed.get("patterns") or "").strip()
+
+        # Reject obviously empty synthesis (model returned valid JSON
+        # but no actual content).
+        if not headline and not attention:
+            logger.info("reflection_synthesis_empty")
+            return {}
+
+        return {
+            "headline": headline,
+            "attention": attention,
+            "patterns": patterns_note,
+            "model": self.reasoner_model,
         }
 
     async def _health_summary(self) -> dict[str, Any]:
@@ -1367,6 +1550,7 @@ class NightlyReflector:
         correlations: list[dict[str, Any]] | None = None,
         gap_proposals: list[dict[str, Any]] | None = None,
         refined_proposals: list[dict[str, Any]] | None = None,
+        nightly_synthesis: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         yesterday = [
             {"id": row.get("id"), "ts": row.get("ts"), "summary": row.get("summary")}
@@ -1397,15 +1581,22 @@ class NightlyReflector:
         code_wishlist = [
             proposal for proposal in proposals if proposal.get("kind") == "code_change"
         ]
+        synthesis = dict(nightly_synthesis or {})
+        # If synthesis produced a headline, promote it as the brief
+        # summary — that's the whole point of running the 35B once.
+        # Falls back to the heuristic _headline() when synthesis was
+        # skipped/failed (e.g. no signals tonight or LLM error).
+        summary = synthesis.get("headline") or self._headline(proposals, gaps, errors)
         return {
             "generated_at": datetime.now(UTC).isoformat(),
-            "summary": self._headline(proposals, gaps, errors),
+            "summary": summary,
             "yesterday": yesterday,
             "questions_for_you": questions,
             "suggestions_for_me": suggestions,
             "code_wishlist": code_wishlist,
             "capability_gap_proposals": list(gap_proposals or []),
             "refined_proposals": list(refined_proposals or []),
+            "nightly_synthesis": synthesis,
             "proposals": proposals,
             "evidence": evidence,
             "self_audit": audit,

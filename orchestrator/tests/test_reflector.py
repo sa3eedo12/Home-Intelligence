@@ -133,7 +133,9 @@ async def test_run_once_executes_pipeline_and_requires_evidence_citations() -> N
     assert {"events:24", "profile", "brief"}.issubset(set(store.calls))
     assert result["patterns"][0]["hour"] == 7
     assert store.proposals[0]["status"] == "pending"
-    messages = llm.chat.await_args.kwargs["messages"]
+    # First chat call is _generate_proposals; the synthesis call (added later)
+    # is the LAST call, so grab the first to assert proposal-prompt contract.
+    messages = llm.chat.await_args_list[0].kwargs["messages"]
     assert "Every proposal MUST cite" in messages[0]["content"]
     assert "knowledge-gap key" in messages[0]["content"]
 
@@ -149,7 +151,10 @@ async def test_health_summary_is_included_in_prompt_context() -> None:
 
     await reflector.run_once()
 
-    prompt = json.loads(llm.chat.await_args.kwargs["messages"][1]["content"])
+    # Find the _generate_proposals call (it's the one with the SYSTEM_PROMPT
+    # — the synthesis call also makes an LLM call but uses a different prompt).
+    # The proposals call is always first now that synthesis runs last.
+    prompt = json.loads(llm.chat.await_args_list[0].kwargs["messages"][1]["content"])
     assert prompt["health_summary"] == {
         "sleep_asleep_7d": [{"metric": "sleep_asleep", "day": "2026-05-13", "value": 420}],
         "steps_7d": [{"metric": "steps", "day": "2026-05-13", "value": 9000}],
@@ -197,7 +202,9 @@ async def test_reasoner_http_error_falls_back_to_default_model() -> None:
     llm = MagicMock()
     llm.chat = AsyncMock(
         side_effect=[
+            # 1st call: _generate_proposals reasoner attempt → fails
             httpx.HTTPError("model missing"),
+            # 2nd call: _generate_proposals fallback retry → succeeds
             _response(
                 [
                     {
@@ -210,6 +217,12 @@ async def test_reasoner_http_error_falls_back_to_default_model() -> None:
                     }
                 ]
             ),
+            # 3rd call: _synthesize_nightly_brief (single-shot 35B at the
+            # end of the pipeline). Returns a valid synthesis JSON so this
+            # test only exercises the proposals fallback path.
+            {"message": {"content": json.dumps({
+                "headline": "h", "attention": "a", "patterns": "",
+            })}},
         ]
     )
 
@@ -217,7 +230,8 @@ async def test_reasoner_http_error_falls_back_to_default_model() -> None:
 
     assert result["brief_id"] == 77
     models = [call.kwargs["model"] for call in llm.chat.call_args_list]
-    assert models == ["reasoner-model", "fallback-model"]
+    # proposals reasoner → proposals fallback → synthesis reasoner
+    assert models == ["reasoner-model", "fallback-model", "reasoner-model"]
     assert store.proposals[0]["title"] == "Ask wake time"
 
 

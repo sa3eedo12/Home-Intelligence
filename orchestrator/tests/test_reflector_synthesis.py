@@ -1,0 +1,216 @@
+"""Tests for the nightly synthesis phase.
+
+Pins the contract: AFTER all other reflection phases (refinement,
+generate_proposals, health, correlations, etc.) have run, we make
+ONE 35B call that produces a headline + tomorrow's attention item.
+
+Why this exists:
+  The 35B reasoner (qwen3.6:35b-a3b) deadlocks under sustained
+  back-to-back calls on Vulkan/RADV — GPU sits at 0% busy while the
+  request hangs at the network layer. Single-shot calls work fine,
+  so we reserve the 35B for ONE big synthesis at the end of the
+  nightly window where the quality lift matters most (the headline
+  on the morning brief).
+"""
+
+from __future__ import annotations
+
+import json
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from orchestrator.reflector import NightlyReflector
+
+
+def _make_reflector(*, llm_response: str | None = None, raise_on_chat: Exception | None = None):
+    pool = MagicMock()
+    redis = MagicMock()
+    llm = MagicMock()
+    if raise_on_chat is not None:
+        llm.chat = AsyncMock(side_effect=raise_on_chat)
+    else:
+        llm.chat = AsyncMock(return_value={
+            "message": {"content": llm_response or "{}"}
+        })
+    registry = MagicMock()
+    reflector = NightlyReflector(
+        pool=pool, redis=redis, llm=llm, registry=registry,
+        reasoner_model="qwen3.6:35b-a3b", fallback_model="qwen3:8b",
+        gap_store=MagicMock(),
+    )
+    return reflector
+
+
+def _sample_payload():
+    """Realistic-shaped phase outputs to feed the synthesizer."""
+    return {
+        "refined_proposals": [
+            {"id": 59, "kind": "code_change", "changed": True,
+             "title": "Add ev_status tool for BYD HAN",
+             "rationale": "Narrowed from 27 batteries to the 2 HAN sensors.",
+             "confidence": 0.95, "notes": "refined by 8B"},
+        ],
+        "gap_proposals": [
+            {"id": 60, "kind": "code_change",
+             "title": "Add lock tools for Aqara Smart Lock A100",
+             "rationale": "User asked to lock front door.", "confidence": 0.8},
+        ],
+        "proposals": [
+            {"kind": "habit_inference", "title": "Wake-up shifted to 06:30",
+             "rationale": "Apple Health shows 7-day median.", "confidence": 0.7},
+        ],
+        "health_summary": {"sleep_asleep_7d": [{"day": "2026-05-15", "value": 6.2}]},
+        "patterns": [{"hour": 7, "agent": "personal_assistant", "count": 12}],
+        "correlations": [{"insight": "Steps high on workout days"}],
+        "knowledge_gaps": [{"key": "work_hours", "description": "Unknown"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_synthesis_uses_35b_single_shot():
+    """Synthesis is the ONE place the 35B is used per nightly run.
+    Single-shot calls don't trigger the Vulkan/RADV deadlock that
+    plagued the batch refinement attempts."""
+    llm_response = json.dumps({
+        "headline": "Tonight the system learned about your EV and front door.",
+        "attention": "Approve proposal #59 (ev_status tool).",
+        "patterns": "Multiple gap proposals cluster around device control.",
+    })
+    reflector = _make_reflector(llm_response=llm_response)
+
+    await reflector._synthesize_nightly_brief(**_sample_payload())
+
+    assert reflector.llm.chat.await_count == 1
+    chat_call = reflector.llm.chat.await_args_list[0]
+    assert chat_call.kwargs["model"] == "qwen3.6:35b-a3b"
+    assert chat_call.kwargs["think"] is False
+    # Generous timeout: we're in the nightly window with hours to
+    # spare, and Ollama itself has no hard request limit.
+    assert chat_call.kwargs["timeout"] == 1800.0
+
+
+@pytest.mark.asyncio
+async def test_synthesis_returns_structured_output():
+    """A successful synthesis returns headline + attention + patterns."""
+    llm_response = json.dumps({
+        "headline": "9 proposals refined, 1 needs your attention.",
+        "attention": "Review the ev_status tool spec — it's ready.",
+        "patterns": "Capability gaps cluster around new HA devices.",
+    })
+    reflector = _make_reflector(llm_response=llm_response)
+
+    out = await reflector._synthesize_nightly_brief(**_sample_payload())
+
+    assert out["headline"].startswith("9 proposals")
+    assert "ev_status" in out["attention"]
+    assert "Capability gaps" in out["patterns"]
+    assert out["model"] == "qwen3.6:35b-a3b"
+
+
+@pytest.mark.asyncio
+async def test_synthesis_skipped_when_nothing_happened():
+    """If every phase produced empty outputs, don't burn a 35B call
+    on emptiness — return {} so the brief falls back to the
+    heuristic headline."""
+    reflector = _make_reflector(llm_response="{}")
+
+    out = await reflector._synthesize_nightly_brief(
+        refined_proposals=[],
+        gap_proposals=[],
+        proposals=[],
+        health_summary={},
+        patterns=[],
+        correlations=[],
+        knowledge_gaps=[],
+    )
+
+    assert out == {}
+    # And critically — the LLM was never called.
+    reflector.llm.chat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_synthesis_swallows_llm_errors():
+    """If the 35B hangs (Vulkan deadlock) or times out, the brief
+    still renders — we just lose the synthesis headline this run."""
+    import httpx
+    reflector = _make_reflector(raise_on_chat=httpx.ReadTimeout(""))
+
+    out = await reflector._synthesize_nightly_brief(**_sample_payload())
+
+    assert out == {}
+
+
+@pytest.mark.asyncio
+async def test_synthesis_rejects_empty_response():
+    """If the LLM returns valid JSON but no actual content, don't
+    promote an empty string to the brief headline."""
+    llm_response = json.dumps({"headline": "", "attention": "", "patterns": ""})
+    reflector = _make_reflector(llm_response=llm_response)
+
+    out = await reflector._synthesize_nightly_brief(**_sample_payload())
+
+    assert out == {}
+
+
+@pytest.mark.asyncio
+async def test_synthesis_rejects_bad_json():
+    """Mangled JSON from the LLM → empty dict, not a crash."""
+    reflector = _make_reflector(llm_response="not json at all <think>...")
+
+    out = await reflector._synthesize_nightly_brief(**_sample_payload())
+
+    assert out == {}
+
+
+@pytest.mark.asyncio
+async def test_synthesis_headline_promotes_to_brief_summary():
+    """The whole point of running the 35B once: its headline becomes
+    the brief summary, replacing the heuristic _headline() output."""
+    llm_response = json.dumps({
+        "headline": "Tonight's reflection produced 3 refined proposals worth your attention.",
+        "attention": "Approve the BYD HAN ev_status tool spec.",
+        "patterns": "",
+    })
+    reflector = _make_reflector(llm_response=llm_response)
+
+    synthesis = await reflector._synthesize_nightly_brief(**_sample_payload())
+
+    body = reflector._build_brief_body(
+        evidence={"events": []},
+        audit={},
+        gaps=[],
+        patterns=[],
+        health_summary={},
+        proposals=[],
+        errors=[],
+        nightly_synthesis=synthesis,
+    )
+
+    # Summary should be the 35B headline, NOT the fallback heuristic.
+    assert body["summary"].startswith("Tonight's reflection")
+    # And the full synthesis is preserved for the dashboard to render.
+    assert body["nightly_synthesis"]["attention"].startswith("Approve")
+
+
+@pytest.mark.asyncio
+async def test_synthesis_absence_falls_back_to_heuristic_headline():
+    """When synthesis is empty (skipped or failed), the brief
+    summary uses the existing heuristic — backwards compatible."""
+    reflector = _make_reflector()
+
+    body = reflector._build_brief_body(
+        evidence={"events": []},
+        audit={},
+        gaps=[],
+        patterns=[],
+        health_summary={},
+        proposals=[],
+        errors=[],
+        nightly_synthesis={},
+    )
+
+    # Falls back to "Reflection found no urgent gaps overnight." etc.
+    assert "Reflection" in body["summary"]
+    assert body["nightly_synthesis"] == {}
