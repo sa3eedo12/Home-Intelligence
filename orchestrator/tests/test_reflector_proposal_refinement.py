@@ -180,11 +180,11 @@ async def test_handles_llm_exception_gracefully():
 
 
 @pytest.mark.asyncio
-async def test_uses_8b_for_refinement_not_35b():
-    """Refinement uses the 8B fallback model, not the 35B reasoner.
-    35B sustained 10-min timeouts under back-to-back refinement on
-    the live N5 Pro. 8B finishes in 30-60s and still produces a
-    much sharper proposal than the daytime escalator's filing."""
+async def test_uses_35b_with_long_timeout_for_refinement():
+    """Refinement uses the 35B reasoner with a 30-min timeout. We're
+    in the nightly window — we have hours. The 35B produces sharper
+    refinements when given time; Ollama itself has no hard request
+    limit so the model genuinely keeps generating."""
     rough = [{
         "id": 80,
         "kind": "code_change",
@@ -204,9 +204,9 @@ async def test_uses_8b_for_refinement_not_35b():
 
     chat_call = reflector.llm.chat.await_args_list[0]
     assert chat_call.kwargs["think"] is False
-    # Explicitly the fallback (8B), NOT the reasoner (35B)
-    assert chat_call.kwargs["model"] == "qwen3:8b"
-    assert chat_call.kwargs["timeout"] == 180.0
+    # 35B reasoner now with 30-min budget (Ollama has no hard limit)
+    assert chat_call.kwargs["model"] == "qwen3.6:35b-a3b"
+    assert chat_call.kwargs["timeout"] == 1800.0
 
 
 @pytest.mark.asyncio

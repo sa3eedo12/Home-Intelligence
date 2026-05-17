@@ -989,26 +989,26 @@ class NightlyReflector:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                # Use the 8B fallback model for refinement, NOT the 35B.
-                # The 35B sustained 10-minute timeouts under back-to-back
-                # refinement load on the live N5 Pro — it can do
-                # one-shot deep reasoning but the iGPU thrashes under
-                # repeated 5+ minute calls. The 8B finishes a
-                # refinement in 30-60s, runs the whole batch in ~10
-                # min, and still produces a much sharper proposal
-                # than the daytime escalator's filing.
-                model=self.fallback_model,
+                # 35B reasoner with the full HA entity catalog for
+                # grounding. We're in the nightly window — generous
+                # timeout because: (a) we have 7-8 hours, (b) the 35B
+                # produces noticeably sharper refinements than the 8B
+                # when given time to think, (c) Ollama itself has no
+                # hard request limit so the model genuinely keeps
+                # generating until done.
+                #
+                # If this still doesn't complete in 30 min, the fallback
+                # path (catch Exception) returns None and the proposal
+                # stays unrefined for the next nightly run.
+                model=self.reasoner_model,
                 response_format="json",
                 think=False,
-                timeout=180.0,
+                timeout=1800.0,  # 30 minutes
             )
         except Exception as exc:
             logger.warning(
                 "refine_proposal_llm_failed",
                 proposal_id=proposal.get("id"),
-                # Include the exception type because httpx.ReadTimeout
-                # has an empty str() representation, making the log
-                # useless for debugging.
                 error=f"{type(exc).__name__}: {exc!s}",
             )
             return None
