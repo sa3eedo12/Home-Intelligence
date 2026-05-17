@@ -190,6 +190,51 @@ def _summarise_observation(result: Any, max_chars: int = 1200) -> str:
     return text[: max_chars - 1] + "…"
 
 
+# HA entity_ids are domain.snake_case. Harvest these from arbitrary
+# tool results so the escalator can report discovered entities to the
+# inline-proposal layer even when it gives up or hits max_iterations.
+_HA_DOMAINS = {
+    "sensor", "binary_sensor", "switch", "light", "climate", "cover",
+    "lock", "vacuum", "fan", "media_player", "camera", "device_tracker",
+    "person", "scene", "automation", "script", "input_boolean",
+    "input_number", "input_select", "number", "select", "button",
+    "update", "alarm_control_panel",
+}
+_ENTITY_ID_REGEX = re.compile(r"\b([a-z][a-z0-9_]*\.[a-z][a-z0-9_]+)\b")
+
+
+def _extract_entity_ids(value: Any) -> list[str]:
+    """Walk a tool result and pull out everything that looks like an HA
+    entity_id. Permissive on regex matches but restrictive on domain
+    (must be a known HA domain) — false positives here would pollute
+    proposal evidence."""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            eid = node.get("entity_id")
+            if isinstance(eid, str) and "." in eid and eid not in seen:
+                seen.add(eid)
+                found.append(eid)
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+        elif isinstance(node, str):
+            for match in _ENTITY_ID_REGEX.findall(node):
+                if match in seen:
+                    continue
+                domain = match.split(".", 1)[0]
+                if domain in _HA_DOMAINS:
+                    seen.add(match)
+                    found.append(match)
+
+    _walk(value)
+    return found
+
+
 class Escalator:
     def __init__(
         self,
@@ -252,6 +297,16 @@ class Escalator:
         any_tool_errored = False
         any_tool_ok = False
         last_observation: str | None = None
+        # Track every entity_id that surfaced in a tool result during
+        # the loop. Even if we run out of iterations without a clean
+        # resolution, the FACT that these entities exist is the most
+        # valuable signal for the inline-proposal layer ("you have HAN
+        # sensors but no ev_status tool"). Without this, the
+        # max_iterations exhausted path produces a gap with no context
+        # and the reflector / inline-proposal logic has nothing to
+        # work with.
+        discovered_entity_ids: list[str] = []
+        seen_entity_ids: set[str] = set()
 
         for iteration in range(1, self._max_iterations + 1):
             try:
@@ -349,21 +404,27 @@ class Escalator:
                 )
 
             if action == "give_up":
-                discovered = step.get("discovered_entities") or []
-                if not isinstance(discovered, list):
-                    discovered = []
+                # Merge LLM-claimed discovered entities with what we
+                # harvested from tool results. LLM's list is
+                # authoritative when present (it picked the relevant
+                # ones); we fall back to our harvested list when the
+                # model didn't bother.
+                llm_discovered = step.get("discovered_entities") or []
+                if not isinstance(llm_discovered, list):
+                    llm_discovered = []
+                merged = [str(e) for e in llm_discovered if e] or list(discovered_entity_ids)
                 escalation_path.append({
                     "iter": iteration,
                     "stage": "give_up",
                     "reason": step.get("reason"),
-                    "discovered_entities": [str(e) for e in discovered if e],
+                    "discovered_entities": merged,
                     "suggested_tool_spec": step.get("suggested_tool_spec"),
                 })
                 logger.info(
                     "escalator_gave_up",
                     iteration=iteration,
                     reason=step.get("reason"),
-                    discovered_count=len(discovered),
+                    discovered_count=len(merged),
                     has_tool_spec=bool(step.get("suggested_tool_spec")),
                 )
                 return None, escalation_path
@@ -442,6 +503,16 @@ class Escalator:
                 tool_outcome = "exception"
                 any_tool_errored = True
 
+            # Harvest entity_ids from the result so we can include them
+            # in any eventual give_up / exhausted summary. Walking the
+            # JSON recursively catches them whether they're nested
+            # under "hits", "by_area", "thermostats", "result", etc.
+            if tool_outcome == "ok":
+                for eid in _extract_entity_ids(result):
+                    if eid not in seen_entity_ids:
+                        seen_entity_ids.add(eid)
+                        discovered_entity_ids.append(eid)
+
             tools_used.append({
                 "agent": agent,
                 "capability": capability,
@@ -477,8 +548,25 @@ class Escalator:
             "iter": self._max_iterations + 1,
             "stage": "exhausted",
             "outcome": outcome_kind,
+            "discovered_entities": list(discovered_entity_ids),
             "last_observation_preview": (last_observation or "")[:300],
         })
+        # Also emit a synthetic give_up record so the router's
+        # inline-proposal logic (which looks for stage=='give_up') can
+        # use the harvested discovery context. Without this, an
+        # exhausted run with rich entity discovery wouldn't trigger a
+        # proposal even though the evidence is sitting right there.
+        if discovered_entity_ids and outcome_kind == "max_iterations":
+            escalation_path.append({
+                "iter": self._max_iterations + 1,
+                "stage": "give_up",
+                "reason": (
+                    "Exhausted iterations after discovering related "
+                    "entities but failing to compose a clean reply."
+                ),
+                "discovered_entities": list(discovered_entity_ids),
+                "suggested_tool_spec": None,
+            })
         logger.info(
             "escalator_exhausted",
             outcome=outcome_kind,

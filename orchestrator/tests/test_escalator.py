@@ -330,3 +330,80 @@ async def test_strips_agent_prefix_from_capability():
     assert len(tool_steps) == 1
     assert tool_steps[0]["outcome"] == "ok"
     assert tool_steps[0]["capability"] == "climate_status"
+
+
+@pytest.mark.asyncio
+async def test_exhausted_with_harvested_entities_emits_synthetic_giveup():
+    """The headline EV test: 8b kept calling search_entities and
+    get_entity_state, found han_battery_level, but never produced
+    'resolved' or 'give_up'. Exhausted at max_iterations. The
+    harvested entities MUST surface so the router can file an inline
+    proposal."""
+    llm = MagicMock()
+    llm.chat = AsyncMock(return_value={
+        "message": {"content":
+            '{"action": "tool_call", "agent": "ha", "capability": "search_entities", "inputs": {"query": "battery"}}'
+        }
+    })
+    registry = _registry(
+        caps=[{"agent": "ha", "id": "search_entities", "description": "search"}],
+        dispatch_results={
+            ("ha", "search_entities"): {
+                "query": "battery",
+                "total_matched": 1,
+                "hits": [
+                    {"entity_id": "sensor.han_battery_level", "name": "HAN Battery level",
+                     "state": "68", "area": "Garage", "domain": "sensor"}
+                ],
+            },
+        },
+    )
+    esc = Escalator(llm=llm, registry=registry, model="qwen3:8b", max_iterations=3)
+
+    resolution, path = await esc.resolve("what is the battery percentage of my car?")
+
+    assert resolution is None
+    # An "exhausted" record AND a synthetic "give_up" with the harvested entity
+    exhausted = [p for p in path if p.get("stage") == "exhausted"]
+    assert len(exhausted) == 1
+    assert "sensor.han_battery_level" in exhausted[0]["discovered_entities"]
+    give_ups = [p for p in path if p.get("stage") == "give_up"]
+    assert len(give_ups) == 1, "synthetic give_up should be emitted for inline-proposal layer"
+    assert "sensor.han_battery_level" in give_ups[0]["discovered_entities"]
+    assert "Exhausted iterations" in give_ups[0]["reason"]
+
+
+def test_extract_entity_ids_walks_nested_dict():
+    """The harvest helper must catch entity_ids in any nested dict,
+    list, or string field — tool results aren't normalized."""
+    from orchestrator.escalator import _extract_entity_ids
+    sample = {
+        "result": {
+            "hits": [
+                {"entity_id": "sensor.han_battery_level", "state": "68"},
+                {"entity_id": "binary_sensor.han_charging", "state": "off"},
+            ],
+            "by_area": {
+                "Garage": [{"entity_id": "climate.han_climate"}],
+            },
+        },
+        "summary": "Found 3 entities in Garage: climate.han_climate, sensor.han_range",
+    }
+    out = _extract_entity_ids(sample)
+    # Direct entity_id fields + regex-matched in summary string
+    assert "sensor.han_battery_level" in out
+    assert "binary_sensor.han_charging" in out
+    assert "climate.han_climate" in out
+    assert "sensor.han_range" in out  # picked up from the summary string
+
+
+def test_extract_entity_ids_rejects_unknown_domains():
+    """Don't pollute proposal evidence with random dotted strings."""
+    from orchestrator.escalator import _extract_entity_ids
+    sample = {"message": "some.random.path and user.id but sensor.real_one is real"}
+    out = _extract_entity_ids(sample)
+    assert "sensor.real_one" in out
+    # "some.random" has no _HA_DOMAIN prefix
+    assert "some.random" not in out
+    # "user.id" doesn't either
+    assert "user.id" not in out
