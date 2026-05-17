@@ -716,16 +716,24 @@ class NightlyReflector:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                model=self.reasoner_model,
+                # Was self.reasoner_model (35B). Switched to the 8B
+                # fallback after the 35B consistently hit 10-min
+                # Ollama timeouts on sustained back-to-back calls on
+                # the live N5 Pro Vulkan backend. The 8B finishes
+                # gap clustering in 30-60s and produces good enough
+                # proposals — the 35B's marginal quality improvement
+                # isn't worth a phase that hangs the whole nightly
+                # reflection.
+                model=self.fallback_model,
                 response_format="json",
-                # Reflection is async/overnight — we can afford the
-                # think trace on 35B because no human is waiting for
-                # this reply.
                 think=False,
+                timeout=180.0,
             )
         except Exception as exc:
             logger.warning(
-                "gap_proposal_llm_failed", domain=domain, error=str(exc)
+                "gap_proposal_llm_failed",
+                domain=domain,
+                error=f"{type(exc).__name__}: {exc!s}",
             )
             return None
 
