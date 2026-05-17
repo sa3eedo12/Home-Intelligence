@@ -289,6 +289,7 @@ class NightlyReflector:
         registry: CapabilityRegistry,
         reasoner_model: str,
         fallback_model: str,
+        gap_store: Any | None = None,
     ) -> None:
         self.pool = pool
         self.redis = redis
@@ -303,6 +304,15 @@ class NightlyReflector:
         self.reasoner_model = reasoner_model or os.environ.get("REASONER_MODEL", "qwen3:8b")
         self.fallback_model = fallback_model or os.environ.get("DEFAULT_MODEL", "qwen3:8b")
         self.store = ReflectionStore(pool)
+        # gap_store is optional — when present, _mine_capability_gaps
+        # runs and produces dedicated code_change proposals for missing
+        # tools / refactors the day-to-day usage actually needed.
+        # Lazy import to avoid the hard dependency on home_agents_sdk
+        # in test fixtures that don't need gap mining.
+        if gap_store is None and pool is not None:
+            from home_agents_sdk.gap_store import GapStore
+            gap_store = GapStore(pool)
+        self.gap_store = gap_store
         self.health_store: Any | None = None
         # Cache of available Ollama model tags. Populated lazily on first
         # use; populated from /api/tags so we can skip an LLM call entirely
@@ -365,6 +375,10 @@ class NightlyReflector:
             patterns = await self._phase(
                 "pattern_mining", self._pattern_mining, errors, [], evidence
             )
+            self._status["phase"] = "mine_capability_gaps"
+            gap_proposals = await self._phase(
+                "mine_capability_gaps", self._mine_capability_gaps, errors, []
+            )
             self._status["phase"] = "health_summary"
             health_summary = await self._phase("health_summary", self._health_summary, errors, {})
             self._status["phase"] = "correlations"
@@ -399,6 +413,7 @@ class NightlyReflector:
                 applied,
                 errors,
                 correlations=correlations,
+                gap_proposals=gap_proposals,
             )
             brief_id = await self._phase("save_brief", self._save_brief, errors, 0, body)
             body["brief_id"] = brief_id
@@ -527,6 +542,253 @@ class NightlyReflector:
         ]
         patterns.sort(key=lambda row: row["count"], reverse=True)
         return patterns
+
+    # ──────────────────────────────────────────────────────────────────
+    # Capability-gap mining: read every unresolved capability_gap row,
+    # cluster by domain (regex on user_text), and produce a structured
+    # code_change proposal per cluster. This is the self-improvement
+    # loop: failures recorded during the day become tool proposals
+    # overnight.
+    # ──────────────────────────────────────────────────────────────────
+
+    # Domain regex for clustering. Order matters — first match wins.
+    # All patterns handle singular/plural via `s?` because user requests
+    # are written in natural English ("open the blinds", "play songs").
+    _GAP_DOMAIN_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
+        ("climate", re.compile(r"\b(thermostats?|temperatures?|ac|heat(er|ing)?s?|hvac|cool(er|ing)?s?|warm(er)?s?)\b", re.IGNORECASE)),
+        ("cover", re.compile(r"\b(blinds?|curtains?|shades?|garages?|covers?|shutters?)\b", re.IGNORECASE)),
+        ("media_player", re.compile(r"\b(musics?|songs?|tvs?|movies?|spotify|youtube|netflix|volumes?|mute|pause|skip)\b", re.IGNORECASE)),
+        ("fan", re.compile(r"\bfans?\b", re.IGNORECASE)),
+        ("lock", re.compile(r"\b(locks?|unlocks?|deadbolts?|door\s+(?:lock|secure))\b", re.IGNORECASE)),
+        ("vacuum", re.compile(r"\b(vacuum(?:s|ed|ing)?|roomba|robots?|clean(?:s|ed|ing)?)\b", re.IGNORECASE)),
+        ("notification", re.compile(r"\b(reminds?|notif(?:y|ies|ication)|alerts?|tell\s+me|let\s+me\s+know)\b", re.IGNORECASE)),
+        ("status_query", re.compile(r"\b(status|what'?s|is\s+the|are\s+the|how\s+many)\b", re.IGNORECASE)),
+    ]
+
+    def _classify_gap_domain(self, user_text: str) -> str:
+        for label, pat in self._GAP_DOMAIN_PATTERNS:
+            if pat.search(user_text):
+                return label
+        return "other"
+
+    async def _mine_capability_gaps(self) -> list[dict[str, Any]]:
+        """Read unresolved capability_gaps, cluster by domain, and ask
+        the reasoner to draft a code_change proposal per cluster.
+
+        Returns the list of cluster summaries (each with linked
+        proposal_id when successfully filed). This stays as a
+        first-class field in the brief body so the user can see what
+        the system noticed about its own limits."""
+        if self.gap_store is None:
+            return []
+
+        try:
+            gaps = await self.gap_store.list_unresolved(limit=200)
+        except Exception as exc:
+            logger.warning("mine_capability_gaps_list_failed", error=str(exc))
+            return []
+
+        if not gaps:
+            return []
+
+        # Cluster
+        clusters: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for gap in gaps:
+            domain = self._classify_gap_domain(str(gap.get("user_text") or ""))
+            clusters[domain].append(gap)
+
+        # Cap at the 5 largest clusters to keep prompt cost predictable.
+        # A single cluster with 20 examples is more useful than 10
+        # clusters with 2 each — the LLM needs repetition to spot
+        # the real pattern.
+        ranked = sorted(clusters.items(), key=lambda kv: len(kv[1]), reverse=True)[:5]
+
+        results: list[dict[str, Any]] = []
+        for domain, cluster_gaps in ranked:
+            try:
+                proposal = await self._draft_gap_proposal(domain, cluster_gaps)
+            except Exception as exc:
+                logger.warning(
+                    "mine_capability_gaps_draft_failed",
+                    domain=domain,
+                    error=str(exc),
+                )
+                results.append({
+                    "domain": domain,
+                    "gap_count": len(cluster_gaps),
+                    "proposal_id": None,
+                    "error": str(exc),
+                })
+                continue
+
+            if proposal is None:
+                results.append({
+                    "domain": domain,
+                    "gap_count": len(cluster_gaps),
+                    "proposal_id": None,
+                    "skipped_reason": "draft_returned_none",
+                })
+                continue
+
+            # Insert the proposal via the existing store, then mark
+            # every clustered gap as resolved pointing to it.
+            proposal_id = await self._save_gap_proposal(domain, cluster_gaps, proposal)
+            for gap in cluster_gaps:
+                try:
+                    await self.gap_store.mark_resolved(
+                        gap["id"],
+                        proposal_id=proposal_id,
+                        note=f"clustered into {domain} proposal",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "mine_capability_gaps_mark_resolved_failed",
+                        gap_id=gap.get("id"),
+                        error=str(exc),
+                    )
+            results.append({
+                "domain": domain,
+                "gap_count": len(cluster_gaps),
+                "proposal_id": proposal_id,
+                "title": proposal.get("title"),
+            })
+
+        return results
+
+    async def _draft_gap_proposal(
+        self,
+        domain: str,
+        cluster_gaps: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Send a focused prompt to the reasoner for one cluster of
+        gaps. Returns a proposal dict ready for the reflection_store,
+        or None if the LLM refused / returned nonsense."""
+        # Compact evidence: just the user_text and failure_reason from
+        # each gap, capped so we stay under the model's effective
+        # context budget.
+        evidence_lines = []
+        for gap in cluster_gaps[:30]:  # 30 examples is plenty
+            evidence_lines.append(
+                f"  - [{gap.get('failure_reason')}] {(gap.get('user_text') or '')[:200]}"
+            )
+        evidence_block = "\n".join(evidence_lines)
+
+        system = (
+            "You analyse capability gaps in a local home AI assistant — "
+            "user requests the system could not route to a real tool. "
+            "Given a CLUSTER of related gaps, propose ONE structured code "
+            "change (a new tool, refactor of an existing tool, or routing "
+            "fix) that would resolve the pattern.\n\n"
+            "Reply with ONE JSON object, no prose, no code fences:\n"
+            '{\n'
+            '  "title": "<5-12 word title starting with a verb>",\n'
+            '  "rationale": "<2-4 sentences citing the specific evidence>",\n'
+            '  "proposed_change_kind": "new_tool|tool_refactor|routing_fix",\n'
+            '  "proposed_tool_spec": {\n'
+            '    "tool_id": "<verb_noun snake_case>",\n'
+            '    "description": "<one line>",\n'
+            '    "inputs": {"<param>": "<type>"}\n'
+            '  },\n'
+            '  "confidence": <0.0-1.0>,\n'
+            '  "impact_estimate": "<one sentence on user benefit>"\n'
+            "}\n"
+            "Rules:\n"
+            "- Title must be actionable: 'Add climate_set_temperature tool' not 'Climate issues'\n"
+            "- Rationale MUST quote at least one specific user_text from the cluster\n"
+            "- Be honest: if the cluster looks like noise (1 example, vague text), "
+            "return {\"title\": \"\", \"confidence\": 0.0} and we'll skip it\n"
+        )
+        user = (
+            f"DOMAIN: {domain}\n"
+            f"GAP COUNT: {len(cluster_gaps)}\n\n"
+            f"EVIDENCE (user requests that failed):\n{evidence_block}\n\n"
+            "Propose the code change now."
+        )
+
+        try:
+            response = await self.llm.chat(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                model=self.reasoner_model,
+                response_format="json",
+                # Reflection is async/overnight — we can afford the
+                # think trace on 35B because no human is waiting for
+                # this reply.
+                think=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "gap_proposal_llm_failed", domain=domain, error=str(exc)
+            )
+            return None
+
+        content = (response.get("message") or {}).get("content") or ""
+        try:
+            parsed = _extract_json(content)
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning(
+                "gap_proposal_bad_json",
+                domain=domain,
+                error=str(exc),
+                content_preview=content[:200],
+            )
+            return None
+
+        if not isinstance(parsed, dict):
+            return None
+        title = str(parsed.get("title") or "").strip()
+        confidence = _clamp_confidence(parsed.get("confidence", 0.0))
+        if not title or confidence < 0.4:
+            logger.info(
+                "gap_proposal_low_confidence_or_empty",
+                domain=domain,
+                title=title,
+                confidence=confidence,
+            )
+            return None
+        return parsed
+
+    async def _save_gap_proposal(
+        self,
+        domain: str,
+        cluster_gaps: list[dict[str, Any]],
+        proposal: dict[str, Any],
+    ) -> int | None:
+        """Persist a gap-derived proposal as a code_change in
+        reflection_store. Returns the proposal id."""
+        # Build a rationale that combines the LLM's reasoning with hard
+        # evidence (gap ids) so reviewers can audit.
+        gap_ids = [int(g["id"]) for g in cluster_gaps if g.get("id") is not None]
+        llm_rationale = str(proposal.get("rationale") or "").strip()
+        full_rationale = (
+            f"{llm_rationale}\n\n"
+            f"Evidence: {len(cluster_gaps)} capability_gap rows in domain "
+            f"'{domain}'. Gap ids: {gap_ids[:20]}"
+        )
+        if isinstance(proposal.get("proposed_tool_spec"), dict):
+            spec_text = json.dumps(proposal["proposed_tool_spec"], ensure_ascii=False)
+            full_rationale += f"\n\nProposed tool spec:\n{spec_text}"
+
+        try:
+            proposal_id = await self.store.record_proposal(
+                kind="code_change",
+                title=str(proposal.get("title")),
+                rationale=full_rationale,
+                evidence_event_ids=[],  # gaps aren't events, so leave empty
+                confidence=_clamp_confidence(proposal.get("confidence", 0.5)),
+                cost_estimate="small",
+                impact_estimate=str(proposal.get("impact_estimate") or "Reduces fabricated replies"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "gap_proposal_save_failed",
+                domain=domain,
+                error=str(exc),
+            )
+            return None
+        return proposal_id
 
     async def _health_summary(self) -> dict[str, Any]:
         store = getattr(self, "health_store", None)
@@ -837,6 +1099,7 @@ class NightlyReflector:
         errors: list[dict[str, str]],
         *,
         correlations: list[dict[str, Any]] | None = None,
+        gap_proposals: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         yesterday = [
             {"id": row.get("id"), "ts": row.get("ts"), "summary": row.get("summary")}
@@ -874,6 +1137,7 @@ class NightlyReflector:
             "questions_for_you": questions,
             "suggestions_for_me": suggestions,
             "code_wishlist": code_wishlist,
+            "capability_gap_proposals": list(gap_proposals or []),
             "proposals": proposals,
             "evidence": evidence,
             "self_audit": audit,

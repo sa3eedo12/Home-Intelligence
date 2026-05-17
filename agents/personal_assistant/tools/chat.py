@@ -8,6 +8,7 @@ to any structured tool. Uses the small fast Ollama model so latency is
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from home_agents_sdk.llm import OllamaClient
@@ -35,6 +36,38 @@ CHAT_SYSTEM = (
     "failure narratives for actions you did not perform."
 )
 
+# Hard-coded refusal for action-verb requests that reach the chat tool.
+# Belt-and-braces alongside the system prompt: even if the LLM ignores
+# the prompt instruction, this regex check short-circuits before any
+# generation can fabricate. The router has already recorded a gap for
+# this case (chat_fallback_for_action_verb), so the user just needs an
+# honest reply.
+#
+# Kept in sync with router._ACTION_VERB_PATTERNS — duplicated rather
+# than imported to avoid the agent depending on the orchestrator.
+_ACTION_VERB_GUARD = re.compile(
+    r"\b("
+    r"turn\s+(on|off)|switch\s+(on|off)|toggle|"
+    r"reduce|increase|raise|lower|set|adjust|change|dim|brighten|cool|heat|warm|"
+    r"open|close|shut|lock|unlock|"
+    r"play|pause|stop|resume|skip|mute|unmute|"
+    r"start|begin|run|trigger|cancel|abort|schedule|remind"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_action_verb(text: str) -> bool:
+    return bool(text) and bool(_ACTION_VERB_GUARD.search(text))
+
+
+_HONEST_REFUSAL = (
+    "I couldn't find a tool that does that. I won't pretend I tried — "
+    "I've logged it so it can be added. Try rephrasing more directly "
+    "(e.g., 'turn off bedroom lights', 'set bedroom AC to 22'), or "
+    "ask me to check the dashboard for what I can already do."
+)
+
 
 def _llm() -> OllamaClient:
     return OllamaClient(os.getenv("OLLAMA_URL", "http://ollama:11434"))
@@ -53,6 +86,20 @@ def _chat_model() -> str:
 @tool("chat")
 async def chat(text: str) -> dict[str, Any]:
     """Conversational fallback. Returns a natural-language reply directly."""
+    # Guard: if the router fell through to chat for an action-verb
+    # request, refuse to fabricate. The router has already recorded a
+    # capability_gap row for this and the user deserves the truth.
+    if _is_action_verb(text):
+        logger.info(
+            "chat_refused_action_verb",
+            text_preview=text[:120],
+        )
+        return {
+            "reply": _HONEST_REFUSAL,
+            "already_natural": True,
+            "refused_action_verb": True,
+        }
+
     client = _llm()
     try:
         resp = await client.chat(

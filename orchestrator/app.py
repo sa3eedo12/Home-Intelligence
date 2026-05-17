@@ -21,7 +21,10 @@ from home_agents_sdk.health_store import HealthStore
 from home_agents_sdk.knowledge_graph import KnowledgeGraph
 from home_agents_sdk.llm import OllamaClient
 from home_agents_sdk.npu import NPUClient
+from home_agents_sdk.gap_store import GapStore
 from home_agents_sdk.reflection_store import ReflectionStore
+
+from .escalator import Escalator
 from home_agents_sdk.telemetry import get_logger
 from qdrant_client import AsyncQdrantClient
 from redis.asyncio import Redis
@@ -402,6 +405,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     reports = ReportGenerator(pool=pool, llm=llm, event_log_store=event_log_store)
     maintenance = MaintenanceJob(pool=pool, redis=redis, event_log_store=event_log_store)
     lora_training = LoraTrainingJob(pool=pool, llm=llm, event_log_store=event_log_store)
+    gap_store = GapStore(pool=pool)
+    escalator = Escalator(
+        llm=llm,
+        registry=registry,
+        # 8b is the right tier: bigger than the 0.6b router (so it can
+        # compose tool calls and read context) but much cheaper than the
+        # 35b reasoner (escalation must stay sub-30s end-to-end for the
+        # user to wait through). The 35b stays reserved for nightly
+        # reflection where latency doesn't matter.
+        model=default_model,
+    )
     router = Router(
         npu=npu,
         registry=registry,
@@ -411,6 +425,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         humanizer_model=humanizer_model,
         safety=safety,
         proposal_store=reflection_store,
+        gap_store=gap_store,
+        escalator=escalator,
     )
 
     policy_engine = PolicyEngine(_load_yaml(HERE / "policies.yaml"), redis, pool=pool)
@@ -422,6 +438,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         registry=registry,
         reasoner_model=reasoner_model,
         fallback_model=default_model,
+        gap_store=gap_store,
     )
     reflector.store = reflection_store
     reflector.health_store = health_store
@@ -778,6 +795,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.reflector = reflector
     app.state.advisor = advisor
     app.state.reflection_store = reflection_store
+    app.state.gap_store = gap_store
     app.state.github_client = github_client
     app.state.reactive = reactive
     app.state.redis = redis

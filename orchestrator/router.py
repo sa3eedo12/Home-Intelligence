@@ -5,6 +5,7 @@ import os
 import re
 from typing import Any
 
+from home_agents_sdk.gap_store import GapStore
 from home_agents_sdk.llm import OllamaClient
 from home_agents_sdk.npu import NPUClient, NPUUnavailable
 from home_agents_sdk.reflection_store import ReflectionStore
@@ -46,6 +47,47 @@ _FAST_PATH_PATTERNS = [
 ]
 
 
+# Action-verb detection: when the user's message starts with (or
+# prominently contains) an action verb but the router still routes them
+# to personal_assistant.chat, that's almost certainly a missing-tool
+# situation, not a chat request. We record a capability gap in that case
+# so the reflector can mine the pattern even when the chat tool
+# successfully (or not) returns a reply.
+#
+# The list is deliberately broad — false positives here just cost us
+# extra gap rows that the reflector will see as low-priority noise.
+# False negatives (missed action verbs that get fabricated answers)
+# are the real harm.
+_ACTION_VERB_PATTERNS = [
+    re.compile(
+        r"\b("
+        # core control verbs
+        r"turn\s+(on|off)|switch\s+(on|off)|toggle|"
+        # climate / numeric adjustments
+        r"reduce|increase|raise|lower|set|adjust|change|dim|brighten|cool|heat|warm|"
+        # movement / openness
+        r"open|close|shut|lock|unlock|"
+        # media
+        r"play|pause|stop|resume|skip|mute|unmute|"
+        # automation
+        r"start|begin|run|trigger|cancel|abort|schedule|remind|"
+        # query that expects action follow-through
+        r"check\s+(?:and|then)|do\s+(?:a|the|this|that)"
+        r")\b",
+        re.IGNORECASE,
+    ),
+]
+
+
+def _is_action_verb_request(text: str) -> bool:
+    """True if the user's text reads like an action they want performed,
+    not a question or a chat. Used to detect when chat-fallback is
+    probably wrong and a capability gap should be recorded."""
+    if not text:
+        return False
+    return any(p.search(text) for p in _ACTION_VERB_PATTERNS)
+
+
 def _is_conversational_shortcut(text: str) -> bool:
     return any(p.match(text) for p in _FAST_PATH_PATTERNS)
 
@@ -75,6 +117,8 @@ class Router:
         humanizer_model: str | None = None,
         safety: SafetyPolicy | None = None,
         proposal_store: ReflectionStore | None = None,
+        gap_store: GapStore | None = None,
+        escalator: Any | None = None,
     ) -> None:
         self._npu = npu
         self._registry = registry
@@ -86,6 +130,27 @@ class Router:
             os.environ.get("SAFETY_POLICY_PATH", "policies/safety.yaml")
         )
         self._proposal_store = proposal_store or ReflectionStore(None)
+        # gap_store is optional so existing tests don't break; if absent
+        # we silently skip recording (behaviour matches pre-feature
+        # baseline). Production code wires in a real one in app.py.
+        self._gap_store = gap_store or GapStore(None)
+        # escalator is also optional. When present, classify-failed and
+        # invalid-capability paths go through it before falling all the
+        # way to the conversational catch-all. The Escalator type is
+        # `Any` here to avoid a circular import — actual contract is the
+        # `EscalatorProtocol` in escalator.py.
+        self._escalator = escalator
+
+    async def _record_gap_safe(self, **kwargs: Any) -> None:
+        """Defensive wrapper around GapStore.record_gap. GapStore itself
+        already fails open on DB errors, but we add a second guard here
+        so a future store variant (or a bug in instrumentation) can
+        never break user replies. Telemetry must never be on the
+        critical path."""
+        try:
+            await self._gap_store.record_gap(**kwargs)
+        except Exception as exc:
+            logger.warning("router_gap_record_failed", error=str(exc))
 
     async def handle(
         self,
@@ -132,13 +197,32 @@ class Router:
         needs_confirmation = classification.get("needs_confirmation", False)
         reason = classification.get("reason", "")
 
+        # Track for gap recording. Snapshot what the classifier picked
+        # BEFORE we mutate agent/capability for invalid-capability
+        # fallback, so gap rows show the original (wrong) pick.
+        classifier_pick = {
+            "agent": agent,
+            "capability": capability,
+            "inputs": inputs,
+            "reason": reason,
+        }
+        escalation_path: list[dict[str, Any]] = []
+
         # Validate the LLM's pick exists. If not, fall through to semantic search.
+        invalid_capability_attempted = False
         if agent and capability and self._registry.get_capability(agent, capability) is None:
             logger.info(
                 "router_classify_invalid_capability",
                 agent=agent,
                 capability=capability,
             )
+            invalid_capability_attempted = True
+            escalation_path.append({
+                "stage": "router_classify",
+                "outcome": "invalid_capability",
+                "agent": agent,
+                "capability": capability,
+            })
             agent = None
             capability = None
 
@@ -147,13 +231,113 @@ class Router:
             if fallback is not None:
                 agent = fallback["agent"]
                 capability = fallback["capability"]
-            elif self._registry.get_capability("personal_assistant", "chat") is not None:
-                # Conversational catch-all: smalltalk, greetings, general questions.
-                agent = "personal_assistant"
-                capability = "chat"
-                inputs = {"text": text}
+                escalation_path.append({
+                    "stage": "semantic_fallback",
+                    "outcome": "matched",
+                    "agent": agent,
+                    "capability": capability,
+                })
             else:
-                return {"reply": "I don't have a capability for that yet."}
+                # Escalator gets a shot BEFORE chat-catchall. The 8B
+                # with iterative tool use can often resolve what the
+                # 0.6b router couldn't: ambiguous areas, multi-step
+                # composition, picking the right tool from a noisy
+                # catalog. Only invoked when the escalator is wired
+                # AND the request is an action verb OR the classifier
+                # picked something invalid (signals real intent that
+                # failed to route, not just chit-chat).
+                escalator_resolved = None
+                if self._escalator is not None and (
+                    _is_action_verb_request(text) or invalid_capability_attempted
+                ):
+                    try:
+                        escalator_resolved, esc_path = await self._escalator.resolve(
+                            text, prior_attempt=classifier_pick
+                        )
+                        escalation_path.extend(esc_path)
+                    except Exception as exc:
+                        logger.warning("router_escalator_failed", error=str(exc))
+                        escalation_path.append({
+                            "stage": "escalator",
+                            "outcome": "exception",
+                            "error": str(exc),
+                        })
+
+                if escalator_resolved is not None:
+                    # Escalator did the work and returned a user-ready
+                    # reply. Note: NO gap is recorded — escalation
+                    # succeeding is the system working as designed.
+                    logger.info(
+                        "router_escalator_resolved",
+                        tools_used=len(escalator_resolved.get("tools_used") or []),
+                    )
+                    return {"reply": escalator_resolved["reply"]}
+
+                # Escalator gave up (or wasn't wired) — fall through to
+                # the existing chat catch-all or generic decline.
+                if self._registry.get_capability("personal_assistant", "chat") is not None:
+                    # Conversational catch-all: smalltalk, greetings, general questions.
+                    agent = "personal_assistant"
+                    capability = "chat"
+                    inputs = {"text": text}
+                    escalation_path.append({
+                        "stage": "chat_catchall",
+                        "outcome": "matched",
+                    })
+                    # Record a gap when chat-catchall fires for an action-
+                    # verb request. This is the hallucination root cause: a
+                    # tiny router model couldn't compose the right tool call
+                    # and the catch-all chat tool used to invent execution
+                    # narratives. With this gap row + the chat.py refusal,
+                    # the loop closes around real user pain points.
+                    if _is_action_verb_request(text):
+                        # Pick the most informative failure_reason given
+                        # the escalator's outcome (if it ran).
+                        failure_reason = "chat_fallback_for_action_verb"
+                        if self._escalator is not None:
+                            from .escalator import (
+                                map_exhausted_outcome_to_failure_reason,
+                            )
+                            failure_reason = map_exhausted_outcome_to_failure_reason(
+                                escalation_path
+                            )
+                        await self._record_gap_safe(
+                            user_text=text,
+                            failure_reason=failure_reason,
+                            router_pick=classifier_pick,
+                            escalation_path=escalation_path,
+                            member_id=member_id,
+                            member_name=member_name,
+                        )
+                    elif invalid_capability_attempted:
+                        # Classifier picked something invalid and then we
+                        # fell to chat. Record the gap even for non-action
+                        # text so the reflector can see naming drift.
+                        await self._record_gap_safe(
+                            user_text=text,
+                            failure_reason="invalid_capability",
+                            router_pick=classifier_pick,
+                            escalation_path=escalation_path,
+                            member_id=member_id,
+                            member_name=member_name,
+                        )
+                else:
+                    # No fallback path at all — record this as a hard gap
+                    # before returning the generic decline.
+                    await self._record_gap_safe(
+                        user_text=text,
+                        failure_reason=(
+                            "invalid_capability"
+                            if invalid_capability_attempted
+                            else "escalator_no_tool_proposed"
+                        ),
+                        router_pick=classifier_pick,
+                        escalation_path=escalation_path,
+                        user_reply="I don't have a capability for that yet.",
+                        member_id=member_id,
+                        member_name=member_name,
+                    )
+                    return {"reply": "I don't have a capability for that yet."}
 
         cap_meta = self._registry.get_capability(agent, capability)
         if cap_meta and cap_meta.get("require_confirmation"):
@@ -194,6 +378,22 @@ class Router:
             result = await self._registry.dispatch(agent, capability, inputs)
         except Exception as exc:
             logger.warning("router_dispatch_failed", error=str(exc))
+            escalation_path.append({
+                "stage": "dispatch",
+                "outcome": "exception",
+                "agent": agent,
+                "capability": capability,
+                "error": f"{type(exc).__name__}: {exc!s}",
+            })
+            await self._record_gap_safe(
+                user_text=text,
+                failure_reason="dispatch_failed",
+                router_pick=classifier_pick,
+                escalation_path=escalation_path,
+                user_reply=f"Error dispatching request: {exc}",
+                member_id=member_id,
+                member_name=member_name,
+            )
             return {"reply": f"Error dispatching request: {exc}"}
 
         # Humanize the result unless the agent already returned natural text.
