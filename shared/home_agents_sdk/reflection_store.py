@@ -401,6 +401,97 @@ class ReflectionStore:
                     error=str(exc),
                 )
 
+    async def list_unrefined_code_change_proposals(
+        self, *, max_age_days: int = 7, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """List pending code_change proposals that haven't been
+        refined yet. Used by the nightly reflector's refine phase to
+        find candidates for 35B reprocessing.
+
+        Limited to last max_age_days because refining ancient
+        proposals isn't useful — if the user hasn't acted on a
+        7-day-old proposal, refining it won't help. limit caps the
+        nightly cost (each refinement is one 35B call).
+        """
+        try:
+            limit = max(1, min(int(limit), 200))
+        except (TypeError, ValueError):
+            limit = 50
+        async with self._connection("list_unrefined") as conn:
+            if conn is None:
+                return []
+            try:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, kind, title, rationale, confidence,
+                           cost_estimate, impact_estimate, created_at
+                    FROM proposals
+                    WHERE status = 'pending'
+                      AND kind = 'code_change'
+                      AND refined_at IS NULL
+                      AND created_at > now() - ($1 || ' days')::interval
+                    ORDER BY created_at DESC
+                    LIMIT $2
+                    """,
+                    str(max_age_days),
+                    limit,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "reflection_store_query_failed",
+                    operation="list_unrefined_code_change_proposals",
+                    error=str(exc),
+                )
+                return []
+            return [_row_dict(r) for r in rows]
+
+    async def refine_proposal(
+        self,
+        proposal_id: int,
+        *,
+        new_title: str | None = None,
+        new_rationale: str | None = None,
+        new_confidence: float | None = None,
+        refinement_notes: str | None = None,
+    ) -> bool:
+        """Apply a 35B-produced refinement to an existing proposal.
+        Preserves the original_rationale once (idempotent — won't
+        overwrite if refine_proposal is called twice). Always stamps
+        refined_at so the row is skipped on the next nightly pass.
+
+        Returns True iff the row was updated."""
+        async with self._connection("refine_proposal") as conn:
+            if conn is None:
+                return False
+            try:
+                result = await conn.execute(
+                    """
+                    UPDATE proposals
+                    SET title = COALESCE($2, title),
+                        rationale = COALESCE($3, rationale),
+                        confidence = COALESCE($4, confidence),
+                        original_rationale = COALESCE(original_rationale, rationale),
+                        refinement_notes = $5,
+                        refined_at = now()
+                    WHERE id = $1
+                      AND refined_at IS NULL
+                    """,
+                    int(proposal_id),
+                    new_title,
+                    new_rationale,
+                    new_confidence,
+                    refinement_notes,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "reflection_store_query_failed",
+                    operation="refine_proposal",
+                    proposal_id=proposal_id,
+                    error=str(exc),
+                )
+                return False
+            return result.startswith("UPDATE ") and result != "UPDATE 0"
+
     async def record_delivery(
         self,
         proposal_id: int,

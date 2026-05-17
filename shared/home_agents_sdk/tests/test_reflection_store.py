@@ -249,3 +249,68 @@ async def test_proposal_dismissal_signal_clamps_days_window() -> None:
     assert conn.fetch.await_args.args[-1] == 1
     await store.proposal_dismissal_signal(kind="x", days=9999)
     assert conn.fetch.await_args.args[-1] == 90
+
+
+@pytest.mark.asyncio
+async def test_list_unrefined_code_change_proposals_filters_correctly() -> None:
+    """Returns only pending code_change rows where refined_at IS NULL."""
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[
+        {
+            "id": 59,
+            "kind": "code_change",
+            "title": "Add ev_status tool",
+            "rationale": "long...",
+            "confidence": 0.7,
+            "cost_estimate": "small",
+            "impact_estimate": "good",
+            "created_at": datetime(2026, 5, 17, tzinfo=UTC),
+        }
+    ])
+    store = ReflectionStore(_pool_with(conn))
+
+    out = await store.list_unrefined_code_change_proposals(max_age_days=7, limit=20)
+
+    assert len(out) == 1
+    assert out[0]["id"] == 59
+    # Confirm the SQL has the right WHERE clauses
+    sql_arg = conn.fetch.await_args[0][0]
+    assert "status = 'pending'" in sql_arg
+    assert "kind = 'code_change'" in sql_arg
+    assert "refined_at IS NULL" in sql_arg
+
+
+@pytest.mark.asyncio
+async def test_refine_proposal_updates_row() -> None:
+    conn = MagicMock()
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+    store = ReflectionStore(_pool_with(conn))
+
+    ok = await store.refine_proposal(
+        59,
+        new_title="Add ev_status tool for BYD HAN",
+        new_rationale="much better",
+        new_confidence=0.92,
+        refinement_notes="narrowed evidence",
+    )
+
+    assert ok is True
+    conn.execute.assert_awaited_once()
+    # Verify the UPDATE preserves original_rationale via COALESCE
+    sql = conn.execute.await_args[0][0]
+    assert "original_rationale = COALESCE(original_rationale, rationale)" in sql
+    assert "refined_at = now()" in sql
+
+
+@pytest.mark.asyncio
+async def test_refine_proposal_returns_false_when_already_refined() -> None:
+    """The UPDATE has 'AND refined_at IS NULL' so a second call on
+    the same row affects 0 rows. We surface that as False so callers
+    can decide whether to log."""
+    conn = MagicMock()
+    conn.execute = AsyncMock(return_value="UPDATE 0")
+    store = ReflectionStore(_pool_with(conn))
+
+    ok = await store.refine_proposal(59, new_title="x", new_rationale="y")
+
+    assert ok is False

@@ -379,6 +379,10 @@ class NightlyReflector:
             gap_proposals = await self._phase(
                 "mine_capability_gaps", self._mine_capability_gaps, errors, []
             )
+            self._status["phase"] = "refine_proposals"
+            refined_proposals = await self._phase(
+                "refine_proposals", self._refine_proposals, errors, []
+            )
             self._status["phase"] = "health_summary"
             health_summary = await self._phase("health_summary", self._health_summary, errors, {})
             self._status["phase"] = "correlations"
@@ -414,6 +418,7 @@ class NightlyReflector:
                 errors,
                 correlations=correlations,
                 gap_proposals=gap_proposals,
+                refined_proposals=refined_proposals,
             )
             brief_id = await self._phase("save_brief", self._save_brief, errors, 0, body)
             body["brief_id"] = brief_id
@@ -790,6 +795,247 @@ class NightlyReflector:
             return None
         return proposal_id
 
+    # ──────────────────────────────────────────────────────────────────
+    # Nightly proposal refinement: the 35B has hours of idle time
+    # during the night. Use it to take rough proposals filed by the
+    # day-time router/escalator (with limited 8B context) and produce
+    # much better versions — sharper titles, focused evidence, draft
+    # tool specs grounded in the actual HA entity catalog.
+    # ──────────────────────────────────────────────────────────────────
+
+    async def _refine_proposals(self) -> list[dict[str, Any]]:
+        """Find pending code_change proposals that haven't been refined
+        and send each through the 35B for deep reprocessing.
+
+        Strategy:
+        - List unrefined pending code_change proposals (last 7 days)
+        - For each, gather HA context (entity catalog)
+        - Send to reasoner with a "improve this proposal" prompt
+        - Apply the refinement via store.refine_proposal
+
+        Returns a list of {proposal_id, original_title, new_title,
+        changed} summaries for the morning brief."""
+        try:
+            candidates = await self.store.list_unrefined_code_change_proposals(
+                max_age_days=7, limit=20
+            )
+        except Exception as exc:
+            logger.warning("refine_proposals_list_failed", error=str(exc))
+            return []
+
+        if not candidates:
+            return []
+
+        # Gather HA entity catalog ONCE per nightly run — this is the
+        # context the 8B router doesn't have. Truncate for prompt
+        # safety (we don't need every entity, just enough to ground
+        # naming patterns like "han_" → vehicle).
+        entity_catalog = await self._compact_entity_catalog()
+
+        results: list[dict[str, Any]] = []
+        for proposal in candidates:
+            proposal_id = proposal.get("id")
+            try:
+                refined = await self._refine_single_proposal(proposal, entity_catalog)
+            except Exception as exc:
+                logger.warning(
+                    "refine_single_proposal_failed",
+                    proposal_id=proposal_id,
+                    error=str(exc),
+                )
+                refined = None
+
+            if refined is None:
+                results.append({
+                    "proposal_id": proposal_id,
+                    "original_title": proposal.get("title"),
+                    "changed": False,
+                    "skipped_reason": "no_refinement_produced",
+                })
+                continue
+
+            ok = await self.store.refine_proposal(
+                proposal_id,
+                new_title=refined.get("title"),
+                new_rationale=refined.get("rationale"),
+                new_confidence=refined.get("confidence"),
+                refinement_notes=refined.get("notes"),
+            )
+            results.append({
+                "proposal_id": proposal_id,
+                "original_title": proposal.get("title"),
+                "new_title": refined.get("title"),
+                "changed": ok,
+            })
+            if ok:
+                logger.info(
+                    "proposal_refined",
+                    proposal_id=proposal_id,
+                    original_title=proposal.get("title"),
+                    new_title=refined.get("title"),
+                )
+        return results
+
+    async def _compact_entity_catalog(self) -> str:
+        """Build a compact text summary of the HA entity catalog for
+        the reasoner. Groups by area + domain. Used as grounding
+        context so the 35B can recognize naming patterns ('han_*' is
+        a vehicle's sensors) and propose tools that reference real
+        entities, not invented ones."""
+        from .registry import CapabilityRegistry  # noqa: F401 — used reflectively
+        try:
+            # Call home_automation.list_entities through the registry
+            # to get the same view the escalator sees.
+            result = await self.registry.dispatch(
+                "home_automation",
+                "list_entities",
+                {"include_unavailable": False},
+            )
+        except Exception as exc:
+            logger.warning("refine_compact_catalog_failed", error=str(exc))
+            return "(entity catalog unavailable)"
+
+        payload = result
+        if isinstance(result, dict) and "result" in result:
+            payload = result["result"]
+        by_area = (payload or {}).get("by_area") or {}
+        # Compact: just entity_id per area, capped at 200 entries total
+        # to keep prompt under 35B's effective context window.
+        lines = []
+        total = 0
+        for area, ents in sorted(by_area.items()):
+            if total >= 200:
+                lines.append("  (truncated)")
+                break
+            lines.append(f"# {area}:")
+            for e in ents[:30]:
+                if total >= 200:
+                    break
+                eid = e.get("entity_id") or ""
+                name = e.get("name") or ""
+                lines.append(f"  {eid}  {name}")
+                total += 1
+        return "\n".join(lines)
+
+    async def _refine_single_proposal(
+        self,
+        proposal: dict[str, Any],
+        entity_catalog: str,
+    ) -> dict[str, Any] | None:
+        """Send one proposal to the reasoner for refinement. Returns
+        a dict with title/rationale/confidence/notes, or None if the
+        model refused or returned nonsense."""
+        original_title = proposal.get("title") or ""
+        original_rationale = proposal.get("rationale") or ""
+        original_confidence = float(proposal.get("confidence") or 0.0)
+
+        system = (
+            "You are the nightly refinement engine for capability_gap "
+            "proposals in a local home AI assistant. A daytime tool "
+            "filed a rough proposal based on limited context. Your "
+            "job: produce a CLEANER, MORE FOCUSED version with the "
+            "full HA entity catalog at your disposal.\n\n"
+            "Common improvements to make:\n"
+            "- TITLE: replace generic ('Add sensor-status tool') with "
+            "  specific ('Add ev_status tool for BYD HAN').\n"
+            "- EVIDENCE: when the original lists every battery sensor "
+            "  in the house but the user clearly meant the EV, narrow "
+            "  to the relevant subset using the catalog to identify "
+            "  which entities belong to the device.\n"
+            "- TOOL SPEC: provide concrete inputs/outputs and "
+            "  reference the actual entity_ids the tool would query.\n"
+            "- DEDUPLICATION: if multiple unrefined proposals are "
+            "  about the same gap (you'll see them in sequence), say "
+            "  so in the notes so reviewers can consolidate.\n\n"
+            "Reply with ONE JSON object — no prose, no code fences:\n"
+            '{\n'
+            '  "title": "<5-12 word title, starts with verb>",\n'
+            '  "rationale": "<2-6 paragraph reasoning grounded in real entity_ids>",\n'
+            '  "confidence": <0.0-1.0, raise if grounded, lower if speculative>,\n'
+            '  "notes": "<one sentence summarizing what you changed>"\n'
+            "}\n\n"
+            "If the original proposal is already good (specific title, "
+            "focused evidence), return your refinement unchanged but "
+            "set notes='no improvement needed'. Don't manufacture "
+            "changes."
+        )
+
+        user = (
+            f"ORIGINAL PROPOSAL #{proposal.get('id')}:\n"
+            f"Title: {original_title}\n"
+            f"Confidence: {original_confidence}\n"
+            f"Cost: {proposal.get('cost_estimate')}\n"
+            f"Impact: {proposal.get('impact_estimate')}\n"
+            f"Rationale:\n{original_rationale}\n\n"
+            f"HA ENTITY CATALOG (for grounding):\n{entity_catalog}\n\n"
+            "Now produce the refined JSON."
+        )
+
+        try:
+            response = await self.llm.chat(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                model=self.reasoner_model,
+                response_format="json",
+                # think=True is OK here — we're in the nightly window
+                # so latency doesn't matter. Letting the 35B think
+                # often produces noticeably better refinements.
+                think=True,
+                timeout=600.0,
+            )
+        except Exception as exc:
+            logger.warning(
+                "refine_proposal_llm_failed",
+                proposal_id=proposal.get("id"),
+                error=str(exc),
+            )
+            return None
+
+        content = (response.get("message") or {}).get("content") or ""
+        try:
+            parsed = _extract_json(content)
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning(
+                "refine_proposal_bad_json",
+                proposal_id=proposal.get("id"),
+                error=str(exc),
+                content_preview=content[:200],
+            )
+            return None
+        if not isinstance(parsed, dict):
+            return None
+
+        # Validate fields
+        title = str(parsed.get("title") or "").strip() or original_title
+        rationale = str(parsed.get("rationale") or "").strip() or original_rationale
+        try:
+            confidence = max(0.0, min(float(parsed.get("confidence", original_confidence)), 1.0))
+        except (TypeError, ValueError):
+            confidence = original_confidence
+        notes = str(parsed.get("notes") or "").strip()[:500]
+
+        # If the refinement is identical to the original AND notes say
+        # so, that's fine — still mark refined so we don't reprocess.
+        # But if the title/rationale shrank dramatically, refuse the
+        # refinement (likely a hallucination/truncation).
+        if len(rationale) < max(50, len(original_rationale) // 4):
+            logger.info(
+                "refine_proposal_rejected_too_short",
+                proposal_id=proposal.get("id"),
+                original_len=len(original_rationale),
+                refined_len=len(rationale),
+            )
+            return None
+
+        return {
+            "title": title,
+            "rationale": rationale,
+            "confidence": confidence,
+            "notes": notes or "refined by 35B",
+        }
+
     async def _health_summary(self) -> dict[str, Any]:
         store = getattr(self, "health_store", None)
         if store is None:
@@ -1100,6 +1346,7 @@ class NightlyReflector:
         *,
         correlations: list[dict[str, Any]] | None = None,
         gap_proposals: list[dict[str, Any]] | None = None,
+        refined_proposals: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         yesterday = [
             {"id": row.get("id"), "ts": row.get("ts"), "summary": row.get("summary")}
@@ -1138,6 +1385,7 @@ class NightlyReflector:
             "suggestions_for_me": suggestions,
             "code_wishlist": code_wishlist,
             "capability_gap_proposals": list(gap_proposals or []),
+            "refined_proposals": list(refined_proposals or []),
             "proposals": proposals,
             "evidence": evidence,
             "self_audit": audit,
