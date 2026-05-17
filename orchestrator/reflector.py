@@ -772,7 +772,7 @@ class NightlyReflector:
             full_rationale += f"\n\nProposed tool spec:\n{spec_text}"
 
         try:
-            proposal_id = await self.store.record_proposal(
+            proposal_id = await self.store.add_proposal(
                 kind="code_change",
                 title=str(proposal.get("title")),
                 rationale=full_rationale,

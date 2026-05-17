@@ -19,7 +19,7 @@ def _make_reflector(
     *,
     gap_store_data: list[dict] | None = None,
     llm_response: str | None = None,
-    record_proposal_returns: int = 999,
+    add_proposal_returns: int = 999,
 ):
     """Build a NightlyReflector with mocked gap_store + llm + store."""
     pool = MagicMock()
@@ -49,9 +49,9 @@ def _make_reflector(
         gap_store=gap_store,
     )
     # Replace the real store with a mock so we can assert on
-    # record_proposal calls without hitting a real DB.
+    # add_proposal calls without hitting a real DB.
     reflector.store = MagicMock()
-    reflector.store.record_proposal = AsyncMock(return_value=record_proposal_returns)
+    reflector.store.add_proposal = AsyncMock(return_value=add_proposal_returns)
     return reflector, gap_store
 
 
@@ -63,7 +63,7 @@ async def test_no_gaps_returns_empty():
 
     assert out == []
     gap_store.mark_resolved.assert_not_called()
-    reflector.store.record_proposal.assert_not_called()
+    reflector.store.add_proposal.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -110,7 +110,7 @@ async def test_climate_cluster_produces_proposal_and_resolves_gaps():
     reflector, gap_store = _make_reflector(
         gap_store_data=gaps,
         llm_response=llm_proposal,
-        record_proposal_returns=77,
+        add_proposal_returns=77,
     )
 
     out = await reflector._mine_capability_gaps()
@@ -126,8 +126,8 @@ async def test_climate_cluster_produces_proposal_and_resolves_gaps():
     for call in gap_store.mark_resolved.await_args_list:
         assert call.kwargs["proposal_id"] == 77
     # Proposal was filed as code_change
-    reflector.store.record_proposal.assert_awaited_once()
-    proposal_kwargs = reflector.store.record_proposal.await_args.kwargs
+    reflector.store.add_proposal.assert_awaited_once()
+    proposal_kwargs = reflector.store.add_proposal.await_args.kwargs
     assert proposal_kwargs["kind"] == "code_change"
     assert "climate_set_temperature" in proposal_kwargs["title"]
     # Rationale includes the gap evidence
@@ -162,7 +162,7 @@ async def test_low_confidence_proposal_is_skipped():
     assert out[0]["proposal_id"] is None
     # Gap stays unresolved
     gap_store.mark_resolved.assert_not_called()
-    reflector.store.record_proposal.assert_not_called()
+    reflector.store.add_proposal.assert_not_called()
 
 
 @pytest.mark.asyncio
