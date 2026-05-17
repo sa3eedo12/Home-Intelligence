@@ -104,6 +104,67 @@ async def get_entity_state(entity_id: str) -> dict:
     return await client.get_state(entity_id)
 
 
+@tool("search_entities")
+async def search_entities(
+    query: str,
+    domain: str | None = None,
+    include_unavailable: bool = False,
+    limit: int = 30,
+) -> dict:
+    """Substring search across HA entities by entity_id AND
+    friendly_name. Use this when the user mentions a specific thing
+    by colloquial name (e.g. "car", "lock", "vacuum") and you need
+    to find the matching entity_id without scanning hundreds of
+    entities. Much higher signal-per-token than list_entities for
+    discovery use cases.
+
+    Args:
+        query: case-insensitive substring matched against both
+            entity_id and friendly_name. Examples: "car", "battery",
+            "lock", "han", "vacuum".
+        domain: optional HA domain filter (sensor, switch, climate,
+            etc.). When omitted, searches across all domains — useful
+            when you don't yet know which domain the thing lives in.
+        include_unavailable: by default unavailable entities are
+            excluded so the response stays signal-rich.
+        limit: cap on number of hits (default 30, max 200).
+
+    Returns ``{query, total_matched, hits: [{entity_id, name, area,
+    state, domain}]}``.
+    """
+    try:
+        limit = max(1, min(int(limit), 200))
+    except (TypeError, ValueError):
+        limit = 30
+    needle = query.strip().casefold()
+    if not needle:
+        return {"query": query, "total_matched": 0, "hits": []}
+
+    client = get_ha_client()
+    items = await client.list_states_enriched(
+        domain=domain, include_unavailable=include_unavailable
+    )
+
+    hits = []
+    for item in items:
+        eid = item.get("entity_id") or ""
+        name = item.get("name") or ""
+        if needle in eid.casefold() or needle in name.casefold():
+            hits.append({
+                "entity_id": eid,
+                "name": name,
+                "area": item.get("area") or "Unassigned",
+                "state": item.get("state"),
+                "domain": eid.split(".", 1)[0] if "." in eid else "",
+            })
+    return {
+        "query": query,
+        "total_matched": len(hits),
+        "hits": hits[:limit],
+        "truncated": len(hits) > limit,
+    }
+
+
 @tool("call_service", side_effects=True)
 async def call_service(domain: str, service: str, data: dict) -> dict:
     client = get_ha_client()

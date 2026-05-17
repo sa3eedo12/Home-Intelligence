@@ -65,6 +65,7 @@ def test_manifest_and_tools_consistent():
     expected = [
         "list_entities",
         "get_entity_state",
+        "search_entities",
         "call_service",
         "call_service_in_area",
         "list_areas",

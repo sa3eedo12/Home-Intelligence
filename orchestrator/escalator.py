@@ -72,7 +72,7 @@ ON EACH STEP, respond with ONE compact JSON object — no prose, no code fences.
    {"action": "resolved", "reply": "<user-facing reply>", "rationale": "<what you did>"}
 
 3. When you cannot make progress — no tool fits the request, every tool you tried errored, or you need user clarification:
-   {"action": "give_up", "reason": "<short reason>", "suggested_tool_spec": {<optional tool spec the system should add>}}
+   {"action": "give_up", "reason": "<short reason>", "discovered_entities": [<entity_ids you found that relate to the request, even if you couldn't surface them>], "suggested_tool_spec": {<optional tool spec the system should add>}}
 
 CRITICAL CAPABILITY FORMAT:
 The catalog lists capabilities as "agent.capability_id: description".
@@ -81,18 +81,37 @@ When calling a tool, pass them SEPARATELY:
   - capability: the part AFTER the first dot (e.g., "climate_status", "lights_off")
 NEVER include the agent name inside the capability field.
 
-Examples:
-  Catalog line:    "home_automation.climate_status: thermostat status"
-  Correct call:    {"action": "tool_call", "agent": "home_automation", "capability": "climate_status", ...}
-  WRONG call:      {"action": "tool_call", "agent": "home_automation", "capability": "home_automation.climate_status", ...}
+DISCOVERY STRATEGY:
+For ANY question about a specific device, object, or reading the user
+mentions colloquially (car, EV, blinds, vacuum, washer, etc.):
+  1. FIRST call home_automation.search_entities with a relevant keyword.
+     Example: user asks about car battery -> search_entities(query="car")
+     OR search_entities(query="battery") OR search_entities(query="vehicle").
+  2. If hits found, call get_entity_state on the most relevant entity_id
+     to fetch the actual value.
+  3. Compose a "resolved" reply with the real data.
+  4. If hits found BUT no clean tool exists to query them as a unit
+     (e.g., 8 sensors for one car, no ev_status tool), still answer
+     with what you can — then in your rationale, note that a dedicated
+     tool would make this cleaner. The system will mine your reasoning
+     to propose new tools.
+
+WHEN TO GIVE UP:
+- search_entities returns 0 hits for several keywords -> truly missing.
+  Include {"discovered_entities": []} and a suggested_tool_spec for the
+  capability the user evidently wants.
+- search_entities returns hits BUT the data doesn't answer the
+  question -> include {"discovered_entities": [eid, eid, ...]} so the
+  reflector knows the entities exist and can propose a real tool.
 
 Rules:
-- Use ONLY capability ids from the provided catalog. Never invent. Never prepend the agent name.
-- Prefer read-only discovery tools (list_entities, climate_status, lights_status, get_entity_state, list_areas) before any side-effecting tool.
+- Use ONLY capability ids from the provided catalog. Never invent.
+- Prefer search_entities over list_entities for keyword discovery.
 - After each tool result you see "OBSERVATION:" — use that to refine your next step.
 - If a side-effecting tool succeeds, immediately respond with "resolved".
-- If you've tried 2 tools and made no progress, lean toward "give_up" with a useful suggested_tool_spec rather than thrashing.
 - NEVER fabricate a result. NEVER claim you did something you didn't do.
+- NEVER offer generic external advice ("check your manual", "use a
+  third-party app"). If you can't answer, say so plainly and stop.
 """
 
 
@@ -330,16 +349,22 @@ class Escalator:
                 )
 
             if action == "give_up":
+                discovered = step.get("discovered_entities") or []
+                if not isinstance(discovered, list):
+                    discovered = []
                 escalation_path.append({
                     "iter": iteration,
                     "stage": "give_up",
                     "reason": step.get("reason"),
+                    "discovered_entities": [str(e) for e in discovered if e],
                     "suggested_tool_spec": step.get("suggested_tool_spec"),
                 })
                 logger.info(
                     "escalator_gave_up",
                     iteration=iteration,
                     reason=step.get("reason"),
+                    discovered_count=len(discovered),
+                    has_tool_spec=bool(step.get("suggested_tool_spec")),
                 )
                 return None, escalation_path
 

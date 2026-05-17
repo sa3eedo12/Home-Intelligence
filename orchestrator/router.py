@@ -223,6 +223,107 @@ class Router:
         except Exception as exc:
             logger.warning("router_gap_record_failed", error=str(exc))
 
+    async def _file_inline_proposal(
+        self,
+        user_text: str,
+        *,
+        give_up_step: dict[str, Any],
+    ) -> int | None:
+        """File a code_change proposal IMMEDIATELY when the escalator
+        gives up with rich context (discovered entities or a tool
+        spec). This is the difference between 'wait until tomorrow's
+        reflection' and 'the user can see the proposal now'.
+
+        The proposal cites:
+        - the exact user_text
+        - discovered entity_ids (proof the data exists)
+        - the escalator's suggested_tool_spec (if any)
+        - the escalator's reason for giving up
+
+        Failure modes: store unavailable -> returns None; the gap is
+        still recorded separately. We never block the user reply on
+        this."""
+        discovered = give_up_step.get("discovered_entities") or []
+        suggested_spec = give_up_step.get("suggested_tool_spec") or {}
+        reason = give_up_step.get("reason") or ""
+
+        # Title: tool-shaped if we have a spec, otherwise diagnostic.
+        title_parts = []
+        if isinstance(suggested_spec, dict) and suggested_spec.get("tool_id"):
+            title_parts.append(f"Add {suggested_spec['tool_id']} tool")
+        elif discovered:
+            # Derive a rough title from the first discovered entity
+            first = discovered[0]
+            domain = first.split(".", 1)[0] if "." in first else "entity"
+            title_parts.append(f"Add {domain}-status tool")
+        else:
+            title_parts.append("Add capability for unhandled request")
+        title_parts.append(f"— '{user_text[:60]}'")
+        title = " ".join(title_parts)[:140]
+
+        rationale_lines = [
+            f"User asked: {user_text!r}",
+            f"Escalator give-up reason: {reason}",
+        ]
+        if discovered:
+            rationale_lines.append(
+                f"Discovered {len(discovered)} related entities in HA "
+                f"that the existing tools could not surface as a unit:"
+            )
+            for eid in discovered[:20]:
+                rationale_lines.append(f"  - {eid}")
+            if len(discovered) > 20:
+                rationale_lines.append(f"  ... and {len(discovered) - 20} more")
+        else:
+            rationale_lines.append(
+                "No related entities found via discovery — this likely "
+                "indicates a genuinely missing integration, not just a "
+                "missing tool wrapper."
+            )
+        if isinstance(suggested_spec, dict) and suggested_spec:
+            import json as _json
+            rationale_lines.append("\nEscalator-proposed tool spec:")
+            rationale_lines.append(_json.dumps(suggested_spec, ensure_ascii=False, indent=2))
+        rationale = "\n".join(rationale_lines)
+
+        # Confidence: higher when we have BOTH discovered entities AND
+        # a spec; lower when only one. Below 0.5 the reflector usually
+        # ignores, so floor at 0.6 because we have concrete evidence.
+        if discovered and suggested_spec:
+            confidence = 0.85
+        elif discovered or suggested_spec:
+            confidence = 0.7
+        else:
+            confidence = 0.6
+
+        try:
+            proposal_id = await self._proposal_store.add_proposal(
+                kind="code_change",
+                title=title,
+                rationale=rationale,
+                confidence=confidence,
+                cost_estimate="small",
+                impact_estimate=(
+                    "Surfaces data already collected in HA but not "
+                    "exposed by any current tool; closes a real user "
+                    "request that hit the escalator today."
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "router_inline_proposal_failed",
+                error=str(exc),
+            )
+            return None
+        if proposal_id:
+            logger.info(
+                "router_inline_proposal_filed",
+                proposal_id=proposal_id,
+                discovered_count=len(discovered),
+                has_spec=bool(suggested_spec),
+            )
+        return proposal_id or None
+
     async def handle(
         self,
         text: str,
@@ -371,12 +472,37 @@ class Router:
                 # the mapper sees chat_catchall instead of the escalator's
                 # give_up / exhausted outcome.
                 escalator_failure_reason: str | None = None
+                escalator_give_up_step: dict[str, Any] | None = None
                 if self._escalator is not None:
                     from .escalator import (
                         map_exhausted_outcome_to_failure_reason,
                     )
                     escalator_failure_reason = (
                         map_exhausted_outcome_to_failure_reason(escalation_path)
+                    )
+                    # If the escalator gave up with structured context
+                    # (discovered entities or a suggested_tool_spec),
+                    # capture it for inline-proposal filing below.
+                    for step in reversed(escalation_path):
+                        if step.get("stage") == "give_up":
+                            escalator_give_up_step = step
+                            break
+
+                # File an INLINE proposal when the escalator's give_up
+                # has rich context — i.e., it discovered entities OR
+                # produced a tool spec. Don't wait for the nightly
+                # reflector; the gap is already a concrete, actionable
+                # tool-shaped request. The reflector will still mine
+                # general gap patterns, but high-signal ones surface
+                # immediately.
+                inline_proposal_id: int | None = None
+                if escalator_give_up_step and (
+                    escalator_give_up_step.get("discovered_entities")
+                    or escalator_give_up_step.get("suggested_tool_spec")
+                ):
+                    inline_proposal_id = await self._file_inline_proposal(
+                        text,
+                        give_up_step=escalator_give_up_step,
                     )
 
                 # Escalator gave up (or wasn't wired) — fall through to

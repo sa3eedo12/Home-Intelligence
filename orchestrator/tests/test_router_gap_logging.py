@@ -290,3 +290,109 @@ async def test_semantic_fallback_to_chat_for_device_query_still_escalates() -> N
         "escalator_no_tool_proposed",
         "escalator_max_iterations",
     }
+
+
+@pytest.mark.asyncio
+async def test_escalator_give_up_with_discovered_entities_files_inline_proposal():
+    """Headline test: Saeed asked 'what's the battery percentage of
+    my car?', escalator searched HA, found 41 'han_' entities, couldn't
+    surface them via existing tools, gave up with discovered_entities
+    populated. The router MUST file a code_change proposal NOW (not
+    wait for nightly reflection), with title, rationale citing the
+    user_text + entity_ids, and confidence >= 0.7."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    npu_resp = _make_npu_response(None, None, {})
+
+    def cap_lookup(agent, capability):
+        if (agent, capability) == ("personal_assistant", "chat"):
+            return {"description": "chat"}
+        return None
+
+    # Escalator returns (None resolution, path with give_up step having
+    # discovered_entities)
+    class _StubEscalator:
+        async def resolve(self, text, prior_attempt=None):
+            return None, [
+                {"stage": "tool_call", "outcome": "ok",
+                 "capability": "search_entities",
+                 "result_summary": "hits: sensor.han_battery_level..."},
+                {"stage": "give_up", "iter": 3,
+                 "reason": "no tool to aggregate vehicle data",
+                 "discovered_entities": [
+                     "sensor.han_battery_level",
+                     "sensor.han_range",
+                     "binary_sensor.han_charging",
+                     "binary_sensor.han_locked",
+                     "climate.han_climate",
+                 ],
+                 "suggested_tool_spec": {
+                     "tool_id": "ev_status",
+                     "description": "Vehicle status: battery, range, charging",
+                     "inputs": {"vehicle": "string?"},
+                 }},
+            ]
+
+    router, gap_store = _make_router_with_gap_store(
+        npu_response=npu_resp,
+        capability_lookup=cap_lookup,
+        dispatch_response={"reply": "honest refusal", "already_natural": True},
+    )
+    # Inject the stub escalator + a mock proposal_store
+    router._escalator = _StubEscalator()
+    proposal_store = MagicMock()
+    proposal_store.add_proposal = AsyncMock(return_value=123)
+    router._proposal_store = proposal_store
+
+    await router.handle("What is the battery percentage of my car?", "user1")
+
+    # Inline proposal MUST be filed
+    proposal_store.add_proposal.assert_awaited_once()
+    call = proposal_store.add_proposal.await_args.kwargs
+    assert call["kind"] == "code_change"
+    assert "ev_status" in call["title"]
+    assert "battery percentage of my car" in call["rationale"]
+    assert "sensor.han_battery_level" in call["rationale"]
+    assert call["confidence"] >= 0.85  # both discovered + spec → high
+
+
+@pytest.mark.asyncio
+async def test_escalator_give_up_without_context_does_NOT_file_inline_proposal():
+    """Negative case: if give_up has NEITHER discovered_entities NOR
+    suggested_tool_spec, the gap still gets recorded but no inline
+    proposal — we wait for the nightly reflector to cluster generic
+    gaps."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    npu_resp = _make_npu_response(None, None, {})
+
+    def cap_lookup(agent, capability):
+        if (agent, capability) == ("personal_assistant", "chat"):
+            return {"description": "chat"}
+        return None
+
+    class _StubEscalator:
+        async def resolve(self, text, prior_attempt=None):
+            return None, [
+                {"stage": "give_up", "iter": 2,
+                 "reason": "no idea what user wants",
+                 "discovered_entities": [],
+                 "suggested_tool_spec": None},
+            ]
+
+    router, gap_store = _make_router_with_gap_store(
+        npu_response=npu_resp,
+        capability_lookup=cap_lookup,
+        dispatch_response={"reply": "I don't know", "already_natural": True},
+    )
+    router._escalator = _StubEscalator()
+    proposal_store = MagicMock()
+    proposal_store.add_proposal = AsyncMock(return_value=999)
+    router._proposal_store = proposal_store
+
+    await router.handle("turn on the wibble flux capacitor", "user1")
+
+    # No inline proposal
+    proposal_store.add_proposal.assert_not_awaited()
+    # But gap IS recorded
+    gap_store.record_gap.assert_awaited()

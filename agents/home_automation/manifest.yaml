@@ -15,6 +15,21 @@ capabilities:
     inputs: { entity_id: string }
     side_effects: false
     cost: low
+  - id: search_entities
+    description: >-
+      Substring search across HA entities by entity_id AND friendly_name.
+      Use this when the user mentions a colloquial name ("car", "lock",
+      "vacuum", "blinds") and you need to find the matching entity_id
+      without scanning hundreds of entities. Much higher signal-per-token
+      than list_entities for discovery. Returns a focused list with
+      domain so the escalator can decide next-step tool calls.
+    inputs:
+      query: string
+      domain: "string?"
+      include_unavailable: "boolean?"
+      limit: "integer?"
+    side_effects: false
+    cost: low
   - id: call_service
     description: Call a Home Assistant service such as light.turn_on or scene.turn_on. Side-effecting. Returns affected entity names when entity targets are provided.
     inputs: { domain: string, service: string, data: object }
