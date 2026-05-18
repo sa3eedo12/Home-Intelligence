@@ -39,6 +39,10 @@ def test_duration_bucket_thresholds() -> None:
     assert _bucket_for_duration(60 * 60)[0] == "colors"
     assert _bucket_for_duration(100 * 60)[0] == "towels"
     assert _bucket_for_duration(150 * 60)[0] == "bedding"
+    # Cycles 3+ hours long are too ambiguous to bucket — likely a normal
+    # cycle with pre-soak / extras stacked on, not literally bedding.
+    assert _bucket_for_duration(15038)[0] is None  # 250 min — user's "Active wear" bug
+    assert _bucket_for_duration(200 * 60)[0] is None
     assert _bucket_for_duration(None)[0] is None
 
 
@@ -71,7 +75,30 @@ def test_infer_duration_when_no_program() -> None:
         history=[],
     )
     assert label == "quick"
-    assert 0.4 < conf < 0.6
+    # Duration-only must stay below the 0.5 "I'm confident" threshold so the
+    # quick-reply keyboard doesn't pre-check the wrong button.
+    assert conf < 0.5
+    assert conf > 0.0
+
+
+def test_infer_duration_only_long_cycle_returns_unsure() -> None:
+    """Regression for the 'Active wear classified as bedding' bug.
+
+    The user's 250-min Active wear cycle had no cycle_name and no program
+    (their Samsung HA integration doesn't surface either) so all we had
+    was duration. Previously we confidently asserted 'bedding' at 0.55
+    confidence — wrong. Now a 3+ hour cycle with no other signals returns
+    'unsure' so the user gets an honest 'please pick' prompt.
+    """
+    label, conf, reason = _infer(
+        duration_seconds=15038,  # 250 min — the exact user-reported case
+        program=None,
+        history=[],
+        cycle_name=None,
+    )
+    assert label == "unsure"
+    assert conf == 0.0
+    assert "no reliable signals" in reason
 
 
 def test_infer_habit_boosts_agreeing_signal() -> None:
@@ -86,9 +113,54 @@ def test_infer_habit_boosts_agreeing_signal() -> None:
 
 def test_infer_default_when_no_signals() -> None:
     label, conf, reason = _infer(duration_seconds=None, program=None, history=[])
-    assert label == "colors"
-    assert conf == 0.2
-    assert "default" in reason.lower()
+    # No signals → honest "I don't know" rather than confidently defaulting
+    # to colors. The keyboard renders the candidates without preselection.
+    assert label == "unsure"
+    assert conf == 0.0
+    assert "no reliable signals" in reason
+
+
+def test_summary_for_low_confidence_uses_uncertain_wording() -> None:
+    """Low-confidence summaries must not bold-assert a label."""
+    from tools.cycle_loads import _summary_for
+
+    summary = _summary_for("washer", "unsure", 0.0, "no signals", None)
+    assert "couldn't tell" in summary.lower() or "could you pick" in summary.lower()
+    assert "**unsure**" not in summary
+
+    # Duration-only at 0.4 should also use the uncertain wording.
+    summary_low = _summary_for("washer", "bedding", 0.4, "150-min cycle", None)
+    assert "**bedding**" not in summary_low
+    assert "could you pick" in summary_low.lower()
+
+
+def test_summary_for_high_confidence_bolds_the_label() -> None:
+    """High-confidence summaries should clearly state the guess."""
+    from tools.cycle_loads import _summary_for
+
+    summary = _summary_for("washer", "colors", 0.95, "cycle name 'Colors'", "Cotton")
+    assert "**colors**" in summary
+    assert "95%" in summary
+
+
+def test_keyboard_omits_check_when_unsure() -> None:
+    """When confidence is below 0.5 the keyboard shows no ✅ default."""
+    keyboard = _keyboard_for(99, "unsure", confidence=0.0)
+    flat = [btn for row in keyboard for btn in row]
+    assert all("✅" not in btn["text"] for btn in flat)
+    # Skip button still present
+    assert any(btn["callback"] == "cycle:99:_skip" for btn in flat)
+    # All real candidates still present
+    candidate_callbacks = {btn["callback"].rsplit(":", 1)[1] for btn in flat}
+    for label in CANDIDATE_LABELS[:6]:
+        assert label in candidate_callbacks
+
+
+def test_keyboard_omits_check_when_duration_only_low_confidence() -> None:
+    """A duration-only 0.4 guess should still hide the ✅ — same UX as unsure."""
+    keyboard = _keyboard_for(7, "bedding", confidence=0.4)
+    flat = [btn for row in keyboard for btn in row]
+    assert all("✅" not in btn["text"] for btn in flat)
 
 
 def test_keyboard_has_guess_first_and_skip_button() -> None:
