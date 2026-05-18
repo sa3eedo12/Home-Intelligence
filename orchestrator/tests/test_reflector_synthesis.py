@@ -72,10 +72,11 @@ def _sample_payload():
 
 
 @pytest.mark.asyncio
-async def test_synthesis_uses_35b_single_shot():
-    """Synthesis is the ONE place the 35B is used per nightly run.
-    Single-shot calls don't trigger the Vulkan/RADV deadlock that
-    plagued the batch refinement attempts."""
+async def test_synthesis_uses_fallback_model_due_to_gpu_pressure():
+    """Synthesis runs on the 8B fallback, NOT the 35B reasoner.
+    The 35B is unusable on Strix Halo when other models compete for
+    the unified memory budget — even single-shot calls hang 30+ min.
+    Documented in reflector.py near _synthesize_nightly_brief."""
     llm_response = json.dumps({
         "headline": "Tonight the system learned about your EV and front door.",
         "attention": "Approve proposal #59 (ev_status tool).",
@@ -87,11 +88,10 @@ async def test_synthesis_uses_35b_single_shot():
 
     assert reflector.llm.chat.await_count == 1
     chat_call = reflector.llm.chat.await_args_list[0]
-    assert chat_call.kwargs["model"] == "qwen3.6:35b-a3b"
+    assert chat_call.kwargs["model"] == "qwen3:8b"
     assert chat_call.kwargs["think"] is False
-    # Generous timeout: we're in the nightly window with hours to
-    # spare, and Ollama itself has no hard request limit.
-    assert chat_call.kwargs["timeout"] == 1800.0
+    # 5-min timeout: 8B is fast, this is plenty of headroom.
+    assert chat_call.kwargs["timeout"] == 300.0
 
 
 @pytest.mark.asyncio
@@ -109,7 +109,7 @@ async def test_synthesis_returns_structured_output():
     assert out["headline"].startswith("9 proposals")
     assert "ev_status" in out["attention"]
     assert "Capability gaps" in out["patterns"]
-    assert out["model"] == "qwen3.6:35b-a3b"
+    assert out["model"] == "qwen3:8b"
 
 
 @pytest.mark.asyncio
@@ -221,12 +221,12 @@ async def test_synthesis_absence_falls_back_to_heuristic_headline():
 
 
 @pytest.mark.asyncio
-async def test_synthesis_unloads_other_models_before_35b_call():
-    """Before invoking the 35B, free GPU memory by unloading any
-    other models still resident (typically 8B from refinement).
-    On Vulkan/RADV this is required to avoid a model-swap deadlock —
-    the 35B silently hangs at 0% GPU busy if it has to load while
-    smaller models are still in VRAM."""
+async def test_synthesis_unloads_other_models_before_chat_call():
+    """Before invoking the synthesis chat, free GPU memory by unloading
+    any other models still resident. On Strix Halo this leaves a
+    cleaner unified-memory state for the synthesis call to land on
+    (and would be required if we ever switch back to the 35B for
+    synthesis — see _synthesize_nightly_brief for the rationale)."""
     llm_response = json.dumps({
         "headline": "h", "attention": "a", "patterns": "",
     })
@@ -234,10 +234,11 @@ async def test_synthesis_unloads_other_models_before_35b_call():
 
     await reflector._synthesize_nightly_brief(**_sample_payload())
 
-    # Unload must be called BEFORE the chat (model_swap deadlock dodge).
+    # Unload must be called BEFORE the chat. Keep target is the
+    # synthesis model itself (currently the 8B fallback).
     reflector._unload_other_ollama_models.assert_awaited_once()
     unload_call = reflector._unload_other_ollama_models.await_args
-    assert unload_call.kwargs.get("keep") == "qwen3.6:35b-a3b"
+    assert unload_call.kwargs.get("keep") == "qwen3:8b"
 
 
 @pytest.mark.asyncio

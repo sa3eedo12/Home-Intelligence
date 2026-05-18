@@ -1185,24 +1185,29 @@ class NightlyReflector:
             "Now produce the synthesis JSON."
         )
 
-        # CRITICAL: free GPU memory before the 35B loads. We learned
-        # the hard way that even a single-shot 35B call hangs for
-        # 30 min if smaller models (8B from refinement) are still
-        # resident in VRAM — the Vulkan/RADV driver deadlocks during
-        # the model swap. Hitting Ollama's /api/generate with
-        # keep_alive=0 force-unloads each model immediately, leaving
-        # the GPU clean for the 35B to load fresh.
+        # KNOWN LIMITATION (2026-05-18): the 35B reasoner is unusable
+        # on this Strix Halo iGPU under sustained workloads. With 4
+        # models commonly resident (qwen3.6:35b @ 34GB + qwen3:8b @
+        # 17GB + qwen3:0.6b @ 10GB + bge-m3 @ 1.1GB ≈ 62GB on a 64GB
+        # unified memory budget), the 35B load-time work hangs for 30+
+        # minutes even after we proactively unload everything else —
+        # because other agents (router, escalator, Telegram bot) reload
+        # the 8B in the gap between unload and our chat call.
         #
-        # Wrapped in its own try/except so synthesis still proceeds
-        # if the unload step fails — the chat call is the main work,
-        # unloading is best-effort optimization.
+        # So we use the FALLBACK (8B) for synthesis too. The headline
+        # quality is slightly less polished than 35B output but it's a
+        # serviceable summary, and it actually completes. If/when GPU
+        # memory pressure is resolved (e.g. dedicated GPU, smaller
+        # context for the 35B), revisit and switch back to reasoner_model.
+        synthesis_model = self.fallback_model
+
+        # Still attempt the unload — it's cheap, leaves a cleaner GPU
+        # state for the synthesis call, and would be required if/when
+        # we switch back to the 35B. Best-effort: failures don't block
+        # the chat call.
         try:
-            await self._unload_other_ollama_models(keep=self.reasoner_model)
-            # Brief settle time so the GPU driver fully reclaims memory
-            # before the 35B starts loading. Empirically a couple
-            # seconds is enough; more wouldn't hurt but synthesis runs
-            # at the very end of the nightly window.
-            await asyncio.sleep(3)
+            await self._unload_other_ollama_models(keep=synthesis_model)
+            await asyncio.sleep(1)
         except Exception as exc:
             logger.warning(
                 "reflection_synthesis_unload_failed",
@@ -1210,25 +1215,24 @@ class NightlyReflector:
             )
 
         try:
-            # 35B single-shot synthesis. Generous timeout because:
-            # (a) nightly window has hours, (b) Ollama itself has no
-            # hard request limit, (c) think=False keeps it from
-            # over-deliberating.
+            # Single-shot synthesis. Generous timeout for safety since
+            # the nightly window has hours; think=False keeps the 8B
+            # from over-deliberating.
             response = await self.llm.chat(
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                model=self.reasoner_model,
+                model=synthesis_model,
                 response_format="json",
                 think=False,
-                timeout=1800.0,
+                timeout=300.0,
             )
         except Exception as exc:
             logger.warning(
                 "reflection_synthesis_llm_failed",
                 error=f"{type(exc).__name__}: {exc!s}",
-                model=self.reasoner_model,
+                model=synthesis_model,
             )
             return {}
 
@@ -1259,7 +1263,7 @@ class NightlyReflector:
             "headline": headline,
             "attention": attention,
             "patterns": patterns_note,
-            "model": self.reasoner_model,
+            "model": synthesis_model,
         }
 
     async def _unload_other_ollama_models(self, *, keep: str | None = None) -> None:

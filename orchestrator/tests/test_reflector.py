@@ -230,8 +230,10 @@ async def test_reasoner_http_error_falls_back_to_default_model() -> None:
 
     assert result["brief_id"] == 77
     models = [call.kwargs["model"] for call in llm.chat.call_args_list]
-    # proposals reasoner → proposals fallback → synthesis reasoner
-    assert models == ["reasoner-model", "fallback-model", "reasoner-model"]
+    # proposals reasoner → proposals fallback → synthesis (uses fallback now,
+    # not reasoner — see _synthesize_nightly_brief for the GPU-pressure
+    # rationale).
+    assert models == ["reasoner-model", "fallback-model", "fallback-model"]
     assert store.proposals[0]["title"] == "Ask wake time"
 
 
