@@ -1185,11 +1185,34 @@ class NightlyReflector:
             "Now produce the synthesis JSON."
         )
 
+        # CRITICAL: free GPU memory before the 35B loads. We learned
+        # the hard way that even a single-shot 35B call hangs for
+        # 30 min if smaller models (8B from refinement) are still
+        # resident in VRAM — the Vulkan/RADV driver deadlocks during
+        # the model swap. Hitting Ollama's /api/generate with
+        # keep_alive=0 force-unloads each model immediately, leaving
+        # the GPU clean for the 35B to load fresh.
+        #
+        # Wrapped in its own try/except so synthesis still proceeds
+        # if the unload step fails — the chat call is the main work,
+        # unloading is best-effort optimization.
         try:
-            # 35B single-shot. Deadlock only triggers under sustained
-            # load — one call per night is safe. Generous timeout
-            # because: (a) nightly window has hours, (b) Ollama itself
-            # has no hard request limit, (c) think=False keeps it from
+            await self._unload_other_ollama_models(keep=self.reasoner_model)
+            # Brief settle time so the GPU driver fully reclaims memory
+            # before the 35B starts loading. Empirically a couple
+            # seconds is enough; more wouldn't hurt but synthesis runs
+            # at the very end of the nightly window.
+            await asyncio.sleep(3)
+        except Exception as exc:
+            logger.warning(
+                "reflection_synthesis_unload_failed",
+                error=f"{type(exc).__name__}: {exc!s}",
+            )
+
+        try:
+            # 35B single-shot synthesis. Generous timeout because:
+            # (a) nightly window has hours, (b) Ollama itself has no
+            # hard request limit, (c) think=False keeps it from
             # over-deliberating.
             response = await self.llm.chat(
                 messages=[
@@ -1238,6 +1261,64 @@ class NightlyReflector:
             "patterns": patterns_note,
             "model": self.reasoner_model,
         }
+
+    async def _unload_other_ollama_models(self, *, keep: str | None = None) -> None:
+        """Force-unload every loaded Ollama model except ``keep``.
+
+        Used right before the 35B synthesis call to free GPU memory
+        and dodge the Vulkan/RADV deadlock. On this hardware, asking
+        Ollama to load the 35B while smaller models (8B from the
+        refinement phase) are still resident causes the GPU to hang
+        at 0% busy while the request times out. Force-unloading via
+        keep_alive=0 leaves the GPU clean so the 35B loads fresh.
+
+        Failures are logged but don't raise — better to attempt the
+        synthesis call against a not-fully-clean GPU than to skip
+        synthesis entirely because the unload probe failed.
+        """
+        ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(f"{ollama_url}/api/ps")
+                resp.raise_for_status()
+                data = resp.json() or {}
+                loaded = data.get("models") or []
+                names = [
+                    str(m.get("name") or m.get("model") or "")
+                    for m in loaded
+                    if isinstance(m, dict)
+                ]
+                names = [n for n in names if n and n != keep]
+                if not names:
+                    logger.info("ollama_unload_nothing_to_do", keep=keep)
+                    return
+                logger.info("ollama_unload_starting", models=names, keep=keep)
+                for name in names:
+                    try:
+                        # keep_alive=0 + empty prompt → unload, no
+                        # generation. Ollama returns near-instantly.
+                        await client.post(
+                            f"{ollama_url}/api/generate",
+                            json={
+                                "model": name,
+                                "prompt": "",
+                                "keep_alive": 0,
+                                "stream": False,
+                            },
+                            timeout=30,
+                        )
+                        logger.info("ollama_model_unloaded", model=name)
+                    except Exception as exc:
+                        logger.warning(
+                            "ollama_unload_failed",
+                            model=name,
+                            error=f"{type(exc).__name__}: {exc!s}",
+                        )
+        except Exception as exc:
+            logger.warning(
+                "ollama_unload_probe_failed",
+                error=f"{type(exc).__name__}: {exc!s}",
+            )
 
     async def _health_summary(self) -> dict[str, Any]:
         store = getattr(self, "health_store", None)

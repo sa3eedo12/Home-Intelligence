@@ -39,6 +39,10 @@ def _make_reflector(*, llm_response: str | None = None, raise_on_chat: Exception
         reasoner_model="qwen3.6:35b-a3b", fallback_model="qwen3:8b",
         gap_store=MagicMock(),
     )
+    # Skip the Ollama unload network call in tests — pin its async
+    # contract here so the synthesis path doesn't try to hit a real
+    # Ollama instance.
+    reflector._unload_other_ollama_models = AsyncMock(return_value=None)
     return reflector
 
 
@@ -214,3 +218,128 @@ async def test_synthesis_absence_falls_back_to_heuristic_headline():
     # Falls back to "Reflection found no urgent gaps overnight." etc.
     assert "Reflection" in body["summary"]
     assert body["nightly_synthesis"] == {}
+
+
+@pytest.mark.asyncio
+async def test_synthesis_unloads_other_models_before_35b_call():
+    """Before invoking the 35B, free GPU memory by unloading any
+    other models still resident (typically 8B from refinement).
+    On Vulkan/RADV this is required to avoid a model-swap deadlock —
+    the 35B silently hangs at 0% GPU busy if it has to load while
+    smaller models are still in VRAM."""
+    llm_response = json.dumps({
+        "headline": "h", "attention": "a", "patterns": "",
+    })
+    reflector = _make_reflector(llm_response=llm_response)
+
+    await reflector._synthesize_nightly_brief(**_sample_payload())
+
+    # Unload must be called BEFORE the chat (model_swap deadlock dodge).
+    reflector._unload_other_ollama_models.assert_awaited_once()
+    unload_call = reflector._unload_other_ollama_models.await_args
+    assert unload_call.kwargs.get("keep") == "qwen3.6:35b-a3b"
+
+
+@pytest.mark.asyncio
+async def test_synthesis_proceeds_when_unload_raises():
+    """If the Ollama unload probe itself fails (network blip, etc.),
+    we still attempt the 35B call — better to try with a not-fully-
+    clean GPU than skip the synthesis entirely."""
+    from unittest.mock import AsyncMock as _A
+    llm_response = json.dumps({
+        "headline": "h", "attention": "a", "patterns": "",
+    })
+    reflector = _make_reflector(llm_response=llm_response)
+    reflector._unload_other_ollama_models = _A(side_effect=Exception("unload boom"))
+
+    out = await reflector._synthesize_nightly_brief(**_sample_payload())
+
+    # The chat WAS attempted despite the unload raising — unload is
+    # best-effort, synthesis is the main work.
+    reflector.llm.chat.assert_awaited_once()
+    assert out.get("headline") == "h"
+    assert out.get("attention") == "a"
+
+
+@pytest.mark.asyncio
+async def test_unload_skips_when_only_keep_model_loaded():
+    """If the only loaded model is the synthesis model itself, the
+    unload helper makes ZERO unload requests."""
+    from unittest.mock import patch
+
+    pool = MagicMock()
+    redis = MagicMock()
+    llm = MagicMock()
+    registry = MagicMock()
+    reflector = NightlyReflector(
+        pool=pool, redis=redis, llm=llm, registry=registry,
+        reasoner_model="qwen3.6:35b-a3b", fallback_model="qwen3:8b",
+        gap_store=MagicMock(),
+    )
+
+    class _FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url):
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json = lambda: {"models": [{"name": "qwen3.6:35b-a3b"}]}
+            return resp
+        post = AsyncMock()
+
+    fake_client = _FakeClient()
+    with patch("orchestrator.reflector.httpx.AsyncClient", return_value=fake_client):
+        await reflector._unload_other_ollama_models(keep="qwen3.6:35b-a3b")
+
+    fake_client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unload_calls_keep_alive_zero_for_each_other_model():
+    """For each loaded model that isn't ``keep``, send a generate
+    request with keep_alive=0 to force-unload it from VRAM."""
+    from unittest.mock import patch
+
+    pool = MagicMock()
+    redis = MagicMock()
+    llm = MagicMock()
+    registry = MagicMock()
+    reflector = NightlyReflector(
+        pool=pool, redis=redis, llm=llm, registry=registry,
+        reasoner_model="qwen3.6:35b-a3b", fallback_model="qwen3:8b",
+        gap_store=MagicMock(),
+    )
+
+    posts = []
+
+    class _FakeClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url):
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json = lambda: {"models": [
+                {"name": "qwen3:8b"},
+                {"name": "qwen3:0.6b"},
+                {"name": "qwen3.6:35b-a3b"},  # the keep target
+                {"name": "bge-m3"},
+            ]}
+            return resp
+        async def post(self, url, json=None, timeout=None):
+            posts.append(json)
+            return MagicMock()
+
+    with patch("orchestrator.reflector.httpx.AsyncClient", return_value=_FakeClient()):
+        await reflector._unload_other_ollama_models(keep="qwen3.6:35b-a3b")
+
+    # 3 unload requests (everything except the keep model)
+    assert len(posts) == 3
+    unloaded_names = {p["model"] for p in posts}
+    assert unloaded_names == {"qwen3:8b", "qwen3:0.6b", "bge-m3"}
+    # Every unload must set keep_alive=0 — that's what triggers the
+    # immediate VRAM eviction in Ollama.
+    for p in posts:
+        assert p["keep_alive"] == 0
+        assert p["stream"] is False
