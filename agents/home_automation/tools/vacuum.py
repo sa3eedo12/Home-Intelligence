@@ -27,21 +27,24 @@ logger = get_logger("home_automation.vacuum")
 
 
 async def _list_vacuums() -> list[dict[str, Any]]:
-    """Fetch all vacuum.* entities plus enriched attributes."""
+    """Fetch all vacuum.* entities plus enriched attributes.
+
+    Uses tojson for state/name fields to handle embedded special chars
+    safely.
+    """
     client = get_ha_client()
-    # Pulling battery_level off the vacuum entity itself is most portable;
-    # Deebot also exposes sensor.<x>_battery as a separate entity but the
-    # vacuum.* domain entity carries the canonical battery_level attr.
     template = (
         "[{% for s in states.vacuum if true %}"
-        "{{ '{' }}\"entity_id\": \"{{ s.entity_id }}\", "
-        "\"name\": \"{{ state_attr(s.entity_id, 'friendly_name') or s.entity_id }}\", "
-        "\"area\": \"{{ area_name(s.entity_id) or '' }}\", "
-        "\"state\": \"{{ s.state }}\", "
+        "{{ '{' }}"
+        "\"entity_id\": {{ s.entity_id | tojson }}, "
+        "\"name\": {{ (state_attr(s.entity_id, 'friendly_name') or s.entity_id) | tojson }}, "
+        "\"area\": {{ (area_name(s.entity_id) or '') | tojson }}, "
+        "\"state\": {{ s.state | tojson }}, "
         "\"battery_level\": {{ state_attr(s.entity_id, 'battery_level') or 'null' }}, "
-        "\"fan_speed\": \"{{ state_attr(s.entity_id, 'fan_speed') or '' }}\", "
-        "\"status\": \"{{ state_attr(s.entity_id, 'status') or '' }}\""
-        "{{ '}' }}{% if not loop.last %},{% endif %}"
+        "\"fan_speed\": {{ (state_attr(s.entity_id, 'fan_speed') or '') | tojson }}, "
+        "\"status\": {{ (state_attr(s.entity_id, 'status') or '') | tojson }}"
+        "{{ '}' }}"
+        "{% if not loop.last %},{% endif %}"
         "{% endfor %}]"
     )
     import json as _json

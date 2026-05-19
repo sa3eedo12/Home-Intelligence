@@ -36,19 +36,23 @@ _CLOSED_LIKE_STATES = {"closed", "closing"}
 async def _list_covers_with_areas() -> list[dict[str, Any]]:
     """Fetch all cover.* entities annotated with their HA area name.
 
-    Filters out ``unavailable`` covers from action paths but keeps them
-    visible in status so the user sees the whole picture.
+    Uses Jinja's ``tojson`` filter so state/name values with embedded
+    newlines or quotes are escaped correctly — without it, entities
+    whose state contained a literal newline (e.g. geocoded locations)
+    crashed the JSON parse.
     """
     client = get_ha_client()
     template = (
         "[{% for s in states.cover if true %}"
-        "{{ '{' }}\"entity_id\": \"{{ s.entity_id }}\", "
-        "\"name\": \"{{ state_attr(s.entity_id, 'friendly_name') or s.entity_id }}\", "
-        "\"area\": \"{{ area_name(s.entity_id) or '' }}\", "
-        "\"state\": \"{{ s.state }}\", "
+        "{{ '{' }}"
+        "\"entity_id\": {{ s.entity_id | tojson }}, "
+        "\"name\": {{ (state_attr(s.entity_id, 'friendly_name') or s.entity_id) | tojson }}, "
+        "\"area\": {{ (area_name(s.entity_id) or '') | tojson }}, "
+        "\"state\": {{ s.state | tojson }}, "
         "\"position\": {{ state_attr(s.entity_id, 'current_position') or 'null' }}, "
-        "\"device_class\": \"{{ state_attr(s.entity_id, 'device_class') or '' }}\""
-        "{{ '}' }}{% if not loop.last %},{% endif %}"
+        "\"device_class\": {{ (state_attr(s.entity_id, 'device_class') or '') | tojson }}"
+        "{{ '}' }}"
+        "{% if not loop.last %},{% endif %}"
         "{% endfor %}]"
     )
     import json as _json

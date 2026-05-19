@@ -32,11 +32,13 @@ async def _list_locks_with_areas() -> list[dict[str, Any]]:
     client = get_ha_client()
     template = (
         "[{% for s in states.lock if true %}"
-        "{{ '{' }}\"entity_id\": \"{{ s.entity_id }}\", "
-        "\"name\": \"{{ state_attr(s.entity_id, 'friendly_name') or s.entity_id }}\", "
-        "\"area\": \"{{ area_name(s.entity_id) or '' }}\", "
-        "\"state\": \"{{ s.state }}\""
-        "{{ '}' }}{% if not loop.last %},{% endif %}"
+        "{{ '{' }}"
+        "\"entity_id\": {{ s.entity_id | tojson }}, "
+        "\"name\": {{ (state_attr(s.entity_id, 'friendly_name') or s.entity_id) | tojson }}, "
+        "\"area\": {{ (area_name(s.entity_id) or '') | tojson }}, "
+        "\"state\": {{ s.state | tojson }}"
+        "{{ '}' }}"
+        "{% if not loop.last %},{% endif %}"
         "{% endfor %}]"
     )
     import json as _json
