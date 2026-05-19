@@ -210,10 +210,12 @@ async def test_uses_8b_with_180s_timeout_for_batch_refinement():
     await reflector._refine_proposals()
 
     chat_call = reflector.llm.chat.await_args_list[0]
-    assert chat_call.kwargs["think"] is False
-    # 8B batch refinement — 35B hits Vulkan/RADV deadlock on sustained calls
+    # Nightly path → think=True (smaller model benefits more from CoT).
+    assert chat_call.kwargs["think"] is True
     assert chat_call.kwargs["model"] == "qwen3:8b"
-    assert chat_call.kwargs["timeout"] == 180.0
+    # 5-min timeout (300s) — thinking adds latency, the nightly window
+    # absorbs it.
+    assert chat_call.kwargs["timeout"] == 300.0
 
 
 @pytest.mark.asyncio

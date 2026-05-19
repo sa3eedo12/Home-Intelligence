@@ -172,11 +172,13 @@ services:
     image: ghcr.io/sa3eedo12/home-intelligence/orchestrator:latest
     env_file: .env
     environment:
-      # Pin the 35B reasoner in VRAM forever so the nightly reflection
-      # run doesn't pay the 3-minute cold-load tax. Inlined here (not
-      # in .env) because docker compose's env_file parser was dropping
-      # negative-integer values when read from the project .env on
-      # this host.
+      # Pin the reasoner model in VRAM forever so the nightly reflection
+      # run doesn't pay the cold-load tax. Inlined here (not in .env)
+      # because docker compose's env_file parser was dropping negative-
+      # integer values when read from the project .env on this host.
+      # Safe with the current default reasoner (qwen3:14b @ ~9 GB resident);
+      # if you ever set REASONER_MODEL to a >20 GB model, double-check
+      # ROCm/Vulkan reports enough VRAM headroom before keeping it pinned.
       REASONER_KEEP_ALIVE: "-1"
     user: "568:568"
     ports:

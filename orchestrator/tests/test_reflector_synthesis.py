@@ -89,9 +89,11 @@ async def test_synthesis_uses_fallback_model_due_to_gpu_pressure():
     assert reflector.llm.chat.await_count == 1
     chat_call = reflector.llm.chat.await_args_list[0]
     assert chat_call.kwargs["model"] == "qwen3:8b"
-    assert chat_call.kwargs["think"] is False
-    # 5-min timeout: 8B is fast, this is plenty of headroom.
-    assert chat_call.kwargs["timeout"] == 300.0
+    # Thinking ON for the nightly path: smaller models benefit more
+    # from CoT, and the nightly window has hours.
+    assert chat_call.kwargs["think"] is True
+    # 10-min timeout: thinking adds latency but iGPU still finishes well within.
+    assert chat_call.kwargs["timeout"] == 600.0
 
 
 @pytest.mark.asyncio

@@ -295,13 +295,12 @@ class NightlyReflector:
         self.redis = redis
         self.llm = llm
         self.registry = registry
-        # Default to qwen3:8b: ~5GB loads in seconds, generates a JSON
-        # proposal in 30-90s. The bigger qwen3.6:35b-a3b (23GB) was the
-        # historical default but it requires >24GB RAM/VRAM and the load
-        # alone takes 60-120s, blowing past OLLAMA_TIMEOUT_SECONDS on
-        # modest hardware. Users with the headroom can opt in with
-        # REASONER_MODEL=qwen3.6:35b-a3b in their env.
-        self.reasoner_model = reasoner_model or os.environ.get("REASONER_MODEL", "qwen3:8b")
+        # qwen3:14b @ ~9 GB resident is the recommended reasoner — real
+        # reasoning upgrade over the 8B without the MoE/Vulkan deadlock
+        # risk that took the original qwen3.6:35b-a3b out of rotation
+        # on Strix Halo iGPUs. Falls back to whatever's in REASONER_MODEL
+        # for callers that override.
+        self.reasoner_model = reasoner_model or os.environ.get("REASONER_MODEL", "qwen3:14b")
         self.fallback_model = fallback_model or os.environ.get("DEFAULT_MODEL", "qwen3:8b")
         self.store = ReflectionStore(pool)
         # gap_store is optional — when present, _mine_capability_gaps
@@ -749,18 +748,20 @@ class NightlyReflector:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                # Was self.reasoner_model (35B). Switched to the 8B
-                # fallback after the 35B consistently hit 10-min
-                # Ollama timeouts on sustained back-to-back calls on
-                # the live N5 Pro Vulkan backend. The 8B finishes
-                # gap clustering in 30-60s and produces good enough
-                # proposals — the 35B's marginal quality improvement
-                # isn't worth a phase that hangs the whole nightly
-                # reflection.
+                # Was self.reasoner_model (35B). Switched to the
+                # 8B fallback model after the 35B consistently hit
+                # 10-min Ollama timeouts on sustained back-to-back
+                # calls on the live N5 Pro Vulkan backend. Now uses
+                # self.fallback_model with think=True — the smaller
+                # model benefits more from chain-of-thought + the
+                # nightly window has hours to spare. The 8B with
+                # thinking finishes gap clustering in ~60-90s and
+                # produces tighter proposals (no duplicates of prior
+                # dismissed work).
                 model=self.fallback_model,
                 response_format="json",
-                think=False,
-                timeout=180.0,
+                think=True,
+                timeout=300.0,
             )
         except Exception as exc:
             logger.warning(
@@ -1022,25 +1023,16 @@ class NightlyReflector:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                # 8B for batch refinement. We learned the hard way that
-                # the 35B (qwen3.6:35b-a3b) hits a Vulkan/RADV deadlock
-                # under sustained back-to-back calls: GPU sits at 0%
-                # busy while the request hangs at the network layer for
-                # the full client timeout. The 8B (qwen3:8b) finishes a
-                # refinement in 30-60s with genuinely good quality —
-                # 9 proposals refined in ~3 minutes on real hardware,
-                # with proposal #59 correctly narrowing "27 batteries"
-                # down to the actual BYD HAN sensors.
-                #
-                # The 35B is still used ONCE per nightly run in
-                # _synthesize_nightly_brief — a single-shot call works
-                # fine because the deadlock only triggers under
-                # sustained load. See plan.md "Known limitations" for
-                # the full RADV deadlock writeup.
+                # Refinement runs the fallback model with thinking
+                # enabled — smaller models benefit more from CoT and
+                # the nightly window can absorb the extra latency.
+                # The 8B with think=True finishes a refinement in
+                # ~60-120s with genuinely good quality; batches of
+                # 9 proposals refine in ~10-15 min on Strix Halo.
                 model=self.fallback_model,
                 response_format="json",
-                think=False,
-                timeout=180.0,
+                think=True,
+                timeout=300.0,
             )
         except Exception as exc:
             logger.warning(
@@ -1215,9 +1207,9 @@ class NightlyReflector:
             )
 
         try:
-            # Single-shot synthesis. Generous timeout for safety since
-            # the nightly window has hours; think=False keeps the 8B
-            # from over-deliberating.
+            # Single-shot synthesis. Thinking enabled so a smaller
+            # model produces a better-organized brief; timeout is
+            # generous because the nightly window has hours.
             response = await self.llm.chat(
                 messages=[
                     {"role": "system", "content": system},
@@ -1225,8 +1217,8 @@ class NightlyReflector:
                 ],
                 model=synthesis_model,
                 response_format="json",
-                think=False,
-                timeout=300.0,
+                think=True,
+                timeout=600.0,
             )
         except Exception as exc:
             logger.warning(
@@ -1448,7 +1440,10 @@ class NightlyReflector:
                 model=fallback_model,
                 temperature=0.1,
                 response_format="json",
-                think=False,
+                # Nightly path → enable thinking so the smaller model
+                # produces tighter proposals (fewer duplicates, better
+                # dedup-vs-existing reasoning).
+                think=True,
             )
 
         # If reasoner == fallback, no point retrying — short-circuit so we
@@ -1459,7 +1454,7 @@ class NightlyReflector:
                 model=reasoner_model,
                 temperature=0.1,
                 response_format="json",
-                think=False,
+                think=True,
             )
 
         try:
@@ -1468,7 +1463,7 @@ class NightlyReflector:
                 model=reasoner_model,
                 temperature=0.1,
                 response_format="json",
-                think=False,
+                think=True,
             )
         except httpx.HTTPError as exc:
             logger.warning(
@@ -1482,7 +1477,7 @@ class NightlyReflector:
                 model=fallback_model,
                 temperature=0.1,
                 response_format="json",
-                think=False,
+                think=True,
             )
         except Exception as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -1499,6 +1494,7 @@ class NightlyReflector:
                 model=fallback_model,
                 temperature=0.1,
                 response_format="json",
+                think=True,
             )
 
     def _normalize_proposal(self, item: Any) -> dict[str, Any] | None:
