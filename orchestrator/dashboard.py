@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +112,16 @@ def _last_aggregate_value(rows: list[dict[str, Any]]) -> float | None:
 
 
 def _sum_recent(rows: list[dict[str, Any]], metric: str) -> float:
+    """Sum non-overlapping metric values across recent rows.
+
+    Routes sleep_* metrics through :func:`_union_recent_sleep_minutes`
+    because Health Auto Export re-sends the same sleep session with
+    updated end-times on every sync, producing 2-3 rows for one night
+    that a naive ``sum(value)`` triple-counts (Saeed observed 34h 35m
+    of "asleep" for a 7h night because of this).
+    """
+    if metric.startswith("sleep_"):
+        return _union_recent_sleep_minutes(rows, metric)
     total = 0.0
     for row in rows:
         if row.get("metric") != metric:
@@ -121,6 +131,81 @@ def _sum_recent(rows: list[dict[str, Any]], metric: str) -> float:
         except (TypeError, ValueError):
             continue
     return round(total, 1)
+
+
+# HealthKit / HAE outer-envelope and re-sync dedup helpers, mirroring
+# the logic in agents/personal_assistant/tools/sleep_inference.py.
+# Duplicated here because the dashboard renders synchronously from
+# raw HAE rows and shouldn't have to round-trip through the personal
+# assistant agent just to compute a tile value.
+_DASHBOARD_MAX_PLAUSIBLE_SLEEP_HOURS = 14
+
+
+def _row_started_ended(row: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    started = row.get("started_at")
+    ended = row.get("ended_at")
+    if not isinstance(started, datetime):
+        return None
+    if not isinstance(ended, datetime):
+        try:
+            value_minutes = float(row.get("value") or 0)
+        except (TypeError, ValueError):
+            return None
+        if value_minutes <= 0:
+            return None
+        ended = started + timedelta(minutes=value_minutes)
+    if ended <= started:
+        return None
+    return started, ended
+
+
+def _union_recent_sleep_minutes(
+    rows: list[dict[str, Any]], metric: str
+) -> float:
+    """Union-of-intervals minute total for a sleep metric.
+
+    Two HAE quirks to defend against:
+      1. Re-sync produces 2-3 rows for ONE sleep session with the same
+         started_at and progressively-larger ended_at as the user wakes
+         up gradually. Naive sum triple-counts the same minutes.
+      2. HAE occasionally emits an outer-envelope row spanning >14h
+         (two unrelated days' sleep bundled into one row). These must
+         be excluded — see the long comment in sleep_inference.py.
+
+    Strategy: per (started_at) bucket, keep the row with the LARGEST
+    end_time (latest re-sync wins). Drop intervals longer than 14h.
+    Union the survivors using interval merging.
+    """
+    by_start: dict[datetime, tuple[datetime, datetime]] = {}
+    for row in rows:
+        if row.get("metric") != metric:
+            continue
+        interval = _row_started_ended(row)
+        if interval is None:
+            continue
+        start, end = interval
+        hours = (end - start).total_seconds() / 3600
+        if hours > _DASHBOARD_MAX_PLAUSIBLE_SLEEP_HOURS:
+            continue
+        # Multiple snapshots of the same session: keep the one with the
+        # latest ended_at (the most-recent re-sync).
+        existing = by_start.get(start)
+        if existing is None or end > existing[1]:
+            by_start[start] = (start, end)
+
+    intervals = sorted(by_start.values(), key=lambda p: p[0])
+    if not intervals:
+        return 0.0
+
+    merged: list[list[datetime]] = []
+    for start, end in intervals:
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
+        elif end > merged[-1][1]:
+            merged[-1][1] = end
+
+    seconds = sum((end - start).total_seconds() for start, end in merged)
+    return round(seconds / 60, 1)
 
 
 async def _health_snapshot(request: Request) -> dict[str, Any]:

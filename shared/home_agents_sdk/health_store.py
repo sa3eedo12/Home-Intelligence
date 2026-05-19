@@ -129,7 +129,24 @@ class HealthStore:
                             COALESCE(raw, '{}'::jsonb)
                         FROM input
                         WHERE metric IS NOT NULL AND started_at IS NOT NULL
-                        ON CONFLICT DO NOTHING
+                        -- See infra/postgres/init/21_health_metrics_session_dedupe.sql.
+                        -- The unique key is (metric, started_at, source) — every HAE
+                        -- re-sync of the same session UPSERTs the existing row
+                        -- instead of inserting a duplicate. Only update if the
+                        -- incoming snapshot extends the session: a strictly-greater
+                        -- value (i.e. longer duration) wins; otherwise keep the
+                        -- existing row to avoid clobbering with a stale fragment.
+                        ON CONFLICT (metric, started_at, source) DO UPDATE
+                          SET ended_at = EXCLUDED.ended_at,
+                              value = EXCLUDED.value,
+                              unit = EXCLUDED.unit,
+                              member_id = COALESCE(EXCLUDED.member_id, health_metrics.member_id),
+                              metadata = EXCLUDED.metadata,
+                              raw = EXCLUDED.raw,
+                              received_at = now()
+                          WHERE EXCLUDED.value IS NULL
+                             OR health_metrics.value IS NULL
+                             OR EXCLUDED.value >= health_metrics.value
                         RETURNING 1
                     )
                     SELECT count(*)::int FROM inserted

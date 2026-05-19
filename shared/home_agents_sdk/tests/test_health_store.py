@@ -33,7 +33,11 @@ async def test_upsert_metrics_bulk_inserts_and_counts_skips() -> None:
 
     assert result == {"inserted": 2, "skipped": 1}
     query, payload = conn.fetchval.await_args.args
-    assert "ON CONFLICT DO NOTHING" in query
+    # Closes the "34h 35min" duplicate-sleep bug: each (metric, started_at,
+    # source) tuple is now an UPSERT keyed on session, with a value-grew
+    # guard so older snapshots don't clobber newer ones.
+    assert "ON CONFLICT (metric, started_at, source) DO UPDATE" in query
+    assert "EXCLUDED.value >= health_metrics.value" in query
     assert "health_metrics" in query
     assert "2026-05-13T08:00:00Z" in payload
 
