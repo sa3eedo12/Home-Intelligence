@@ -73,6 +73,29 @@ async def test_tv_left_on_emits_after_threshold_when_nobody_home() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tv_left_on_default_cooldown_prevents_duplicate_alerts_same_day() -> None:
+    """Regression for proposal #51 — user reported the same Samsung TV
+    triggered TWO 'left on' alerts on 2026-05-17 (12.0h then 6.0h).
+    With the default 24h cooldown the second alert must be suppressed.
+    """
+    observer = _CaptureTv(max_on_hours=6)  # use default cooldown
+    await observer.handle(_presence_payload("not_home", "2026-05-17T08:00:00+00:00"))
+    await observer.handle(_tv_payload("on", "2026-05-17T08:00:00+00:00"))
+
+    # First check at 14:00 (6h elapsed) → ONE alert
+    await observer.handle(_tv_payload("on", "2026-05-17T14:01:00+00:00"))
+    assert len(observer.emitted) == 1
+
+    # At 20:01 (12h elapsed) → cooldown still active → no new alert
+    await observer.handle(_tv_payload("on", "2026-05-17T20:01:00+00:00"))
+    assert len(observer.emitted) == 1
+
+    # Next day 14:30 (24.5h after first alert) → cooldown elapsed → eligible
+    await observer.handle(_tv_payload("on", "2026-05-18T14:30:00+00:00"))
+    assert len(observer.emitted) == 2
+
+
+@pytest.mark.asyncio
 async def test_tv_left_on_cooldown_dedupes_same_device() -> None:
     observer = _CaptureTv(max_on_hours=1, cooldown=timedelta(hours=2))
 

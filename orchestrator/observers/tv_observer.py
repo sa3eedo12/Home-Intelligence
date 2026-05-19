@@ -20,7 +20,13 @@ from .utils import (
 MAX_TRACKED_ENTITIES = 256
 MAX_TRACKED_PRESENCE = 256
 DEFAULT_MAX_ON_HOURS = 6.0
-DEFAULT_COOLDOWN = timedelta(hours=6)
+# Cooldown was 6h, which caused duplicate "TV left on" alerts on
+# long-running cycles: TV on at 09:00 → fires at 15:00 (6h) → cooldown
+# until 21:00 → fires AGAIN at 21:00 (12h). The user reported two
+# alerts for the same Samsung TV on May 17. 24h gives us at most one
+# alert per TV per rolling day, which matches the "left it on too
+# long" intent. Tests can override per-case.
+DEFAULT_COOLDOWN = timedelta(hours=24)
 DEFAULT_WAKE_TIME = time(7, 0)
 SLEEP_TIME_CACHE_TTL = timedelta(minutes=5)
 MEDIA_ON_STATES = {"on", "playing", "paused", "idle", "buffering"}

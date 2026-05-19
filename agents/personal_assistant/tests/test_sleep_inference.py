@@ -186,3 +186,374 @@ async def test_sleep_summaries_store_insert_uses_upsert() -> None:
     assert summary_id == 5
     assert "ON CONFLICT" in query
     assert "sleep_summaries" in query
+
+
+# ── Envelope / over-long row defenses (post-Saeed-bug) ──────────────────
+
+
+def test_interval_covers_children_detects_fajr_envelope() -> None:
+    """Parent 02:00→09:00 with two children that cover the same span
+    minus a 60-min gap is an envelope. Excluding it leaves the two
+    real segments and the gap (Fajr) is correctly NOT counted as sleep.
+    """
+    parent = (
+        datetime(2026, 5, 18, 22, 0, tzinfo=UTC),
+        datetime(2026, 5, 19, 5, 0, tzinfo=UTC),
+    )
+    children = [
+        (
+            datetime(2026, 5, 18, 22, 0, tzinfo=UTC),
+            datetime(2026, 5, 19, 1, 0, tzinfo=UTC),
+        ),
+        (
+            datetime(2026, 5, 19, 2, 0, tzinfo=UTC),
+            datetime(2026, 5, 19, 5, 0, tzinfo=UTC),
+        ),
+    ]
+    assert sleep._interval_covers_children(parent, children) is True
+
+
+def test_interval_covers_children_rejects_when_only_one_child() -> None:
+    parent = (
+        datetime(2026, 5, 18, 22, 0, tzinfo=UTC),
+        datetime(2026, 5, 19, 5, 0, tzinfo=UTC),
+    )
+    children = [
+        (
+            datetime(2026, 5, 18, 22, 0, tzinfo=UTC),
+            datetime(2026, 5, 19, 1, 0, tzinfo=UTC),
+        )
+    ]
+    assert sleep._interval_covers_children(parent, children) is False
+
+
+def test_interval_covers_children_rejects_contiguous_children() -> None:
+    """If children fully tile the parent with no gap, parent is just
+    a coarser summary and either keeping or dropping it gives the
+    same union — but we err on side of keeping it to preserve metric
+    accounting. Returns False because there's no measurable interior
+    gap that would indicate a true envelope."""
+    parent = (
+        datetime(2026, 5, 18, 22, 0, tzinfo=UTC),
+        datetime(2026, 5, 19, 5, 0, tzinfo=UTC),
+    )
+    children = [
+        (
+            datetime(2026, 5, 18, 22, 0, tzinfo=UTC),
+            datetime(2026, 5, 19, 1, 0, tzinfo=UTC),
+        ),
+        (
+            datetime(2026, 5, 19, 1, 0, tzinfo=UTC),
+            datetime(2026, 5, 19, 5, 0, tzinfo=UTC),
+        ),
+    ]
+    assert sleep._interval_covers_children(parent, children) is False
+
+
+def test_strip_envelope_rows_drops_implausibly_long_singletons() -> None:
+    """The exact Saeed bug: a 23.5h sleep_asleep row that bundles two
+    unrelated days. Must be dropped before union math runs."""
+    window_start = datetime(2026, 5, 18, 16, 30, tzinfo=UTC)
+    window_end = datetime(2026, 5, 19, 9, 0, tzinfo=UTC)
+    envelope = {
+        "metric": "sleep_asleep",
+        "started_at": "2026-05-18T01:16:15+00:00",
+        "ended_at": "2026-05-19T00:46:56+00:00",  # 23.5h
+        "value": 1410,
+        "member_id": 2,
+    }
+    real = {
+        "metric": "sleep_asleep",
+        "started_at": "2026-05-18T21:28:29+00:00",  # 01:28 local
+        "ended_at": "2026-05-19T00:46:56+00:00",  # 04:46 local
+        "value": 198,
+        "member_id": 2,
+    }
+    kept, dropped = sleep._strip_envelope_rows(
+        [envelope, real], window_start, window_end
+    )
+    assert envelope not in kept
+    assert real in kept
+    assert envelope in dropped
+
+
+def test_strip_envelope_rows_keeps_normal_night() -> None:
+    """A clean 7h night with one row per metric stays untouched."""
+    window_start = datetime(2026, 5, 12, 19, 0, tzinfo=UTC)
+    window_end = datetime(2026, 5, 13, 11, 0, tzinfo=UTC)
+    rows = [
+        {
+            "metric": "sleep_asleep",
+            "started_at": "2026-05-12T23:00:00+00:00",
+            "ended_at": "2026-05-13T06:00:00+00:00",
+            "value": 420,
+        },
+        {
+            "metric": "sleep_deep",
+            "started_at": "2026-05-13T03:00:00+00:00",
+            "ended_at": "2026-05-13T04:00:00+00:00",
+            "value": 60,
+        },
+    ]
+    kept, dropped = sleep._strip_envelope_rows(rows, window_start, window_end)
+    assert kept == rows
+    assert dropped == []
+
+
+def test_default_night_of_for_past_midnight_sleeper_is_today() -> None:
+    """Regression: Saeed's sleep_time=00:30. The morning cron runs at
+    08:00 local on May 19 — for him, 'last night' = today (May 19),
+    because he fell asleep at ~02:30 AM TODAY. Yesterday's date would
+    look at the wrong 24h window entirely."""
+    member = {"id": 2, "name": "Saeed", "sleep_time": time(0, 30), "wake_time": time(9, 0)}
+    today = datetime.now(sleep._tz()).date()
+    assert sleep._default_night_of(member) == today
+
+
+def test_default_night_of_for_pre_midnight_sleeper_is_yesterday() -> None:
+    """Classic case: 23:00 sleeper. 'Last night' means yesterday's
+    evening to this morning, so night_of = yesterday."""
+    from datetime import timedelta as _td
+
+    member = {"id": 9, "name": "Alex", "sleep_time": time(23, 0), "wake_time": time(7, 0)}
+    today = datetime.now(sleep._tz()).date()
+    assert sleep._default_night_of(member) == today - _td(days=1)
+
+
+def test_default_night_of_handles_missing_sleep_time() -> None:
+    """No member info → fall back to pre-midnight default (23:00) → yesterday."""
+    from datetime import timedelta as _td
+
+    today = datetime.now(sleep._tz()).date()
+    assert sleep._default_night_of(None) == today - _td(days=1)
+    assert sleep._default_night_of({}) == today - _td(days=1)
+
+
+# ── Bedtime drift detection (closes proposal #53) ───────────────────────
+
+
+def test_median_bedtime_anchors_across_midnight(monkeypatch) -> None:
+    """Naive averaging of 00:30 + 23:30 = 12:00 which is nonsense. The
+    anchored median correctly returns 00:00."""
+    monkeypatch.setenv("USER_TZ", "UTC")
+    samples = [
+        datetime(2026, 5, 13, 0, 30, tzinfo=UTC),
+        datetime(2026, 5, 14, 23, 30, tzinfo=UTC),
+        datetime(2026, 5, 15, 0, 0, tzinfo=UTC),
+    ]
+    median = sleep._median_bedtime(samples, anchor=time(0, 0))
+    assert median is not None
+    assert median == time(0, 0)
+
+
+def test_median_bedtime_for_saeeds_actual_data(monkeypatch) -> None:
+    """Real Saeed data: bedtimes 01:25, 02:21, 03:05, 02:27 local. Anchor
+    at configured 00:30. Median should be ~02:24."""
+    monkeypatch.setenv("USER_TZ", "UTC")
+    samples = [
+        datetime(2026, 5, 14, 1, 25, tzinfo=UTC),
+        datetime(2026, 5, 15, 2, 21, tzinfo=UTC),
+        datetime(2026, 5, 16, 3, 5, tzinfo=UTC),
+        datetime(2026, 5, 17, 2, 27, tzinfo=UTC),
+    ]
+    median = sleep._median_bedtime(samples, anchor=time(0, 30))
+    assert median is not None
+    # Median of the two middle samples (02:21 + 02:27) / 2 = 02:24
+    assert median == time(2, 24)
+
+
+def test_median_bedtime_handles_empty_list() -> None:
+    assert sleep._median_bedtime([], anchor=time(0, 30)) is None
+
+
+@pytest.mark.asyncio
+async def test_propose_bedtime_update_emits_when_drift_exceeds_threshold(
+    monkeypatch,
+) -> None:
+    """4 nights of bedtime ~02:25 with configured 00:30 → 115 min drift
+    → proposal emitted with the median in title."""
+    monkeypatch.setenv("USER_TZ", "UTC")
+    member = {
+        "id": 2,
+        "name": "Saeed",
+        "sleep_time": time(0, 30),
+        "wake_time": time(9, 0),
+    }
+    samples = [
+        datetime(2026, 5, 14, 1, 25, tzinfo=UTC),
+        datetime(2026, 5, 15, 2, 21, tzinfo=UTC),
+        datetime(2026, 5, 16, 3, 5, tzinfo=UTC),
+        datetime(2026, 5, 17, 2, 27, tzinfo=UTC),
+    ]
+
+    async def _fake_bedtimes(_pool, *, member_id, lookback_nights=7):  # noqa: ANN001
+        assert member_id == 2
+        return samples
+
+    proposals: list[dict] = []
+
+    class _FakeReflectionStore:
+        def __init__(self, _pool) -> None:  # noqa: ANN001
+            pass
+
+        async def add_proposal(self, **kwargs):  # noqa: ANN003
+            proposals.append(kwargs)
+            return 999
+
+    class _FakeConn:
+        async def fetchval(self, *_a, **_kw):  # noqa: ANN002
+            return None
+
+    class _Acquire2:
+        async def __aenter__(self):
+            return _FakeConn()
+
+        async def __aexit__(self, *_args):  # noqa: ANN002
+            return None
+
+    fake_pool = MagicMock()
+    fake_pool.acquire = MagicMock(return_value=_Acquire2())
+
+    monkeypatch.setattr(sleep, "_recent_confirmed_or_observed_bedtimes", _fake_bedtimes)
+    import home_agents_sdk.reflection_store as rs_module
+
+    monkeypatch.setattr(rs_module, "ReflectionStore", _FakeReflectionStore)
+
+    result = await sleep._propose_bedtime_update_if_drifted(fake_pool, member=member)
+    assert result == 999
+    assert len(proposals) == 1
+    title = proposals[0]["title"]
+    assert "02:24" in title
+    assert "Saeed" in title
+    assert proposals[0]["kind"] == "suggested_action"
+    assert proposals[0]["for_member_id"] == 2
+
+
+@pytest.mark.asyncio
+async def test_propose_bedtime_update_silent_when_drift_below_threshold(
+    monkeypatch,
+) -> None:
+    """When observed median is within threshold of configured, no proposal."""
+    monkeypatch.setenv("USER_TZ", "UTC")
+    member = {
+        "id": 2,
+        "name": "Saeed",
+        "sleep_time": time(2, 0),  # configured close to actual
+        "wake_time": time(9, 0),
+    }
+    samples = [
+        datetime(2026, 5, 14, 2, 5, tzinfo=UTC),
+        datetime(2026, 5, 15, 1, 50, tzinfo=UTC),
+        datetime(2026, 5, 16, 2, 10, tzinfo=UTC),
+        datetime(2026, 5, 17, 1, 55, tzinfo=UTC),
+    ]
+
+    async def _fake_bedtimes(_pool, *, member_id, lookback_nights=7):  # noqa: ANN001
+        return samples
+
+    proposals: list[dict] = []
+
+    class _FakeReflectionStore:
+        def __init__(self, _pool) -> None:  # noqa: ANN001
+            pass
+
+        async def add_proposal(self, **kwargs):  # noqa: ANN003
+            proposals.append(kwargs)
+            return 1
+
+    monkeypatch.setattr(sleep, "_recent_confirmed_or_observed_bedtimes", _fake_bedtimes)
+    import home_agents_sdk.reflection_store as rs_module
+
+    monkeypatch.setattr(rs_module, "ReflectionStore", _FakeReflectionStore)
+
+    result = await sleep._propose_bedtime_update_if_drifted(MagicMock(), member=member)
+    assert result is None
+    assert proposals == []
+
+
+@pytest.mark.asyncio
+async def test_propose_bedtime_update_silent_with_too_few_nights(monkeypatch) -> None:
+    """Fewer than 4 nights of data → not enough signal to propose."""
+    member = {
+        "id": 2,
+        "name": "Saeed",
+        "sleep_time": time(0, 30),
+        "wake_time": time(9, 0),
+    }
+
+    async def _fake_bedtimes(_pool, *, member_id, lookback_nights=7):  # noqa: ANN001
+        return [datetime(2026, 5, 17, 2, 27, tzinfo=UTC)]
+
+    proposals: list[dict] = []
+
+    class _FakeReflectionStore:
+        def __init__(self, _pool) -> None:  # noqa: ANN001
+            pass
+
+        async def add_proposal(self, **kwargs):  # noqa: ANN003
+            proposals.append(kwargs)
+            return 1
+
+    monkeypatch.setattr(sleep, "_recent_confirmed_or_observed_bedtimes", _fake_bedtimes)
+    import home_agents_sdk.reflection_store as rs_module
+
+    monkeypatch.setattr(rs_module, "ReflectionStore", _FakeReflectionStore)
+
+    result = await sleep._propose_bedtime_update_if_drifted(MagicMock(), member=member)
+    assert result is None
+    assert proposals == []
+
+
+@pytest.mark.asyncio
+async def test_propose_bedtime_update_dedupes_recent_pending(monkeypatch) -> None:
+    """If a pending 'Update bedtime' proposal already exists for the
+    member within 14 days, don't emit a new one."""
+    monkeypatch.setenv("USER_TZ", "UTC")
+    member = {
+        "id": 2,
+        "name": "Saeed",
+        "sleep_time": time(0, 30),
+        "wake_time": time(9, 0),
+    }
+    samples = [
+        datetime(2026, 5, 14, 1, 25, tzinfo=UTC),
+        datetime(2026, 5, 15, 2, 21, tzinfo=UTC),
+        datetime(2026, 5, 16, 3, 5, tzinfo=UTC),
+        datetime(2026, 5, 17, 2, 27, tzinfo=UTC),
+    ]
+
+    async def _fake_bedtimes(_pool, *, member_id, lookback_nights=7):  # noqa: ANN001
+        return samples
+
+    proposals: list[dict] = []
+
+    class _FakeReflectionStore:
+        def __init__(self, _pool) -> None:  # noqa: ANN001
+            pass
+
+        async def add_proposal(self, **kwargs):  # noqa: ANN003
+            proposals.append(kwargs)
+            return 1
+
+    class _FakeConn:
+        async def fetchval(self, *_a, **_kw):  # noqa: ANN002
+            return 1  # an existing proposal exists
+
+    class _Acquire2:
+        async def __aenter__(self):
+            return _FakeConn()
+
+        async def __aexit__(self, *_args):  # noqa: ANN002
+            return None
+
+    fake_pool = MagicMock()
+    fake_pool.acquire = MagicMock(return_value=_Acquire2())
+
+    monkeypatch.setattr(sleep, "_recent_confirmed_or_observed_bedtimes", _fake_bedtimes)
+    import home_agents_sdk.reflection_store as rs_module
+
+    monkeypatch.setattr(rs_module, "ReflectionStore", _FakeReflectionStore)
+
+    result = await sleep._propose_bedtime_update_if_drifted(fake_pool, member=member)
+    assert result is None
+    assert proposals == []

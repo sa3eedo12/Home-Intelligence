@@ -24,6 +24,19 @@ _SLEEP_METRICS = (
     "sleep_inBed",
 )
 _ASLEEP_METRICS = {"sleep_asleep", "sleep_deep", "sleep_rem", "sleep_core"}
+# Single sleep_asleep / sleep_inBed rows longer than this are almost
+# always Health Auto Export "outer envelope" bundles that span multiple
+# unrelated sleep sessions rather than a single human-plausible night.
+# 14 hours covers oversleep, weekend lie-ins, and recovery naps without
+# admitting the 18-24h envelope rows HAE periodically emits.
+_MAX_PLAUSIBLE_SLEEP_HOURS = 14
+# When a parent interval's union with N>=2 child intervals (same metric)
+# matches its own span within this tolerance, treat it as an envelope
+# row and drop it in favour of the children. Fajr-night example: parent
+# 02:00→09:00 with children 02:00→05:00 + 06:00→09:00 — the children sum
+# to 6h, parent claims 7h. The 60-min gap is the Fajr awake period and
+# must NOT be counted as sleep.
+_ENVELOPE_TOLERANCE_MIN = 5
 _QUALITY_LABELS = ("great", "decent", "restless", "short")
 _QUALITY_DISPLAY = {
     "great": "Restful",
@@ -76,6 +89,154 @@ def _parse_date(raw: Any) -> date:
         return date.fromisoformat(raw.strip()[:10])
     local_now = datetime.now(_tz())
     return local_now.date() - timedelta(days=1)
+
+
+def _default_night_of(member: dict[str, Any] | None) -> date:
+    """Pick the correct ``night_of`` for "the sleep that just ended".
+
+    For pre-midnight sleepers (sleep_time >= 12:00 like 22:00 or 23:30),
+    "last night" means yesterday — they fell asleep yesterday evening
+    and woke up this morning. night_of = today − 1.
+
+    For past-midnight sleepers (sleep_time < 12:00 like 00:30 or 02:00),
+    "last night" means today — they fell asleep early THIS morning and
+    woke up later THIS morning. night_of = today.
+
+    Without this distinction the cron grabs the wrong 24h window, which
+    is how 00:30→09:00 user Saeed's sleep_summaries kept pointing at
+    yesterday's daytime data instead of last night's actual sleep.
+    """
+    local_today = datetime.now(_tz()).date()
+    sleep_t = _parse_time(member.get("sleep_time") if member else None, time(23, 0))
+    if sleep_t.hour < 12:
+        return local_today
+    return local_today - timedelta(days=1)
+
+
+def _interval_covers_children(
+    parent: tuple[datetime, datetime],
+    children: list[tuple[datetime, datetime]],
+    *,
+    tolerance_minutes: int = _ENVELOPE_TOLERANCE_MIN,
+) -> bool:
+    """Return True iff ``parent`` is an outer-envelope of ``children``.
+
+    "Envelope" means: parent contains 2+ children whose union spans
+    nearly the same window (start ~= parent.start, end ~= parent.end)
+    but with measurable interior gaps. The classic HAE failure mode for
+    split-night sleepers (Fajr wake → back to sleep): parent row
+    02:00→09:00 with two children 02:00→05:00 + 06:00→09:00. Without
+    excluding parent we'd count the 60-min gap as sleep.
+    """
+    if len(children) < 2:
+        return False
+    tol = timedelta(minutes=max(0, tolerance_minutes))
+    inside = [
+        (max(c_start, parent[0]), min(c_end, parent[1]))
+        for c_start, c_end in children
+        if c_start >= parent[0] - tol and c_end <= parent[1] + tol
+    ]
+    inside = [(s, e) for s, e in inside if e > s]
+    if len(inside) < 2:
+        return False
+    if abs((min(s for s, _ in inside) - parent[0]).total_seconds()) > tol.total_seconds():
+        return False
+    if abs((max(e for _, e in inside) - parent[1]).total_seconds()) > tol.total_seconds():
+        return False
+    # Interior gap is what makes this an "envelope" rather than a single
+    # contiguous segment a HealthKit summariser happened to emit.
+    merged: list[list[datetime]] = []
+    for s, e in sorted(inside, key=lambda item: item[0]):
+        if not merged or s > merged[-1][1]:
+            merged.append([s, e])
+        elif e > merged[-1][1]:
+            merged[-1][1] = e
+    parent_minutes = (parent[1] - parent[0]).total_seconds() / 60
+    union_minutes = sum((e - s).total_seconds() for s, e in merged) / 60
+    gap_minutes = parent_minutes - union_minutes
+    return gap_minutes > tolerance_minutes
+
+
+def _strip_envelope_rows(
+    rows: list[dict[str, Any]],
+    window_start: datetime,
+    window_end: datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Drop HAE outer-envelope rows that the inference layer can't trust.
+
+    Two passes:
+      1. Drop any single row whose RAW interval (unclipped started_at →
+         ended_at) exceeds ``_MAX_PLAUSIBLE_SLEEP_HOURS`` — these are
+         HAE bundling bugs (e.g. a 23h row covering two unrelated days).
+         The clipped interval can hide this if one end falls outside
+         the analysis window.
+      2. Within each metric, drop any row whose clipped interval is an
+         envelope around 2+ smaller clipped rows (see
+         ``_interval_covers_children``). This catches Fajr-night cases
+         where HealthKit also reports the union.
+
+    Returns ``(kept_rows, dropped_rows)`` so callers can surface the
+    dropped data in reasoning text for transparency.
+    """
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    intervals: dict[int, tuple[datetime, datetime]] = {}
+
+    def _raw_span_hours(row: dict[str, Any]) -> float | None:
+        started_at = _parse_iso(row.get("started_at"))
+        if started_at is None:
+            return None
+        ended_at = _parse_iso(row.get("ended_at"))
+        if ended_at is None:
+            minutes = _coerce_float(row.get("value"))
+            if minutes is None:
+                return None
+            ended_at = started_at + timedelta(minutes=minutes)
+        return (ended_at - started_at).total_seconds() / 3600
+
+    for idx, row in enumerate(rows):
+        raw_hours = _raw_span_hours(row)
+        if raw_hours is not None and raw_hours > _MAX_PLAUSIBLE_SLEEP_HOURS:
+            dropped.append(row)
+            continue
+        interval = _row_interval(row, window_start, window_end)
+        if interval is None:
+            kept.append(row)
+            continue
+        intervals[len(kept)] = interval
+        kept.append(row)
+
+    by_metric: dict[str, list[tuple[int, tuple[datetime, datetime]]]] = {}
+    for idx, row in enumerate(kept):
+        if idx not in intervals:
+            continue
+        metric = str(row.get("metric") or "")
+        if not metric:
+            continue
+        by_metric.setdefault(metric, []).append((idx, intervals[idx]))
+
+    envelope_indices: set[int] = set()
+    for groups in by_metric.values():
+        if len(groups) < 3:
+            continue
+        for parent_idx, parent_interval in groups:
+            children = [
+                child_interval
+                for child_idx, child_interval in groups
+                if child_idx != parent_idx
+            ]
+            if _interval_covers_children(parent_interval, children):
+                envelope_indices.add(parent_idx)
+
+    if envelope_indices:
+        new_kept: list[dict[str, Any]] = []
+        for idx, row in enumerate(kept):
+            if idx in envelope_indices:
+                dropped.append(row)
+            else:
+                new_kept.append(row)
+        kept = new_kept
+    return kept, dropped
 
 
 def _parse_time(raw: Any, default: time) -> time:
@@ -406,6 +567,173 @@ def _summary_for(duration_minutes: int, quality: str) -> str:
     return f"🌙 You slept ~{duration}, {quality_phrase}. Restless or restful?"
 
 
+# Bedtime drift detection — how far off can configured sleep_time be
+# from the observed median before we propose updating it. Two hours is
+# generous enough that one-off late nights or recovery sleep don't
+# trigger spurious nudges, but tight enough that a real schedule shift
+# gets caught within a week.
+_BEDTIME_DRIFT_THRESHOLD_MIN = 60
+_BEDTIME_DRIFT_MIN_NIGHTS = 4
+_BEDTIME_DRIFT_LOOKBACK_NIGHTS = 7
+
+
+def _median_bedtime(
+    asleep_at_times: list[datetime], *, anchor: time
+) -> time | None:
+    """Compute a stable median bedtime from a list of asleep_at timestamps.
+
+    Crossing midnight makes naive averaging fail (00:30 averaged with
+    23:30 = 12:00, which is nonsense). We anchor each timestamp to a
+    rolling clock relative to ``anchor`` (the configured sleep_time)
+    and average in the anchored space, then convert back.
+    """
+    if not asleep_at_times:
+        return None
+    zone = _tz()
+    anchor_minutes = anchor.hour * 60 + anchor.minute
+    samples: list[int] = []
+    for ts in asleep_at_times:
+        local = ts.astimezone(zone)
+        clock = local.hour * 60 + local.minute
+        delta = clock - anchor_minutes
+        if delta > 12 * 60:
+            delta -= 24 * 60
+        elif delta < -12 * 60:
+            delta += 24 * 60
+        samples.append(delta)
+    samples.sort()
+    n = len(samples)
+    median_delta = (samples[n // 2] + samples[~n // 2]) // 2
+    median_clock = (anchor_minutes + median_delta) % (24 * 60)
+    return time(median_clock // 60, median_clock % 60)
+
+
+async def _recent_confirmed_or_observed_bedtimes(
+    pool: asyncpg.Pool,
+    *,
+    member_id: int,
+    lookback_nights: int = _BEDTIME_DRIFT_LOOKBACK_NIGHTS,
+) -> list[datetime]:
+    """Pull the last N nights' asleep_at timestamps for drift analysis."""
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT asleep_at
+                  FROM sleep_summaries
+                 WHERE household_member_id = $1
+                   AND asleep_at IS NOT NULL
+                 ORDER BY night_of DESC
+                 LIMIT $2
+                """,
+                member_id,
+                int(lookback_nights),
+            )
+    except Exception:  # noqa: BLE001
+        return []
+    return [row["asleep_at"] for row in rows if row.get("asleep_at")]
+
+
+async def _propose_bedtime_update_if_drifted(
+    pool: asyncpg.Pool,
+    *,
+    member: dict[str, Any] | None,
+) -> int | None:
+    """Closes proposal #53. If the observed bedtime over the last
+    ``_BEDTIME_DRIFT_LOOKBACK_NIGHTS`` consistently differs from the
+    configured ``sleep_time`` by more than the threshold, file a
+    suggested_action proposal asking the user to confirm an update.
+
+    Best-effort: any failure logs + returns None — sleep inference must
+    never fail because the drift check failed.
+    """
+    if member is None:
+        return None
+    member_id = _coerce_int(member.get("id"))
+    if member_id is None:
+        return None
+    configured_sleep_t = member.get("sleep_time")
+    if not isinstance(configured_sleep_t, time):
+        return None
+
+    try:
+        from home_agents_sdk.reflection_store import ReflectionStore
+    except Exception:  # noqa: BLE001
+        return None
+
+    samples = await _recent_confirmed_or_observed_bedtimes(
+        pool, member_id=member_id
+    )
+    if len(samples) < _BEDTIME_DRIFT_MIN_NIGHTS:
+        return None
+
+    anchor = configured_sleep_t
+    median_t = _median_bedtime(samples, anchor=anchor)
+    if median_t is None:
+        return None
+
+    median_clock = median_t.hour * 60 + median_t.minute
+    anchor_clock = anchor.hour * 60 + anchor.minute
+    delta = median_clock - anchor_clock
+    if delta > 12 * 60:
+        delta -= 24 * 60
+    elif delta < -12 * 60:
+        delta += 24 * 60
+    if abs(delta) < _BEDTIME_DRIFT_THRESHOLD_MIN:
+        return None
+
+    # Don't spam: only emit if there isn't already a pending proposal
+    # of this kind for this member within the last 14 days.
+    try:
+        async with pool.acquire() as conn:
+            existing = await conn.fetchval(
+                """
+                SELECT 1
+                  FROM proposals
+                 WHERE for_member_id = $1
+                   AND status = 'pending'
+                   AND title ILIKE 'Update bedtime%'
+                   AND created_at >= now() - interval '14 days'
+                 LIMIT 1
+                """,
+                member_id,
+            )
+    except Exception:  # noqa: BLE001
+        existing = None
+    if existing:
+        return None
+
+    direction = "later" if delta > 0 else "earlier"
+    member_name = str(member.get("name") or "you")
+    title = (
+        f"Update bedtime for {member_name} to ~{median_t.strftime('%H:%M')} "
+        f"({abs(delta)} min {direction} than configured)"
+    )
+    rationale = (
+        f"Configured household_members.sleep_time = "
+        f"{anchor.strftime('%H:%M')} for {member_name}. Observed median "
+        f"bedtime over the last {len(samples)} nights is "
+        f"{median_t.strftime('%H:%M')} ({direction} by {abs(delta)} min). "
+        f"Pre-bedtime nudges, late_bedtime_check, and the morning brief "
+        f"all key off sleep_time so they're firing at the wrong moment. "
+        f"Accept to UPDATE household_members SET sleep_time = "
+        f"'{median_t.strftime('%H:%M')}' WHERE id = {member_id}."
+    )
+
+    store = ReflectionStore(pool)
+    try:
+        return await store.add_proposal(
+            kind="suggested_action",
+            title=title,
+            rationale=rationale,
+            confidence=0.85,
+            impact_estimate="aligns sleep-related nudges with actual schedule",
+            for_member_id=member_id,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _normalise_quality(raw: str) -> str | None:
     value = str(raw or "").strip().casefold().replace(" ", "_")
     value = _QUALITY_ALIASES.get(value, value)
@@ -457,7 +785,7 @@ async def infer_sleep_summary(
     pool = await _pool()
     member = await _member(pool, _coerce_int(member_id))
     resolved_member_id = _coerce_int(member.get("id") if member else member_id)
-    night = _parse_date(night_of)
+    night = _parse_date(night_of) if night_of is not None else _default_night_of(member)
     expected_sleep, expected_wake = _expected_times(night, member)
     window_start = expected_sleep - timedelta(hours=4)
     window_end = expected_wake + timedelta(hours=4)
@@ -468,6 +796,12 @@ async def infer_sleep_summary(
         member_id=resolved_member_id,
         window_start=window_start,
         window_end=window_end,
+    )
+    # Drop HAE outer-envelope bundles (e.g. a 23h sleep_asleep row that
+    # actually covers two unrelated days' sleep) and >14h implausible
+    # singletons. Without this the union of intervals double-counts.
+    health_rows, dropped_envelope_rows = _strip_envelope_rows(
+        health_rows, window_start, window_end
     )
     events = await _observer_events(pool, window_start, window_end + timedelta(hours=2))
 
@@ -539,6 +873,10 @@ async def infer_sleep_summary(
     )
     if used_in_bed_fallback:
         reasoning += "; used in-bed rows because asleep stages were unavailable"
+    if dropped_envelope_rows:
+        reasoning += (
+            f"; ignored {len(dropped_envelope_rows)} envelope/over-long HAE row(s)"
+        )
 
     store = SleepSummariesStore(pool)
     sleep_summary_id = await store.insert_summary(
@@ -554,6 +892,13 @@ async def infer_sleep_summary(
         guessed_quality=quality,
         guessed_reasoning=reasoning,
     )
+    # Best-effort: after each nightly summary, also check if the
+    # configured bedtime has drifted from observed reality. Surfaces
+    # as a one-tap suggested_action proposal — see proposal #53.
+    try:
+        await _propose_bedtime_update_if_drifted(pool, member=member)
+    except Exception:  # noqa: BLE001
+        pass
     keyboard = _keyboard_for(sleep_summary_id, quality) if sleep_summary_id is not None else []
     return {
         "ok": True,

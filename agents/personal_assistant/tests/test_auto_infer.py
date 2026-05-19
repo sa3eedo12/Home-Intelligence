@@ -124,6 +124,40 @@ async def test_auto_infer_rate_limits_before_llm(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_auto_infer_times_out_long_running_llm_calls(monkeypatch) -> None:
+    """Regression for proposal #75 — production logs showed observer
+    inferences exceeding 17 seconds and queueing every other reactive
+    trigger behind them. The wait_for cap should turn these into a
+    clean 'skipped: llm_timeout' so the rest of the pipeline keeps
+    flowing instead of blocking on a hung LLM call.
+    """
+    import asyncio as _asyncio
+
+    store = _FakeStore(count=0)
+
+    async def _store() -> _FakeStore:
+        return store
+
+    async def _slow_infer(_context: str) -> dict[str, Any]:
+        await _asyncio.sleep(10)  # well past the 0.1s timeout below
+        return {"inference": "should not reach here", "confidence": 0.9}
+
+    # Aggressively short timeout so the test stays fast.
+    monkeypatch.setenv("AUTO_INFER_LLM_TIMEOUT_SECONDS", "0.1")
+    monkeypatch.setattr(auto_infer, "_auto_store", _store)
+    monkeypatch.setattr(auto_infer.infer_tool, "infer", _slow_infer)
+
+    result = await auto_infer.auto_infer_observer_event(
+        kind="garage.opened_unexpectedly",
+        summary="Garage door opened with nobody home",
+        payload={"signals": {"door_state": "open"}},
+    )
+
+    assert result == {"ok": True, "skipped": True, "reason": "llm_timeout"}
+    assert store.insert_calls == []
+
+
+@pytest.mark.asyncio
 async def test_auto_infer_confidence_gate_skips_notification(monkeypatch) -> None:
     store = _FakeStore(count=0)
 

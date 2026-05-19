@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import Callable
@@ -25,6 +26,14 @@ SKIP_KINDS = {
 }
 DEFAULT_MIN_CONFIDENCE = 0.5
 DEFAULT_HOURLY_CAP = 5
+# Hard cap on how long the LLM inference call may run. The observer
+# pipeline is reactive — if one event's inference blocks for 17+ seconds
+# (real values from production logs that prompted proposal #75), every
+# subsequent reactive trigger queues behind it. 30s is a generous ceiling
+# for the 0.6B/8B routing the auto_infer path uses; anything beyond is
+# almost certainly a model swap or Ollama hang we should not wait for.
+# Override with AUTO_INFER_LLM_TIMEOUT_SECONDS env var.
+DEFAULT_INFER_TIMEOUT_SECONDS = 30.0
 # Cross-entity / cross-time dedup window for rule-based inferences.
 # A "TV left on past bedtime" event firing from 4 different HA entities
 # (media_player + 2 switches + 1 sensor for one physical TV) should
@@ -49,6 +58,17 @@ UNUSUAL_TERMS = (
     "late",
     "early",
 )
+
+
+def _infer_timeout_seconds() -> float:
+    raw = os.getenv("AUTO_INFER_LLM_TIMEOUT_SECONDS")
+    if not raw:
+        return DEFAULT_INFER_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_INFER_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_INFER_TIMEOUT_SECONDS
 
 
 def _min_confidence() -> float:
@@ -603,7 +623,21 @@ async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
         inference_source = rule_id
     else:
         try:
-            inference_result = await infer_tool.infer(_context_for_infer(envelope, reason))
+            inference_result = await asyncio.wait_for(
+                infer_tool.infer(_context_for_infer(envelope, reason)),
+                timeout=_infer_timeout_seconds(),
+            )
+        except asyncio.TimeoutError:
+            # Hard cap — see proposal #75. Logging at warning so latency
+            # spikes are still visible in the dashboard without crashing
+            # the reactive pipeline. Returns a clean "skipped" so the
+            # caller doesn't retry.
+            logger.warning(
+                "auto_infer_llm_timeout",
+                source_kind=source_kind,
+                timeout_seconds=_infer_timeout_seconds(),
+            )
+            return {"ok": True, "skipped": True, "reason": "llm_timeout"}
         except Exception as exc:
             logger.warning("auto_infer_infer_failed", error=str(exc))
             return {"ok": True, "skipped": True, "reason": "infer_failed"}
