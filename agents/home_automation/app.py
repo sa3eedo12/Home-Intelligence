@@ -13,11 +13,15 @@ from tools import (
     area,
     climate,
     core,
+    cover,
     doorbell,
+    ev,
     ha_mcp_client,
     lights_control,
+    lock,
     scenes,
     suggest,
+    vacuum,
 )
 
 _TOOL_MODULES = (
@@ -26,11 +30,15 @@ _TOOL_MODULES = (
     area,
     climate,
     core,
+    cover,
     doorbell,
+    ev,
     ha_mcp_client,
     lights_control,
+    lock,
     scenes,
     suggest,
+    vacuum,
 )
 
 logger = get_logger("home_automation")
