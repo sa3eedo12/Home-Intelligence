@@ -168,6 +168,144 @@ capabilities:
     side_effects: true
     require_confirmation: false
     cost: small
+  - id: cover_status
+    description: >-
+      List covers (curtains, blinds, roller shades) with state and
+      position. Pass area (e.g. "bedroom", "left") to narrow. Use
+      this for ANY curtain/blind question — it resolves area /
+      friendly_name without needing entity_id.
+    inputs:
+      area: "string?"
+    side_effects: false
+    cost: small
+  - id: cover_open
+    description: >-
+      Fully open a curtain / blind / roller shade. Pass area or
+      entity_id. Use for "open the left curtain", "raise the blinds".
+    inputs:
+      area: "string?"
+      entity_id: "string?"
+    side_effects: true
+    require_confirmation: false
+    cost: small
+  - id: cover_close
+    description: >-
+      Fully close a curtain / blind / roller shade. Use for
+      "close the right curtain", "lower the blinds".
+    inputs:
+      area: "string?"
+      entity_id: "string?"
+    side_effects: true
+    require_confirmation: false
+    cost: small
+  - id: cover_set_position
+    description: >-
+      Set a cover's position 0-100 percent (0=closed, 100=open).
+      Use for "open the left curtain halfway" -> position=50.
+    inputs:
+      position: integer
+      area: "string?"
+      entity_id: "string?"
+    side_effects: true
+    require_confirmation: false
+    cost: small
+  - id: lock_status
+    description: >-
+      Report the state of one or all locks (door locks, vehicle
+      locks). Use for "is the front door locked?", "is my car
+      locked?".
+    inputs:
+      area: "string?"
+      entity_id: "string?"
+    side_effects: false
+    cost: small
+  - id: lock_lock
+    description: >-
+      Lock a door or vehicle. Pass area or entity_id. Higher-stakes
+      than lights so require_confirmation defaults to true.
+    inputs:
+      area: "string?"
+      entity_id: "string?"
+    side_effects: true
+    require_confirmation: true
+    cost: small
+  - id: lock_unlock
+    description: >-
+      Unlock a door or vehicle. Always confirms before executing.
+    inputs:
+      area: "string?"
+      entity_id: "string?"
+    side_effects: true
+    require_confirmation: true
+    cost: small
+  - id: vacuum_status
+    description: >-
+      Report vacuum state, battery, fan_speed, and current activity.
+      Defaults to the only vacuum in the home. Use for "is the
+      Deebot charging?", "how much battery does the vacuum have?".
+    inputs:
+      entity_id: "string?"
+    side_effects: false
+    cost: small
+  - id: vacuum_start
+    description: >-
+      Start a cleaning cycle on the vacuum.
+    inputs:
+      entity_id: "string?"
+    side_effects: true
+    require_confirmation: false
+    cost: small
+  - id: vacuum_dock
+    description: >-
+      Send the vacuum back to its dock.
+    inputs:
+      entity_id: "string?"
+    side_effects: true
+    require_confirmation: false
+    cost: small
+  - id: ev_status
+    description: >-
+      Consolidated EV snapshot (BYD HAN today, any HA-exposed car
+      tomorrow): battery, range, charging, locked, doors/windows,
+      sentry, online, lock state, climate, location. Use for ANY
+      car question — "what's my car's battery?", "is the car
+      locked?", "is it charging?".
+    inputs:
+      vehicle: "string?"
+    side_effects: false
+    cost: small
+  - id: ev_start_charging
+    description: >-
+      Press the EV's start-charging button.
+    inputs:
+      vehicle: "string?"
+    side_effects: true
+    require_confirmation: false
+    cost: small
+  - id: ev_close_windows
+    description: >-
+      Press the EV's close-windows button.
+    inputs:
+      vehicle: "string?"
+    side_effects: true
+    require_confirmation: false
+    cost: small
+  - id: ev_flash_lights
+    description: >-
+      Flash the EV's lights — useful for locating in a car park.
+    inputs:
+      vehicle: "string?"
+    side_effects: true
+    require_confirmation: false
+    cost: small
+  - id: ev_find_car
+    description: >-
+      Trigger the EV's find-car action.
+    inputs:
+      vehicle: "string?"
+    side_effects: true
+    require_confirmation: false
+    cost: small
 subscribes:
   - events.home
 publishes:

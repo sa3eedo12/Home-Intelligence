@@ -37,11 +37,15 @@ def test_manifest_and_tools_consistent():
     import tools.area as _area
     import tools.climate as _climate
     import tools.core as _core
+    import tools.cover as _cover
     import tools.doorbell as _doorbell
+    import tools.ev as _ev
     import tools.ha_mcp_client as _ha_mcp
     import tools.lights_control as _lights
+    import tools.lock as _lock
     import tools.scenes as _scenes
     import tools.suggest as _suggest
+    import tools.vacuum as _vacuum
 
     # Clear stale registrations then force every module to re-run its @tool
     # decorators.  This makes the test order-independent regardless of what
@@ -58,6 +62,10 @@ def test_manifest_and_tools_consistent():
         _area,
         _lights,
         _climate,
+        _cover,
+        _lock,
+        _vacuum,
+        _ev,
     ):
         importlib.reload(mod)
 
@@ -84,6 +92,21 @@ def test_manifest_and_tools_consistent():
         "climate_status",
         "climate_set_temperature",
         "climate_set_mode",
+        "cover_status",
+        "cover_open",
+        "cover_close",
+        "cover_set_position",
+        "lock_status",
+        "lock_lock",
+        "lock_unlock",
+        "vacuum_status",
+        "vacuum_start",
+        "vacuum_dock",
+        "ev_status",
+        "ev_start_charging",
+        "ev_close_windows",
+        "ev_flash_lights",
+        "ev_find_car",
     ]
     for cap_id in expected:
         assert cap_id in tools, f"Missing @tool registration for capability: {cap_id}"
