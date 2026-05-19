@@ -142,11 +142,11 @@ _DASHBOARD_MAX_PLAUSIBLE_SLEEP_HOURS = 14
 
 
 def _row_started_ended(row: dict[str, Any]) -> tuple[datetime, datetime] | None:
-    started = row.get("started_at")
-    ended = row.get("ended_at")
-    if not isinstance(started, datetime):
+    started = _coerce_dt(row.get("started_at"))
+    if started is None:
         return None
-    if not isinstance(ended, datetime):
+    ended = _coerce_dt(row.get("ended_at"))
+    if ended is None:
         try:
             value_minutes = float(row.get("value") or 0)
         except (TypeError, ValueError):
@@ -157,6 +157,22 @@ def _row_started_ended(row: dict[str, Any]) -> tuple[datetime, datetime] | None:
     if ended <= started:
         return None
     return started, ended
+
+
+def _coerce_dt(value: Any) -> datetime | None:
+    """Accept either a datetime object (asyncpg fetch) or an ISO string
+    (after the HealthStore's JSON-friendly row formatter)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    return None
 
 
 def _union_recent_sleep_minutes(

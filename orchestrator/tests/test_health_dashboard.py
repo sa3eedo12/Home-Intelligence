@@ -200,3 +200,21 @@ def test_union_unions_two_distinct_sessions() -> None:
         ),
     ]
     assert _union_recent_sleep_minutes(rows, "sleep_asleep") == 480.0
+
+
+def test_union_accepts_iso_string_datetimes() -> None:
+    """list_recent returns started_at/ended_at as ISO strings (not
+    datetime objects) because the store's _row_dict json-serializes
+    them. The union helper must accept both shapes — without this,
+    every dashboard render silently returned 0."""
+    rows = [
+        {
+            "metric": "sleep_asleep",
+            "started_at": "2026-05-18T21:28:29+00:00",
+            "ended_at": "2026-05-19T05:15:13+00:00",
+            "value": 466.733,
+        }
+    ]
+    minutes = _union_recent_sleep_minutes(rows, "sleep_asleep")
+    # 21:28:29 → 05:15:13 = 28004s ≈ 466.73 min, banker-rounded to 466.7
+    assert minutes == 466.7
