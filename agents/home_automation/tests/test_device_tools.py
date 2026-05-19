@@ -297,14 +297,18 @@ async def test_ev_status_returns_consolidated_snapshot(han_ev) -> None:
     assert v["odometer_km"] == 57506.0
     assert v["charging"] is False
     assert v["online"] is True
-    # binary_sensor.han_locked = off → locked=False. The real lock state
-    # comes from lock.han_lock = locked. Both surfaced for the LLM.
+    # binary_sensor.han_locked = off → locked=False but the authoritative
+    # lock.han_lock = locked. Summary must prefer the lock.* domain.
     assert v["locked"] is False
     assert v["lock_state"] == "locked"
     assert v["doors_open"] is False
     assert v["sentry_mode"] is True
     assert "battery 63%" in v["summary"]
     assert "range 355 km" in v["summary"]
+    # Bug regression: summary said "UNLOCKED" before the lock_state
+    # preference was wired in; now it must say "locked".
+    assert "locked" in v["summary"]
+    assert "UNLOCKED" not in v["summary"]
 
 
 @pytest.mark.asyncio

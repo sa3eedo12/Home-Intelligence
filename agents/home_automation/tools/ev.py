@@ -202,7 +202,16 @@ def _summary_for(status: dict[str, Any]) -> str:
         bits.append(f"range {int(status['range_km'])} km")
     if status.get("charging") is True:
         bits.append("charging")
-    if status.get("locked") is True:
+    # Prefer the authoritative lock.* domain state over the
+    # binary_sensor.<slug>_locked (which has inverted semantics on
+    # some integrations — Locked: off may mean 'no alert' rather
+    # than 'unlocked').
+    lock_state = status.get("lock_state")
+    if lock_state == "locked":
+        bits.append("locked")
+    elif lock_state == "unlocked":
+        bits.append("UNLOCKED")
+    elif status.get("locked") is True:
         bits.append("locked")
     elif status.get("locked") is False:
         bits.append("UNLOCKED")
