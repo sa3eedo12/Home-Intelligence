@@ -7,6 +7,7 @@ from typing import Any
 
 from . import Observer
 from .utils import (
+    IDLE_STATES,
     detect_brand,
     device_key_for,
     extract_state_change,
@@ -15,6 +16,7 @@ from .utils import (
     is_idle_state,
     is_running_state,
     matches_appliance,
+    normalized_state,
     parse_datetime,
     remember_bounded,
     seconds_between,
@@ -63,14 +65,32 @@ class WasherObserver(Observer):
         if (
             matches_appliance(change, "washer", canonical_only=False)
             and change.entity_id.endswith(CYCLE_NAME_SUFFIX)
-            and change.new_state
-            and change.new_state not in {"none", "unknown", "unavailable", ""}
         ):
-            device = device_key_for(change.entity_id)
-            self._cycle_names[device] = str(change.new_state)
-            self._cycle_names.move_to_end(device)
-            while len(self._cycle_names) > MAX_TRACKED_ENTITIES:
-                self._cycle_names.popitem(last=False)
+            # The cycle-name sensor reports an idle marker (Off/Idle/None/
+            # Stop/etc.) between cycles. We must NOT treat that as a label —
+            # otherwise we'd snapshot "Off" when a cycle starts and report
+            # cycle_name="Off" on completion, which the inference layer can't
+            # use. Only retain values that are actual cycle names.
+            normalized = normalized_state(change.new_state)
+            if (
+                change.new_state
+                and normalized not in {"none", "unknown", "unavailable", ""}
+                and normalized not in IDLE_STATES
+            ):
+                device = device_key_for(change.entity_id)
+                self._cycle_names[device] = str(change.new_state)
+                self._cycle_names.move_to_end(device)
+                while len(self._cycle_names) > MAX_TRACKED_ENTITIES:
+                    self._cycle_names.popitem(last=False)
+                # If a cycle is already running for this device, also refresh
+                # the per-cycle snapshot so the latest known label survives
+                # even if it was set after machine_state transitioned.
+                for entity_id, entry in self._states.items():
+                    if (
+                        device_key_for(entity_id) == device
+                        and entry.phase in {"running", "finishing"}
+                    ):
+                        entry.last_cycle_name = str(change.new_state)
             # The cycle-name sensor is NOT a canonical state entity so
             # the rest of this handler doesn't need to run for it.
             return

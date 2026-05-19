@@ -237,3 +237,94 @@ async def test_washer_observer_ignores_garbage_cycle_states() -> None:
     })
     payload = observer.emitted[-1][2]
     assert payload["cycle_name"] == "Bedding"
+
+
+@pytest.mark.asyncio
+async def test_washer_observer_ignores_off_cycle_state() -> None:
+    """Regression: the user's Samsung sensor.washer_cycle reports 'Off'
+    between cycles, not 'unknown'/'unavailable'. If we capture 'Off' into
+    _cycle_names and the cycle starts running before the sensor updates
+    to a real label, cycle_completed would carry cycle_name='Off' which
+    the inference layer can't use. The observer must treat any idle-style
+    value (off, idle, stop, none, ready, ...) as 'no cycle name'."""
+    observer = _CaptureWasher()
+
+    # Idle state — should NOT be captured.
+    await observer.handle({
+        "entity_id": "sensor.washer_cycle",
+        "old_state": "none",
+        "state": "Off",
+        "ts": "2026-05-15T09:50:00+00:00",
+        "attributes": {"friendly_name": "Washer Cycle"},
+    })
+    # Cycle starts — at this moment cycle_name is still "Off" from
+    # the appliance's perspective, so observer should snapshot None.
+    await observer.handle({
+        "entity_id": "sensor.washer_machine_state",
+        "old_state": "stop",
+        "state": "run",
+        "ts": "2026-05-15T10:00:30+00:00",
+        "attributes": {"friendly_name": "Washer Machine state"},
+    })
+    # A few seconds later the cycle name updates to a real value.
+    await observer.handle({
+        "entity_id": "sensor.washer_cycle",
+        "old_state": "Off",
+        "state": "Active wear",
+        "ts": "2026-05-15T10:00:45+00:00",
+        "attributes": {"friendly_name": "Washer Cycle"},
+    })
+    # Cycle completes.
+    await observer.handle({
+        "entity_id": "sensor.washer_machine_state",
+        "old_state": "run",
+        "state": "stop",
+        "ts": "2026-05-15T11:30:00+00:00",
+        "attributes": {"friendly_name": "Washer Machine state"},
+    })
+
+    completions = [e for e in observer.emitted if e[0] == "appliance.cycle_completed"]
+    assert len(completions) == 1
+    payload = completions[0][2]
+    # The "Off" must NOT win — the later "Active wear" update should
+    # refresh the in-flight snapshot.
+    assert payload["cycle_name"] == "Active wear"
+    assert payload["program"] == "Active wear"
+
+
+@pytest.mark.asyncio
+async def test_washer_observer_refreshes_cycle_name_mid_cycle() -> None:
+    """A cycle-name change AFTER machine_state has gone running must
+    update the in-flight cycle's snapshot. Without this, the user's
+    Samsung washer (which can publish the cycle name after the cycle
+    has already started) would emit a stale name on completion."""
+    observer = _CaptureWasher()
+
+    # Cycle starts BEFORE any cycle name is published.
+    await observer.handle({
+        "entity_id": "sensor.washer_machine_state",
+        "old_state": "stop",
+        "state": "run",
+        "ts": "2026-05-15T10:00:00+00:00",
+        "attributes": {"friendly_name": "Washer Machine state"},
+    })
+    # Later, sensor.washer_cycle publishes the actual label.
+    await observer.handle({
+        "entity_id": "sensor.washer_cycle",
+        "old_state": "Off",
+        "state": "Bedding",
+        "ts": "2026-05-15T10:00:30+00:00",
+        "attributes": {"friendly_name": "Washer Cycle"},
+    })
+    # Cycle completes.
+    await observer.handle({
+        "entity_id": "sensor.washer_machine_state",
+        "old_state": "run",
+        "state": "stop",
+        "ts": "2026-05-15T11:30:00+00:00",
+        "attributes": {"friendly_name": "Washer Machine state"},
+    })
+
+    payload = observer.emitted[-1][2]
+    assert payload["cycle_name"] == "Bedding"
+    assert payload["program"] == "Bedding"
