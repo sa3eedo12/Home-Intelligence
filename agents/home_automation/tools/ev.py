@@ -71,41 +71,54 @@ async def _discover_ev_entities(vehicle: str | None) -> dict[str, list[dict[str,
     Returns ``{vehicle_slug: [entity_dict, ...]}``.
     """
     client = get_ha_client()
-    # Template renders ALL entities across the EV-relevant domains; we
-    # filter down by slug in Python where it's easier to reason about.
-    domains = ("sensor", "binary_sensor", "lock", "climate", "button", "device_tracker")
-    parts = []
-    for d in domains:
-        parts.append(
-            "{% for s in states." + d + " if true %}"
-            "{{ '{' }}\"entity_id\": \"{{ s.entity_id }}\", "
-            "\"state\": \"{{ s.state }}\", "
-            "\"name\": \"{{ state_attr(s.entity_id, 'friendly_name') or s.entity_id }}\""
-            "{{ '}' }},"
-            "{% endfor %}"
-        )
-    template = "[" + "".join(parts) + "]"
+    domains = (
+        "sensor",
+        "binary_sensor",
+        "lock",
+        "climate",
+        "button",
+        "device_tracker",
+    )
     import json as _json
 
-    rendered = await client.render_template(template)
-    rendered = rendered.replace(",]", "]")
-    try:
-        all_entities = _json.loads(rendered)
-    except _json.JSONDecodeError:
-        logger.warning("ev_list_bad_json", rendered=rendered[:200])
-        return {}
+    all_entities: list[dict[str, Any]] = []
+    # Render one domain at a time — concatenating multiple Jinja for-loops
+    # into a single template produced JSON that periodically failed to
+    # parse when a state value contained quotes/newlines, since the
+    # cleanup ``.replace(",]", "]")`` only fixed the outer list.
+    for d in domains:
+        template = (
+            "[{% for s in states." + d + " if true %}"
+            "{{ '{' }}"
+            "\"entity_id\": \"{{ s.entity_id }}\", "
+            "\"state\": \"{{ s.state | replace('\"', '\\\\\"') }}\", "
+            "\"name\": \"{{ (state_attr(s.entity_id, 'friendly_name') "
+            "or s.entity_id) | replace('\"', '\\\\\"') }}\""
+            "{{ '}' }}"
+            "{% if not loop.last %},{% endif %}"
+            "{% endfor %}]"
+        )
+        rendered = await client.render_template(template)
+        try:
+            parsed = _json.loads(rendered)
+        except _json.JSONDecodeError:
+            logger.warning(
+                "ev_list_bad_json", domain=d, rendered=rendered[:300]
+            )
+            continue
+        if isinstance(parsed, list):
+            all_entities.extend(parsed)
 
     grouped: dict[str, list[dict[str, Any]]] = {}
     for entity in all_entities:
-        slug = _slug_from_entity(entity["entity_id"])
+        slug = _slug_from_entity(entity.get("entity_id", ""))
         if slug is None:
             continue
-        # Heuristic: an EV is a slug that has at least a battery_level
-        # AND an odometer sensor. This avoids treating e.g. a battery-
-        # powered button as a car.
         grouped.setdefault(slug, []).append(entity)
-    # Filter to slugs that look like EVs (sensor.<slug>_battery_level
-    # AND sensor.<slug>_odometer both present).
+
+    # Heuristic: an EV slug is one that has BOTH sensor.<slug>_battery_level
+    # AND sensor.<slug>_odometer. This avoids treating e.g. a battery-
+    # powered button as a car.
     keep: dict[str, list[dict[str, Any]]] = {}
     for slug, ents in grouped.items():
         ids = {e["entity_id"] for e in ents}
