@@ -350,6 +350,14 @@ def test_is_light_switch_excludes_non_light_switches() -> None:
         ("switch.light_sensor_tv", "Light sensor TV"),
         ("switch.washer_bubble_soak", "Bubble Soak"),
         ("switch.office_thermostat", "Office Thermostat"),
+        # Regression: 'enabled' contains 'led' as a substring; the
+        # word-boundary matcher for 'led' must not fire on it.
+        ("switch.husamsaf", "Husamsaf Enabled"),
+        ("switch.husamsaf_2", "Husamsaf Enabled"),
+        # 'pulled', 'fulfilled', 'called' etc. — same family of
+        # substring false positives.
+        ("switch.scheduler_enabled", "Scheduler Enabled"),
+        ("switch.api_disable", "API Disable"),
     ]:
         assert not lights_control._is_light_switch(eid, name), (
             f"{eid} should NOT be a light switch"

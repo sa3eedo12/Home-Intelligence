@@ -19,6 +19,7 @@ chat router can phrase into a confirmation.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from home_agents_sdk.telemetry import get_logger
@@ -46,6 +47,9 @@ NON_BEDTIME_KEYWORDS: tuple[str, ...] = (
 # switches, smart plugs powering lamps, etc.). When the user says "turn
 # off all the lights", these get treated as lights too. Matched against
 # entity_id + friendly_name.
+#
+# Short tokens like "led" need word-boundary matching to avoid false
+# positives like "enabled" (en-ab-LED) — handled in _is_light_switch.
 LIGHT_SWITCH_KEYWORDS: tuple[str, ...] = (
     "wall_switch",
     "wall switch",
@@ -60,6 +64,12 @@ LIGHT_SWITCH_KEYWORDS: tuple[str, ...] = (
     "downlight",
     "uplight",
 )
+
+# Tokens that must match on a word boundary (\b) rather than as a raw
+# substring. "led" is the canonical case — without this we'd light-up
+# (pun intended) anything containing "enabled", "fulfilled", "called",
+# etc.
+_WORD_BOUNDARY_KEYWORDS: frozenset[str] = frozenset({"led"})
 
 # Substrings that EXCLUDE a switch.* from being a light switch, even if
 # its name happens to brush against a LIGHT_SWITCH_KEYWORD. e.g.
@@ -88,7 +98,17 @@ NON_LIGHT_SWITCH_KEYWORDS: tuple[str, ...] = (
     "prompt_sound",
     "thermostat",
     "mqtt",
+    # Generic "enable/disable" toggles (e.g. switch.husamsaf "Enabled")
+    # are config flags, not real device controls.
+    "enable",
+    "disable",
 )
+
+
+_WORD_BOUNDARY_PATTERNS = {
+    kw: re.compile(rf"\b{re.escape(kw)}\b", re.IGNORECASE)
+    for kw in _WORD_BOUNDARY_KEYWORDS
+}
 
 
 def _is_real_light(entity_id: str, friendly_name: str | None) -> bool:
@@ -104,11 +124,22 @@ def _is_light_switch(entity_id: str, friendly_name: str | None) -> bool:
     kept generous because false negatives ("forgot to turn off a lamp")
     are far less annoying than false positives ("turned off the network
     when I asked for lights").
+
+    Short tokens (``_WORD_BOUNDARY_KEYWORDS``, e.g. "led") are matched
+    with \\b word boundaries so they don't fire on things like
+    "Husamsaf en**led** abled" (the original false positive that turned
+    Husamsaf-Enabled config flags into "lights").
     """
     haystack = (entity_id + " " + (friendly_name or "")).casefold()
     if any(kw in haystack for kw in NON_LIGHT_SWITCH_KEYWORDS):
         return False
-    return any(kw in haystack for kw in LIGHT_SWITCH_KEYWORDS)
+    for kw in LIGHT_SWITCH_KEYWORDS:
+        if kw in _WORD_BOUNDARY_KEYWORDS:
+            if _WORD_BOUNDARY_PATTERNS[kw].search(haystack):
+                return True
+        elif kw in haystack:
+            return True
+    return False
 
 
 async def _resolve_lights(
