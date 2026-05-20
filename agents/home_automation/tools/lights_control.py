@@ -204,6 +204,50 @@ async def _resolve_lights(
     return real
 
 
+# How long to wait after firing a service call before re-querying the
+# entity state. HA's service queue + the underlying Zigbee/Hue/Z-Wave
+# round-trip typically settles within ~1s; 1.5s gives us margin without
+# blowing the chat reply latency budget. Tunable via env for slow setups.
+_VERIFY_DELAY_S = float(__import__("os").getenv("LIGHTS_VERIFY_DELAY_S", "1.5"))
+
+
+async def _verify_state_changes(
+    targets: list[dict[str, Any]],
+    *,
+    desired_state: str,
+) -> dict[str, dict[str, Any]]:
+    """Re-query each target after a brief settle delay and return a map
+    of entity_id → {state, ok}.
+
+    HA returns 200 to ``service.turn_on/off`` regardless of whether the
+    underlying device actually transitioned (Aqara wall switches go
+    offline, Hue bulbs lose Zigbee, smart plugs unplug). Without this
+    post-call check, we'd happily tell the user "Office Light is now on"
+    when the entity is still ``off`` because the device hasn't responded.
+
+    Args:
+        targets: list of {entity_id, ...} dicts to re-check
+        desired_state: 'on' or 'off' — the state we expect to see
+    """
+    import asyncio as _asyncio
+
+    if not targets:
+        return {}
+    await _asyncio.sleep(_VERIFY_DELAY_S)
+    client = get_ha_client()
+    out: dict[str, dict[str, Any]] = {}
+    for t in targets:
+        eid = t["entity_id"]
+        try:
+            current = await client.get_state(eid)
+        except Exception as exc:  # noqa: BLE001
+            out[eid] = {"state": None, "ok": False, "error": str(exc)}
+            continue
+        state = current.get("state")
+        out[eid] = {"state": state, "ok": state == desired_state}
+    return out
+
+
 @tool("lights_off", side_effects=True)
 async def lights_off(
     entity_ids: list[str] | None = None,
@@ -227,6 +271,12 @@ async def lights_off(
 
     Returns ``{ok, turned_off: [{entity_id, friendly_name, domain}],
     skipped: [{entity_id, reason}], summary}``.
+
+    Post-state verified: each entity is re-queried ~1.5s after the
+    service call and moved from ``turned_off`` → ``skipped`` (with
+    ``reason='state_unchanged_after_call'``) when the device didn't
+    actually transition to ``off``. Prevents the "I turned it off" lie
+    when an Aqara wall switch or Hue bulb is offline.
     """
     targets = await _resolve_lights(entity_ids, area, include_switches=include_switches)
     if only_on:
@@ -279,6 +329,31 @@ async def lights_off(
                 error=str(exc),
             )
             failures.append({"entity_id": target["entity_id"], "reason": str(exc)})
+
+    # Post-state verification: re-query each entity that we tried to
+    # turn off; if its state is still 'on' (or unavailable), move it
+    # from turned_off → failures with an honest reason. Without this we
+    # would report success while an offline Aqara switch sits stuck-on.
+    verification = await _verify_state_changes(turned_off, desired_state="off")
+    if verification:
+        confirmed: list[dict[str, str]] = []
+        for entry in turned_off:
+            check = verification.get(entry["entity_id"])
+            if check is None or check.get("ok"):
+                confirmed.append(entry)
+            else:
+                failures.append({
+                    "entity_id": entry["entity_id"],
+                    "friendly_name": entry["friendly_name"],
+                    "reason": "state_unchanged_after_call",
+                    "actual_state": check.get("state"),
+                })
+                logger.warning(
+                    "lights_off_state_unchanged",
+                    entity_id=entry["entity_id"],
+                    actual_state=check.get("state"),
+                )
+        turned_off = confirmed
 
     summary = _summarize_off(turned_off, failures, area=area)
     return {
@@ -353,6 +428,31 @@ async def lights_on(
             )
             failures.append({"entity_id": target["entity_id"], "reason": str(exc)})
 
+    # Post-state verification — see _verify_state_changes. Live evidence:
+    # switch.office_light returns 200 to switch.turn_on but the Aqara
+    # device has been offline for 2 days; without this check we'd tell
+    # the user "Office Light is now on" while the bulb stays dark.
+    verification = await _verify_state_changes(turned_on, desired_state="on")
+    if verification:
+        confirmed: list[dict[str, str]] = []
+        for entry in turned_on:
+            check = verification.get(entry["entity_id"])
+            if check is None or check.get("ok"):
+                confirmed.append(entry)
+            else:
+                failures.append({
+                    "entity_id": entry["entity_id"],
+                    "friendly_name": entry["friendly_name"],
+                    "reason": "state_unchanged_after_call",
+                    "actual_state": check.get("state"),
+                })
+                logger.warning(
+                    "lights_on_state_unchanged",
+                    entity_id=entry["entity_id"],
+                    actual_state=check.get("state"),
+                )
+        turned_on = confirmed
+
     summary = _summarize_on(turned_on, failures, area=area, brightness=brightness)
     return {
         "ok": not failures,
@@ -380,6 +480,33 @@ async def lights_status() -> dict[str, Any]:
     }
 
 
+def _format_failures(failures: list[dict[str, Any]]) -> str:
+    """Render a short, accurate suffix that names devices that didn't
+    actually transition. Distinguishes 'unchanged' (device offline /
+    stuck) from generic call errors so the user gets actionable info."""
+    if not failures:
+        return ""
+    unchanged = [
+        f for f in failures if f.get("reason") == "state_unchanged_after_call"
+    ]
+    if unchanged:
+        names = ", ".join(
+            f.get("friendly_name", f["entity_id"]) for f in unchanged[:3]
+        )
+        more = (
+            f" (+{len(unchanged) - 3} more)" if len(unchanged) > 3 else ""
+        )
+        return (
+            f" {len(unchanged)} device(s) didn't respond — likely offline: "
+            f"{names}{more}."
+        )
+    names = ", ".join(
+        f.get("friendly_name", f["entity_id"]) for f in failures[:3]
+    )
+    more = f" (+{len(failures) - 3} more)" if len(failures) > 3 else ""
+    return f" {len(failures)} call(s) failed: {names}{more}."
+
+
 def _summarize_off(
     turned_off: list[dict[str, str]],
     failures: list[dict[str, str]],
@@ -387,7 +514,7 @@ def _summarize_off(
     area: str | None,
 ) -> str:
     if not turned_off and failures:
-        return f"Failed to turn off {len(failures)} light(s)."
+        return f"Couldn't turn off any lights.{_format_failures(failures)}"
     n = len(turned_off)
     if area:
         scope = f" in {area}"
@@ -396,12 +523,14 @@ def _summarize_off(
     if n == 0:
         return f"No lights were on{scope}."
     if n == 1:
-        return f"Turned off {turned_off[0]['friendly_name']}."
-    if n <= 3:
+        base = f"Turned off {turned_off[0]['friendly_name']}."
+    elif n <= 3:
         names = ", ".join(t["friendly_name"] for t in turned_off)
-        return f"Turned off {n} lights{scope}: {names}."
-    sample = ", ".join(t["friendly_name"] for t in turned_off[:3])
-    return f"Turned off {n} lights{scope} (e.g. {sample})."
+        base = f"Turned off {n} lights{scope}: {names}."
+    else:
+        sample = ", ".join(t["friendly_name"] for t in turned_off[:3])
+        base = f"Turned off {n} lights{scope} (e.g. {sample})."
+    return base + _format_failures(failures)
 
 
 def _summarize_on(
@@ -412,7 +541,7 @@ def _summarize_on(
     brightness: int | None,
 ) -> str:
     if not turned_on and failures:
-        return f"Failed to turn on {len(failures)} light(s)."
+        return f"Couldn't turn on any lights.{_format_failures(failures)}"
     n = len(turned_on)
     if area:
         scope = f" in {area}"
@@ -422,9 +551,11 @@ def _summarize_on(
     if n == 0:
         return f"No lights matched{scope}."
     if n == 1:
-        return f"Turned on {turned_on[0]['friendly_name']}{bright}."
-    if n <= 3:
+        base = f"Turned on {turned_on[0]['friendly_name']}{bright}."
+    elif n <= 3:
         names = ", ".join(t["friendly_name"] for t in turned_on)
-        return f"Turned on {n} lights{scope}{bright}: {names}."
-    sample = ", ".join(t["friendly_name"] for t in turned_on[:3])
-    return f"Turned on {n} lights{scope}{bright} (e.g. {sample})."
+        base = f"Turned on {n} lights{scope}{bright}: {names}."
+    else:
+        sample = ", ".join(t["friendly_name"] for t in turned_on[:3])
+        base = f"Turned on {n} lights{scope}{bright} (e.g. {sample})."
+    return base + _format_failures(failures)

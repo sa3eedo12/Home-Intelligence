@@ -116,6 +116,51 @@ _HONEST_REFUSAL = (
     "ask me to check the dashboard for what I can already do."
 )
 
+_HONEST_AMBIGUOUS_REFUSAL = (
+    "I can't tell what you're referring to — I don't keep our chat "
+    "history yet, so a short follow-up like \"it's not on\" is missing "
+    "the device context. Could you rephrase with the device name (e.g. "
+    "\"the office light is still off\", \"my car battery is low\")?"
+)
+
+# Detects ambiguous-pronoun follow-ups like "it's not on", "still on",
+# "didn't work", "not yet", "still nothing" — short messages whose
+# referent depends on conversation history we don't have. Without this
+# guard, the chat LLM happily invents context (e.g. yesterday's "it's
+# not on" → "The TV status couldn't be confirmed...").
+_AMBIGUOUS_PRONOUN_PATTERN = re.compile(
+    r"^\s*("
+    r"it(?:'?s|s)?\b"
+    r"|that(?:'?s|s)?\b"
+    r"|they(?:'?re|re)?\b"
+    r"|still\b"
+    r"|nope?\b"
+    r"|nothing(?:'?s)?\b"
+    r"|didn'?t\s+work\b"
+    r"|not\s+yet\b"
+    r"|same\s+thing\b"
+    r"|no\s+change\b"
+    r"|won'?t\s+turn\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _looks_ambiguous_followup(text: str) -> bool:
+    """True if the text is short AND opens with a pronoun/follow-up
+    phrase whose referent depends on prior conversation. Pure chit-chat
+    that happens to contain "it" later in the sentence ("how is it
+    going?") passes through because the regex only matches at the start.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    # Long messages probably establish their own context, even if they
+    # contain a pronoun.
+    if len(stripped) > 120:
+        return False
+    return bool(_AMBIGUOUS_PRONOUN_PATTERN.match(stripped))
+
 _HONEST_QUERY_REFUSAL = (
     "I don't have a tool to look that up right now. I won't make up "
     "an answer — I've logged your question so the missing tool can "
@@ -167,6 +212,21 @@ async def chat(text: str) -> dict[str, Any]:
             "reply": _HONEST_REFUSAL,
             "already_natural": True,
             "refused_action_verb": True,
+        }
+
+    # Guard 3: ambiguous-pronoun follow-ups ("it's not on", "still on",
+    # "didn't work") — without conversation history, the LLM invents
+    # what "it" refers to. Live evidence: user said "it's not on" about
+    # an office light, the LLM replied about the TV (2026-05-20).
+    if _looks_ambiguous_followup(text):
+        logger.info(
+            "chat_refused_ambiguous_followup",
+            text_preview=text[:120],
+        )
+        return {
+            "reply": _HONEST_AMBIGUOUS_REFUSAL,
+            "already_natural": True,
+            "refused_ambiguous_followup": True,
         }
 
     client = _llm()

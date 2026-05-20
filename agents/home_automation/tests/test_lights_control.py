@@ -26,6 +26,7 @@ def _patch_client(
     states: list[dict[str, Any]],
     *,
     switch_states: list[dict[str, Any]] | None = None,
+    post_state_overrides: dict[str, str] | None = None,
 ):
     """Install a fake HA client with the given states + a recording call_service.
 
@@ -33,6 +34,12 @@ def _patch_client(
     ``list_states(domain="switch")`` calls; otherwise the switch domain
     returns an empty list (so legacy tests focused on light-domain
     behavior keep working without modification).
+
+    ``post_state_overrides`` lets a test simulate "device didn't actually
+    respond" for the post-state verification path — map entity_id to
+    the state we want ``get_state`` to return after the service call.
+    By default verification returns the expected post-state (i.e. an
+    on→off call sees state='off'), so the verification passes silently.
     """
     calls: list[dict[str, Any]] = []
     client = AsyncMock()
@@ -49,7 +56,27 @@ def _patch_client(
         return {"ok": True}
 
     client.call_service = fake_call_service
+
+    async def fake_get_state(entity_id: str) -> dict[str, Any]:
+        overrides = post_state_overrides or {}
+        if entity_id in overrides:
+            return {"entity_id": entity_id, "state": overrides[entity_id]}
+        # Default: assume the device responded — return the expected post-state.
+        last_call = next(
+            (c for c in reversed(calls) if c["data"].get("entity_id") == entity_id),
+            None,
+        )
+        if last_call is None:
+            return {"entity_id": entity_id, "state": "unknown"}
+        return {
+            "entity_id": entity_id,
+            "state": "on" if last_call["service"] == "turn_on" else "off",
+        }
+
+    client.get_state = fake_get_state
     monkeypatch.setattr(lights_control, "get_ha_client", lambda: client)
+    # Test-mode: skip the 1.5s settle delay so the suite stays fast.
+    monkeypatch.setattr(lights_control, "_VERIFY_DELAY_S", 0.0)
     return calls
 
 
@@ -166,7 +193,15 @@ async def test_lights_off_handles_service_call_failure(monkeypatch) -> None:
         return {"ok": True}
 
     client.call_service = flaky
+
+    async def fake_get_state(entity_id: str) -> dict[str, Any]:
+        # The successful call's entity transitions to off; the failed
+        # call's entity stays on (HA never received the command).
+        return {"entity_id": entity_id, "state": "off" if entity_id == "light.kitchen" else "on"}
+
+    client.get_state = fake_get_state
     monkeypatch.setattr(lights_control, "get_ha_client", lambda: client)
+    monkeypatch.setattr(lights_control, "_VERIFY_DELAY_S", 0.0)
 
     result = await lights_control.lights_off()
     assert result["ok"] is False  # one failed
@@ -362,3 +397,105 @@ def test_is_light_switch_excludes_non_light_switches() -> None:
         assert not lights_control._is_light_switch(eid, name), (
             f"{eid} should NOT be a light switch"
         )
+
+
+# ── Post-state verification (May 20 'office light is now on' lie bug) ──
+
+
+@pytest.mark.asyncio
+async def test_lights_on_reports_failure_when_device_state_unchanged(
+    monkeypatch,
+) -> None:
+    """The exact switch.office_light incident: HA returned 200 OK to
+    switch.turn_on, but the Aqara device was offline and the entity
+    stayed 'off'. The tool MUST report failure, not fabricate success."""
+    light_states = _ha_states()  # no lights
+    switch_states = _ha_states(("switch.office_light", "off", "Office Light"))
+    calls = _patch_client(
+        monkeypatch,
+        light_states,
+        switch_states=switch_states,
+        # Simulate the offline Aqara: post-state stays 'off' even after
+        # the turn_on call succeeded (HA returned 200).
+        post_state_overrides={"switch.office_light": "off"},
+    )
+    result = await lights_control.lights_on(area="office")
+
+    assert result["ok"] is False
+    # Nothing actually turned on — moved to failures with the honest reason.
+    assert result["turned_on"] == []
+    failures = [s for s in result["skipped"] if s.get("reason") == "state_unchanged_after_call"]
+    assert len(failures) == 1
+    assert failures[0]["entity_id"] == "switch.office_light"
+    assert failures[0]["actual_state"] == "off"
+    # Summary tells the user the truth.
+    assert "didn't respond" in result["summary"] or "Couldn't turn on" in result["summary"]
+    assert "Office Light" in result["summary"]
+    # The service call still WAS attempted (verifies we tried before giving up).
+    assert len(calls) == 1
+    assert calls[0]["service"] == "turn_on"
+
+
+@pytest.mark.asyncio
+async def test_lights_off_reports_failure_when_device_state_unchanged(
+    monkeypatch,
+) -> None:
+    """Mirror of the lights_on case for the turn-off path."""
+    light_states = _ha_states(("light.dead_bulb", "on", "Dead Bulb"))
+    calls = _patch_client(
+        monkeypatch,
+        light_states,
+        post_state_overrides={"light.dead_bulb": "on"},  # stuck on
+    )
+    result = await lights_control.lights_off()
+
+    assert result["ok"] is False
+    assert result["turned_off"] == []
+    failures = [s for s in result["skipped"] if s.get("reason") == "state_unchanged_after_call"]
+    assert len(failures) == 1
+    assert failures[0]["entity_id"] == "light.dead_bulb"
+
+
+@pytest.mark.asyncio
+async def test_lights_off_reports_partial_success_with_mixed_outcomes(
+    monkeypatch,
+) -> None:
+    """Some devices respond, some don't — turned_off has the live ones,
+    skipped names the stuck ones."""
+    light_states = _ha_states(
+        ("light.responsive_bulb", "on", "Responsive Bulb"),
+        ("light.stuck_bulb", "on", "Stuck Bulb"),
+    )
+    calls = _patch_client(
+        monkeypatch,
+        light_states,
+        post_state_overrides={"light.stuck_bulb": "on"},
+    )
+    result = await lights_control.lights_off()
+
+    assert result["ok"] is False  # one failed verification
+    assert {t["entity_id"] for t in result["turned_off"]} == {"light.responsive_bulb"}
+    stuck = [s for s in result["skipped"] if s.get("reason") == "state_unchanged_after_call"]
+    assert len(stuck) == 1
+    assert stuck[0]["entity_id"] == "light.stuck_bulb"
+    assert "Stuck Bulb" in result["summary"]
+
+
+@pytest.mark.asyncio
+async def test_lights_on_summary_calls_out_offline_devices(monkeypatch) -> None:
+    """Even a partial success surfaces the offline devices in the summary
+    so the user knows what didn't actually happen."""
+    light_states = _ha_states(
+        ("light.live", "off", "Live"),
+        ("light.dead", "off", "Dead"),
+    )
+    _patch_client(
+        monkeypatch,
+        light_states,
+        post_state_overrides={"light.dead": "off"},
+    )
+    result = await lights_control.lights_on()
+    assert result["ok"] is False
+    assert "Live" in result["summary"]
+    assert "Dead" in result["summary"]
+    assert "didn't respond" in result["summary"]

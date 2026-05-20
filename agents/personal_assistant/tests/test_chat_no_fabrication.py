@@ -253,3 +253,72 @@ def test_honest_query_refusal_does_not_fabricate() -> None:
         "check your network",
     ]:
         assert invented not in text, f"query refusal contains fabricated phrase: {invented!r}"
+
+
+# ── Ambiguous-pronoun follow-ups (May 20 "TV status couldn't" bug) ──
+
+
+@pytest.mark.asyncio
+async def test_chat_refuses_ambiguous_pronoun_followup() -> None:
+    """User said 'it's not on' after a previous lights_on call.
+    Without conversation history, the LLM responded about a TV — pure
+    fabrication. The chat tool must refuse to generate ANY reply when
+    the input is an ambiguous-pronoun follow-up."""
+    from tools import chat as chat_mod
+
+    for ambiguous in [
+        "it's not on",
+        "its not on",
+        "still on",
+        "still nothing",
+        "didn't work",
+        "didnt work",
+        "not yet",
+        "nope",
+        "nothing",
+        "won't turn off",
+        "they're still on",
+    ]:
+        result = await chat_mod.chat(ambiguous)
+        # Either the ambiguous-followup OR action-verb guard must catch
+        # it — both produce an honest, non-fabricating refusal. "no change"
+        # for example matches "change" in the action-verb list and gets
+        # routed through that guard.
+        assert (
+            result.get("refused_ambiguous_followup") is True
+            or result.get("refused_action_verb") is True
+        ), f"should have refused: {ambiguous!r}"
+        # Reply must not contain any concrete *claim* about a device
+        # state — the refusal text is allowed to USE device names as
+        # rephrase examples ("e.g. the office light is still off"), but
+        # the LLM must not generate output like "the TV is now on" or
+        # "the device returned successfully". Look for assertive
+        # claim verbs paired with devices.
+        reply = result["reply"].lower()
+        for fabricated_claim in [
+            "tv is now",
+            "tv is on",
+            "tv is off",
+            "device returned",
+            "successfully",
+            "couldn't be confirmed",
+            "check your network",
+            "powered on",
+        ]:
+            assert fabricated_claim not in reply, (
+                f"reply for {ambiguous!r} fabricates: {fabricated_claim!r}"
+            )
+
+
+@pytest.mark.asyncio
+async def test_chat_passes_through_non_followup_chat_with_pronouns() -> None:
+    """'How is it going?' uses 'it' but isn't a follow-up — must pass
+    through to the LLM, not get refused. Pure chit-chat."""
+    from unittest.mock import AsyncMock, patch
+    from tools import chat as chat_mod
+
+    fake_llm = type("F", (), {"chat": AsyncMock(return_value={"message": {"content": "Doing well!"}})})()
+    with patch("tools.chat._llm", return_value=fake_llm):
+        result = await chat_mod.chat("How is it going today?")
+    assert result.get("refused_ambiguous_followup") is not True
+    assert result["reply"] == "Doing well!"
