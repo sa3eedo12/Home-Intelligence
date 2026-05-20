@@ -101,24 +101,29 @@ capabilities:
     cost: medium
   - id: lights_off
     description: >-
-      Turn off lights. Pass entity_ids for specific lights, area for a substring
-      match against entity_id/friendly_name (e.g. "kitchen", "living room"), or
-      both empty to turn off ALL real lights (excludes TV backlights, indicator
-      strips, etc.). Set only_on=false to force-call even on already-off lights.
+      Turn off lights. ALWAYS prefer passing area or entity_ids — calling
+      it bare (with no area and no entity_ids) tries to turn off every
+      light in the house, which is refused unless confirm_all=true is
+      also passed. For follow-ups like "turn it off" where the previous
+      turn named a room, re-pass that room's name as area — context is
+      not preserved across calls.
     inputs:
       entity_ids: "list[string]?"
       area: "string?"
       only_on: "boolean?"
+      confirm_all: "boolean?"
     side_effects: true
     cost: small
   - id: lights_on
     description: >-
-      Turn on lights with optional brightness 0-255. Same arg semantics as
-      lights_off.
+      Turn on lights with optional brightness 0-255. Same arg semantics
+      as lights_off including the confirm_all safety guard for whole-
+      house calls.
     inputs:
       entity_ids: "list[string]?"
       area: "string?"
       brightness: "integer?"
+      confirm_all: "boolean?"
     side_effects: true
     cost: small
   - id: lights_status

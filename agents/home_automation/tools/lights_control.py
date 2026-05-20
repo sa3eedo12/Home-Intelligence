@@ -248,12 +248,51 @@ async def _verify_state_changes(
     return out
 
 
+# Maximum number of devices a bare lights_off/lights_on (no entity_ids
+# AND no area) is allowed to touch without an explicit confirm_all=True.
+# Above this threshold the tool refuses + asks the caller to scope down.
+# Tunable via env for users who genuinely want their house-wide "wind
+# down" routine to one-shot.
+_WHOLE_HOUSE_THRESHOLD = int(__import__("os").getenv("LIGHTS_WHOLE_HOUSE_THRESHOLD", "5"))
+
+
+def _refuse_whole_house(
+    actionable: list[dict[str, Any]], verb: str
+) -> dict[str, Any] | None:
+    """Return a refusal payload if a bare-call would nuke more than
+    ``_WHOLE_HOUSE_THRESHOLD`` devices.
+
+    The May 20 incident: user said "turn it off" as a follow-up after
+    "switch off the light in the office". Router lost the area context
+    between turns and called lights_off() bare → 22 lights + 10 offline
+    devices got hit. This guard catches that.
+    """
+    if len(actionable) <= _WHOLE_HOUSE_THRESHOLD:
+        return None
+    sample = ", ".join(t["friendly_name"] for t in actionable[:5])
+    return {
+        "ok": False,
+        "error": "whole_house_requires_confirmation",
+        "would_affect": len(actionable),
+        "sample": sample,
+        f"turned_{verb}": [],
+        "skipped": [],
+        "summary": (
+            f"Refusing to turn {verb} {len(actionable)} devices without an "
+            f"explicit scope — that's the whole house. Either name an area "
+            f"(e.g. 'bedroom', 'office') or pass confirm_all=true. Sample "
+            f"of what would have been affected: {sample}, …"
+        ),
+    }
+
+
 @tool("lights_off", side_effects=True)
 async def lights_off(
     entity_ids: list[str] | None = None,
     area: str | None = None,
     only_on: bool = True,
     include_switches: bool = True,
+    confirm_all: bool = False,
 ) -> dict[str, Any]:
     """Turn off lights.
 
@@ -268,6 +307,12 @@ async def lights_off(
             entities that look like light switches (Aqara wall switches,
             smart plugs powering lamps). Set False to restrict to native
             ``light.*`` only.
+        confirm_all: Safety guard. When ``entity_ids`` and ``area`` are
+            both unset (i.e. the caller wants to act on every light),
+            the tool refuses unless this is True. Prevents accidental
+            whole-house blackouts when the router loses conversation
+            context. Pass ``True`` explicitly for genuine "all lights off"
+            requests.
 
     Returns ``{ok, turned_off: [{entity_id, friendly_name, domain}],
     skipped: [{entity_id, reason}], summary}``.
@@ -289,6 +334,14 @@ async def lights_off(
     else:
         actionable = targets
         skipped = []
+
+    # Safety guard against whole-house blackouts when the caller
+    # provided neither entity_ids nor area (= "everything"). Confirmed
+    # callers can pass confirm_all=True to opt in.
+    if not entity_ids and not area and not confirm_all:
+        refusal = _refuse_whole_house(actionable, verb="off")
+        if refusal is not None:
+            return refusal
 
     if not actionable:
         return {
@@ -370,13 +423,17 @@ async def lights_on(
     area: str | None = None,
     brightness: int | None = None,
     include_switches: bool = True,
+    confirm_all: bool = False,
 ) -> dict[str, Any]:
     """Turn on lights, optionally with a brightness 0-255.
 
     Same arg semantics as lights_off — including the
     ``include_switches`` flag, which decides whether to also target
-    ``switch.*`` light entities. ``brightness`` is ignored for the
-    switch domain (HA's switch service has no brightness concept).
+    ``switch.*`` light entities, and the ``confirm_all`` safety guard
+    that prevents accidental whole-house actions when both
+    ``entity_ids`` and ``area`` are unset. ``brightness`` is ignored
+    for the switch domain (HA's switch service has no brightness
+    concept).
 
     Returns ``{ok, turned_on, skipped, summary}``.
     """
@@ -387,6 +444,11 @@ async def lights_on(
         for t in targets
         if t.get("state") == "on"
     ]
+    # Same safety guard as lights_off — see _refuse_whole_house.
+    if not entity_ids and not area and not confirm_all:
+        refusal = _refuse_whole_house(actionable, verb="on")
+        if refusal is not None:
+            return refusal
     if not actionable:
         return {
             "ok": True,

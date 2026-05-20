@@ -294,7 +294,11 @@ async def test_lights_off_turns_off_switch_domain_lights_too(monkeypatch) -> Non
         ("switch.light_sensor_tv", "on", "Light sensor TV"),
     )
     calls = _patch_client(monkeypatch, light_states, switch_states=switch_states)
-    result = await lights_control.lights_off()
+    # Bare lights_off() with 6 actionable devices would now trip the
+    # whole-house guard — pass confirm_all=True to bypass since this
+    # test is specifically exercising the whole-house include-switches
+    # behavior.
+    result = await lights_control.lights_off(confirm_all=True)
 
     turned_off_ids = {t["entity_id"] for t in result["turned_off"]}
     # All real lights + all wall switches + office_light must be off
@@ -499,3 +503,86 @@ async def test_lights_on_summary_calls_out_offline_devices(monkeypatch) -> None:
     assert "Live" in result["summary"]
     assert "Dead" in result["summary"]
     assert "didn't respond" in result["summary"]
+
+
+# ── Whole-house safety guard (May 20 incident — router lost area
+#    context across turns and lights_off() bare killed 22 devices) ──
+
+
+@pytest.mark.asyncio
+async def test_lights_off_refuses_whole_house_without_confirm(monkeypatch) -> None:
+    """A bare lights_off() (no entity_ids, no area) must refuse when
+    it would affect more than _WHOLE_HOUSE_THRESHOLD devices. Replays
+    the exact May 20 scenario: 22 lights would have been killed."""
+    # 22 lights all on, no area filter
+    light_states = _ha_states(*[
+        (f"light.bulb_{i}", "on", f"Bulb {i}") for i in range(22)
+    ])
+    calls = _patch_client(monkeypatch, light_states)
+    result = await lights_control.lights_off()
+
+    assert result["ok"] is False
+    assert result["error"] == "whole_house_requires_confirmation"
+    assert result["would_affect"] == 22
+    assert result["turned_off"] == []
+    # No HA service call should have fired.
+    assert calls == []
+    # Summary names a sample so the LLM can read it back to the user.
+    assert "Bulb 0" in result["summary"]
+
+
+@pytest.mark.asyncio
+async def test_lights_off_with_area_bypasses_whole_house_guard(monkeypatch) -> None:
+    """Passing an area always works — the guard only catches bare calls."""
+    light_states = _ha_states(*[
+        (f"light.bulb_{i}", "on", f"Bulb {i}") for i in range(22)
+    ])
+    calls = _patch_client(monkeypatch, light_states)
+    # area="bulb" matches everything via friendly_name fuzzy match, but
+    # the guard fires only when BOTH entity_ids and area are empty.
+    result = await lights_control.lights_off(area="bulb")
+    assert result["ok"] is True
+    assert len(result["turned_off"]) == 22
+    assert len(calls) == 22
+
+
+@pytest.mark.asyncio
+async def test_lights_off_with_confirm_all_bypasses_guard(monkeypatch) -> None:
+    """Explicit confirm_all=True is the opt-in for the genuine
+    'turn off every light' use case."""
+    light_states = _ha_states(*[
+        (f"light.bulb_{i}", "on", f"Bulb {i}") for i in range(22)
+    ])
+    calls = _patch_client(monkeypatch, light_states)
+    result = await lights_control.lights_off(confirm_all=True)
+    assert result["ok"] is True
+    assert len(result["turned_off"]) == 22
+    assert len(calls) == 22
+
+
+@pytest.mark.asyncio
+async def test_lights_off_bare_call_under_threshold_proceeds(monkeypatch) -> None:
+    """Small homes (<= 5 lights) don't trigger the guard — 'turn off
+    everything' is reasonable for a 3-bulb apartment."""
+    light_states = _ha_states(*[
+        (f"light.bulb_{i}", "on", f"Bulb {i}") for i in range(3)
+    ])
+    calls = _patch_client(monkeypatch, light_states)
+    result = await lights_control.lights_off()
+    assert result["ok"] is True
+    assert len(result["turned_off"]) == 3
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_lights_on_refuses_whole_house_without_confirm(monkeypatch) -> None:
+    """Mirror test for lights_on — same safety guard."""
+    light_states = _ha_states(*[
+        (f"light.bulb_{i}", "off", f"Bulb {i}") for i in range(22)
+    ])
+    calls = _patch_client(monkeypatch, light_states)
+    result = await lights_control.lights_on()
+    assert result["ok"] is False
+    assert result["error"] == "whole_house_requires_confirmation"
+    assert result["would_affect"] == 22
+    assert calls == []
