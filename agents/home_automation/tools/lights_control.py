@@ -146,20 +146,20 @@ async def _resolve_lights(
     entity_ids: list[str] | None,
     area: str | None,
     *,
-    include_switches: bool = True,
+    include_switches: bool = False,
 ) -> list[dict[str, Any]]:
     """Return controllable "light" entities (each ``{entity_id,
     friendly_name, state, domain}``) matching the caller's intent.
 
-    Walks both ``light.*`` and ``switch.*`` so wall-switched ceiling
-    fixtures (the Aqara wall-switch case) get included when the user
-    says "turn off all the lights". Pass ``include_switches=False`` to
-    restrict to native ``light.*`` only.
+    By default acts only on the ``light.*`` domain — what HA considers
+    a light. Users who want wall-switch / smart-plug coverage should
+    reclassify those entities in HA itself (HA's "Show as Light" option
+    on the device → see deploy/docs). Power users can still opt in
+    with ``include_switches=True`` to also walk the ``switch.*`` domain
+    and apply a keyword heuristic (LIGHT_SWITCH_KEYWORDS).
 
-    Returns ALL real lights when both ``entity_ids`` and ``area`` are
-    None. Tag each entry with ``domain`` so the caller can dispatch
-    to the correct HA service (``light.turn_off`` vs
-    ``switch.turn_off``).
+    Each result is tagged with ``domain`` so callers can dispatch to
+    the correct HA service.
     """
     client = get_ha_client()
     domains_to_fetch = ["light"]
@@ -291,7 +291,7 @@ async def lights_off(
     entity_ids: list[str] | None = None,
     area: str | None = None,
     only_on: bool = True,
-    include_switches: bool = True,
+    include_switches: bool = False,
     confirm_all: bool = False,
 ) -> dict[str, Any]:
     """Turn off lights.
@@ -303,10 +303,12 @@ async def lights_off(
         only_on: If True (default), only act on lights currently 'on'
             so we don't waste a service call on already-off lights.
             Set False to force-off everything matched.
-        include_switches: If True (default), also targets ``switch.*``
-            entities that look like light switches (Aqara wall switches,
-            smart plugs powering lamps). Set False to restrict to native
-            ``light.*`` only.
+        include_switches: If True, also targets ``switch.*`` entities
+            that look like light switches (via the LIGHT_SWITCH_KEYWORDS
+            heuristic). Defaults to False — users who want wall
+            switches / smart plugs to behave as lights should
+            reclassify them in HA itself ("Show as Light" on the
+            device), which is more accurate than our keyword guess.
         confirm_all: Safety guard. When ``entity_ids`` and ``area`` are
             both unset (i.e. the caller wants to act on every light),
             the tool refuses unless this is True. Prevents accidental
@@ -422,18 +424,18 @@ async def lights_on(
     entity_ids: list[str] | None = None,
     area: str | None = None,
     brightness: int | None = None,
-    include_switches: bool = True,
+    include_switches: bool = False,
     confirm_all: bool = False,
 ) -> dict[str, Any]:
     """Turn on lights, optionally with a brightness 0-255.
 
     Same arg semantics as lights_off — including the
-    ``include_switches`` flag, which decides whether to also target
-    ``switch.*`` light entities, and the ``confirm_all`` safety guard
-    that prevents accidental whole-house actions when both
-    ``entity_ids`` and ``area`` are unset. ``brightness`` is ignored
-    for the switch domain (HA's switch service has no brightness
-    concept).
+    ``include_switches`` flag (defaults False — users who want wall
+    switches to count as lights should reclassify them in HA), and the
+    ``confirm_all`` safety guard that prevents accidental whole-house
+    actions when both ``entity_ids`` and ``area`` are unset.
+    ``brightness`` is ignored for the switch domain (HA's switch
+    service has no brightness concept).
 
     Returns ``{ok, turned_on, skipped, summary}``.
     """

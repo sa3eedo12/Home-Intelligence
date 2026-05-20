@@ -294,11 +294,11 @@ async def test_lights_off_turns_off_switch_domain_lights_too(monkeypatch) -> Non
         ("switch.light_sensor_tv", "on", "Light sensor TV"),
     )
     calls = _patch_client(monkeypatch, light_states, switch_states=switch_states)
-    # Bare lights_off() with 6 actionable devices would now trip the
-    # whole-house guard — pass confirm_all=True to bypass since this
-    # test is specifically exercising the whole-house include-switches
-    # behavior.
-    result = await lights_control.lights_off(confirm_all=True)
+    # Test specifically exercises the opt-in include_switches behavior +
+    # whole-house guard bypass via confirm_all=True.
+    result = await lights_control.lights_off(
+        confirm_all=True, include_switches=True
+    )
 
     turned_off_ids = {t["entity_id"] for t in result["turned_off"]}
     # All real lights + all wall switches + office_light must be off
@@ -332,17 +332,41 @@ async def test_lights_off_turns_off_switch_domain_lights_too(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_lights_off_include_switches_false_restricts_to_light_domain(
+async def test_lights_off_default_targets_light_domain_only(
     monkeypatch,
 ) -> None:
-    """Caller opting out (include_switches=False) gets the old behaviour."""
+    """Default behaviour: only light.* domain. User reclassifies wall
+    switches as lights in HA itself (Show as Light) instead of relying
+    on our heuristic. Old behavior (include_switches=True) is opt-in."""
     light_states = _ha_states(("light.lightbulb", "on", "Bulb"))
     switch_states = _ha_states(("switch.wall_switch", "on", "Wall switch"))
     calls = _patch_client(monkeypatch, light_states, switch_states=switch_states)
-    result = await lights_control.lights_off(include_switches=False)
+    # No include_switches kwarg → defaults to False now.
+    result = await lights_control.lights_off()
 
     assert {t["entity_id"] for t in result["turned_off"]} == {"light.lightbulb"}
     assert all(c["domain"] == "light" for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_lights_off_include_switches_true_opts_in(
+    monkeypatch,
+) -> None:
+    """Power users (or legacy callers) can still pull in switch-domain
+    lights with include_switches=True."""
+    light_states = _ha_states(("light.lightbulb", "on", "Bulb"))
+    switch_states = _ha_states(("switch.wall_switch", "on", "Wall switch"))
+    calls = _patch_client(monkeypatch, light_states, switch_states=switch_states)
+    result = await lights_control.lights_off(
+        include_switches=True, confirm_all=True
+    )
+
+    assert {t["entity_id"] for t in result["turned_off"]} == {
+        "light.lightbulb",
+        "switch.wall_switch",
+    }
+    call_domains = {c["domain"] for c in calls}
+    assert call_domains == {"light", "switch"}
 
 
 @pytest.mark.asyncio
@@ -353,7 +377,8 @@ async def test_lights_on_does_not_pass_brightness_to_switch_domain(
     light_states = _ha_states(("light.bulb", "off", "Bulb"))
     switch_states = _ha_states(("switch.wall_switch", "off", "Wall switch"))
     calls = _patch_client(monkeypatch, light_states, switch_states=switch_states)
-    result = await lights_control.lights_on(brightness=180)
+    # Opt-in to switch coverage so this test exercises the dual-domain dispatch.
+    result = await lights_control.lights_on(brightness=180, include_switches=True)
 
     assert result["ok"] is True
     light_call = next(c for c in calls if c["domain"] == "light")
@@ -423,7 +448,7 @@ async def test_lights_on_reports_failure_when_device_state_unchanged(
         # the turn_on call succeeded (HA returned 200).
         post_state_overrides={"switch.office_light": "off"},
     )
-    result = await lights_control.lights_on(area="office")
+    result = await lights_control.lights_on(area="office", include_switches=True)
 
     assert result["ok"] is False
     # Nothing actually turned on — moved to failures with the honest reason.
