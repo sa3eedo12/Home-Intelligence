@@ -26,7 +26,9 @@ def _make_registry(agent_urls=None):
     qdrant.get_collection = AsyncMock(return_value=MagicMock())
     qdrant.create_collection = AsyncMock()
     qdrant.upsert = AsyncMock()
-    qdrant.search = AsyncMock(return_value=[])
+    # qdrant-client 1.10+ replaced .search() with .query_points(); the
+    # semantic_search helper now uses the new API and the fake mirrors that.
+    qdrant.query_points = AsyncMock(return_value=MagicMock(points=[]))
 
     embedder = MagicMock()
     embedder.embed = AsyncMock(return_value=[0.1] * 1024)
@@ -90,3 +92,30 @@ async def test_dispatch_posts_to_agent():
     await registry.bootstrap()
     result = await registry.dispatch("home_automation", "list_entities", {})
     assert result["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_semantic_search_uses_query_points_not_search() -> None:
+    """qdrant-client 1.10+ deprecated AsyncQdrantClient.search() — registry
+    must call query_points() so we don't hit AttributeError on every nightly
+    reflection (the May 20 'registry_search_failed' warning storm)."""
+    fake_point = MagicMock(score=0.92, payload={"agent": "x", "cap": "y"})
+    qdrant = MagicMock()
+    qdrant.get_collection = AsyncMock(return_value=MagicMock())
+    qdrant.create_collection = AsyncMock()
+    qdrant.upsert = AsyncMock()
+    qdrant.query_points = AsyncMock(return_value=MagicMock(points=[fake_point]))
+    # Explicitly make .search() a method that raises — proves we never call it.
+    qdrant.search = MagicMock(side_effect=AttributeError("should not be called"))
+    embedder = MagicMock()
+    embedder.embed = AsyncMock(return_value=[0.1] * 1024)
+
+    registry = CapabilityRegistry(
+        agent_urls={"home_automation": "http://x:8000"},
+        qdrant=qdrant,
+        embedder=embedder,
+    )
+    results = await registry.semantic_search("turn off the lights", top_k=3)
+    assert results == [{"score": 0.92, "payload": {"agent": "x", "cap": "y"}}]
+    qdrant.query_points.assert_awaited_once()
+    qdrant.search.assert_not_called()

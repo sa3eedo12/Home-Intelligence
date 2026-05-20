@@ -50,7 +50,7 @@ def _make_reflector(
 
     reflector = NightlyReflector(
         pool=pool, redis=redis, llm=llm, registry=registry,
-        reasoner_model="qwen3.6:35b-a3b", fallback_model="qwen3:8b",
+        reasoner_model="qwen3:14b", fallback_model="qwen3:8b",
         gap_store=MagicMock(),
     )
     # Mock store with refine_proposal
@@ -180,18 +180,15 @@ async def test_handles_llm_exception_gracefully():
 
 
 @pytest.mark.asyncio
-async def test_uses_8b_with_180s_timeout_for_batch_refinement():
-    """Batch refinement uses the 8B fallback model with a 180s timeout.
+async def test_refine_proposals_uses_reasoner_model() -> None:
+    """Batch refinement uses the reasoner (qwen3:14b) with thinking +
+    a 5-min per-proposal timeout.
 
-    The 35B reasoner deadlocks under sustained back-to-back calls
-    (Vulkan/RADV: GPU sits at 0% busy while the request hangs at the
-    network layer). The 8B (qwen3:8b) finishes a refinement in 30-60s
-    with genuinely good quality — proven on real hardware to refine
-    9 proposals in ~3 minutes including correctly narrowing
-    "27 batteries" to the actual EV sensors.
-
-    The 35B is reserved for ONE single-shot synthesis call per night
-    in _synthesize_nightly_brief, where the deadlock doesn't trigger."""
+    The historical 35B-Vulkan deadlock that forced us to the 8B is
+    resolved: qwen3:14b is dense, fits in ~9 GB resident, and finishes
+    a refinement in ~60-120s on Strix Halo with thinking on. Same
+    family as the router/default → identical prompt conventions.
+    """
     rough = [{
         "id": 80,
         "kind": "code_change",
@@ -210,9 +207,9 @@ async def test_uses_8b_with_180s_timeout_for_batch_refinement():
     await reflector._refine_proposals()
 
     chat_call = reflector.llm.chat.await_args_list[0]
-    # Nightly path → think=True (smaller model benefits more from CoT).
+    # Nightly path → think=True (better dedup-vs-existing reasoning).
     assert chat_call.kwargs["think"] is True
-    assert chat_call.kwargs["model"] == "qwen3:8b"
+    assert chat_call.kwargs["model"] == "qwen3:14b"
     # 5-min timeout (300s) — thinking adds latency, the nightly window
     # absorbs it.
     assert chat_call.kwargs["timeout"] == 300.0

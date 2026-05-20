@@ -2,15 +2,14 @@
 
 Pins the contract: AFTER all other reflection phases (refinement,
 generate_proposals, health, correlations, etc.) have run, we make
-ONE 35B call that produces a headline + tomorrow's attention item.
+ONE reasoner call that produces a headline + tomorrow's attention item.
 
 Why this exists:
-  The 35B reasoner (qwen3.6:35b-a3b) deadlocks under sustained
-  back-to-back calls on Vulkan/RADV — GPU sits at 0% busy while the
-  request hangs at the network layer. Single-shot calls work fine,
-  so we reserve the 35B for ONE big synthesis at the end of the
-  nightly window where the quality lift matters most (the headline
-  on the morning brief).
+  Historically the 35B reasoner (qwen3.6:35b-a3b) deadlocked on
+  Vulkan/RADV under sustained back-to-back calls, forcing a fallback-
+  to-8B-for-synthesis workaround. We've since switched the reasoner
+  to qwen3:14b (dense, 9 GB resident, no MoE/Vulkan risk) — synthesis
+  now uses the reasoner directly, with thinking enabled.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ def _make_reflector(*, llm_response: str | None = None, raise_on_chat: Exception
     registry = MagicMock()
     reflector = NightlyReflector(
         pool=pool, redis=redis, llm=llm, registry=registry,
-        reasoner_model="qwen3.6:35b-a3b", fallback_model="qwen3:8b",
+        reasoner_model="qwen3:14b", fallback_model="qwen3:8b",
         gap_store=MagicMock(),
     )
     # Skip the Ollama unload network call in tests — pin its async
@@ -72,11 +71,10 @@ def _sample_payload():
 
 
 @pytest.mark.asyncio
-async def test_synthesis_uses_fallback_model_due_to_gpu_pressure():
-    """Synthesis runs on the 8B fallback, NOT the 35B reasoner.
-    The 35B is unusable on Strix Halo when other models compete for
-    the unified memory budget — even single-shot calls hang 30+ min.
-    Documented in reflector.py near _synthesize_nightly_brief."""
+async def test_synthesis_uses_reasoner_model() -> None:
+    """Synthesis runs on the reasoner (qwen3:14b) now that the 35B
+    memory-pressure deadlock is gone. Bigger model → slightly better
+    headlines; we have the headroom for it."""
     llm_response = json.dumps({
         "headline": "Tonight the system learned about your EV and front door.",
         "attention": "Approve proposal #59 (ev_status tool).",
@@ -88,11 +86,11 @@ async def test_synthesis_uses_fallback_model_due_to_gpu_pressure():
 
     assert reflector.llm.chat.await_count == 1
     chat_call = reflector.llm.chat.await_args_list[0]
-    assert chat_call.kwargs["model"] == "qwen3:8b"
-    # Thinking ON for the nightly path: smaller models benefit more
-    # from CoT, and the nightly window has hours.
+    assert chat_call.kwargs["model"] == "qwen3:14b"
+    # Thinking ON for the nightly path: even the bigger reasoner benefits
+    # from CoT when the goal is concise, well-organized output.
     assert chat_call.kwargs["think"] is True
-    # 10-min timeout: thinking adds latency but iGPU still finishes well within.
+    # 10-min timeout: thinking adds latency but iGPU still finishes within.
     assert chat_call.kwargs["timeout"] == 600.0
 
 
@@ -111,7 +109,7 @@ async def test_synthesis_returns_structured_output():
     assert out["headline"].startswith("9 proposals")
     assert "ev_status" in out["attention"]
     assert "Capability gaps" in out["patterns"]
-    assert out["model"] == "qwen3:8b"
+    assert out["model"] == "qwen3:14b"
 
 
 @pytest.mark.asyncio
@@ -237,10 +235,10 @@ async def test_synthesis_unloads_other_models_before_chat_call():
     await reflector._synthesize_nightly_brief(**_sample_payload())
 
     # Unload must be called BEFORE the chat. Keep target is the
-    # synthesis model itself (currently the 8B fallback).
+    # synthesis model — now the reasoner (qwen3:14b).
     reflector._unload_other_ollama_models.assert_awaited_once()
     unload_call = reflector._unload_other_ollama_models.await_args
-    assert unload_call.kwargs.get("keep") == "qwen3:8b"
+    assert unload_call.kwargs.get("keep") == "qwen3:14b"
 
 
 @pytest.mark.asyncio
@@ -276,7 +274,7 @@ async def test_unload_skips_when_only_keep_model_loaded():
     registry = MagicMock()
     reflector = NightlyReflector(
         pool=pool, redis=redis, llm=llm, registry=registry,
-        reasoner_model="qwen3.6:35b-a3b", fallback_model="qwen3:8b",
+        reasoner_model="qwen3:14b", fallback_model="qwen3:8b",
         gap_store=MagicMock(),
     )
 
@@ -287,13 +285,13 @@ async def test_unload_skips_when_only_keep_model_loaded():
         async def get(self, url):
             resp = MagicMock()
             resp.raise_for_status = MagicMock()
-            resp.json = lambda: {"models": [{"name": "qwen3.6:35b-a3b"}]}
+            resp.json = lambda: {"models": [{"name": "qwen3:14b"}]}
             return resp
         post = AsyncMock()
 
     fake_client = _FakeClient()
     with patch("orchestrator.reflector.httpx.AsyncClient", return_value=fake_client):
-        await reflector._unload_other_ollama_models(keep="qwen3.6:35b-a3b")
+        await reflector._unload_other_ollama_models(keep="qwen3:14b")
 
     fake_client.post.assert_not_called()
 
@@ -310,7 +308,7 @@ async def test_unload_calls_keep_alive_zero_for_each_other_model():
     registry = MagicMock()
     reflector = NightlyReflector(
         pool=pool, redis=redis, llm=llm, registry=registry,
-        reasoner_model="qwen3.6:35b-a3b", fallback_model="qwen3:8b",
+        reasoner_model="qwen3:14b", fallback_model="qwen3:8b",
         gap_store=MagicMock(),
     )
 
@@ -326,7 +324,7 @@ async def test_unload_calls_keep_alive_zero_for_each_other_model():
             resp.json = lambda: {"models": [
                 {"name": "qwen3:8b"},
                 {"name": "qwen3:0.6b"},
-                {"name": "qwen3.6:35b-a3b"},  # the keep target
+                {"name": "qwen3:14b"},  # the keep target
                 {"name": "bge-m3"},
             ]}
             return resp
@@ -335,7 +333,7 @@ async def test_unload_calls_keep_alive_zero_for_each_other_model():
             return MagicMock()
 
     with patch("orchestrator.reflector.httpx.AsyncClient", return_value=_FakeClient()):
-        await reflector._unload_other_ollama_models(keep="qwen3.6:35b-a3b")
+        await reflector._unload_other_ollama_models(keep="qwen3:14b")
 
     # 3 unload requests (everything except the keep model)
     assert len(posts) == 3

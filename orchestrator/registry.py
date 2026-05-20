@@ -118,8 +118,17 @@ class CapabilityRegistry:
     async def semantic_search(self, text: str, top_k: int = 3) -> list[dict]:
         try:
             vector = await self._embedder.embed(text)
-            results = await self._qdrant.search(_COLLECTION, query_vector=vector, limit=top_k)
-            return [{"score": r.score, "payload": r.payload} for r in results]
+            # qdrant-client 1.10+ deprecated AsyncQdrantClient.search() in
+            # favour of query_points(). The new API takes the vector under
+            # the `query` kwarg and returns a QueryResponse whose `.points`
+            # field carries the same ScoredPoint shape we already consume.
+            response = await self._qdrant.query_points(
+                collection_name=_COLLECTION,
+                query=vector,
+                limit=top_k,
+            )
+            points = getattr(response, "points", None) or []
+            return [{"score": p.score, "payload": p.payload} for p in points]
         except Exception as exc:
             logger.warning("registry_search_failed", error=str(exc))
             return []

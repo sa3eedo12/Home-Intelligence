@@ -748,17 +748,12 @@ class NightlyReflector:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                # Was self.reasoner_model (35B). Switched to the
-                # 8B fallback model after the 35B consistently hit
-                # 10-min Ollama timeouts on sustained back-to-back
-                # calls on the live N5 Pro Vulkan backend. Now uses
-                # self.fallback_model with think=True — the smaller
-                # model benefits more from chain-of-thought + the
-                # nightly window has hours to spare. The 8B with
-                # thinking finishes gap clustering in ~60-90s and
-                # produces tighter proposals (no duplicates of prior
-                # dismissed work).
-                model=self.fallback_model,
+                # Gap-clustering uses the reasoner (qwen3:14b) with
+                # thinking enabled. Same family as the router/default,
+                # ~9 GB resident, real reasoning upgrade over the 8B
+                # without the MoE/Vulkan deadlock risk that took
+                # qwen3.6:35b-a3b out of rotation on Strix Halo.
+                model=self.reasoner_model,
                 response_format="json",
                 think=True,
                 timeout=300.0,
@@ -1023,13 +1018,12 @@ class NightlyReflector:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                # Refinement runs the fallback model with thinking
-                # enabled — smaller models benefit more from CoT and
-                # the nightly window can absorb the extra latency.
-                # The 8B with think=True finishes a refinement in
-                # ~60-120s with genuinely good quality; batches of
-                # 9 proposals refine in ~10-15 min on Strix Halo.
-                model=self.fallback_model,
+                # Refinement runs the reasoner (qwen3:14b) with thinking
+                # enabled — the bigger model gives tighter rationale +
+                # better entity-narrowing on Saeed's Strix Halo (~9 GB
+                # resident is well within memory budget now that the
+                # 35B is gone).
+                model=self.reasoner_model,
                 response_format="json",
                 think=True,
                 timeout=300.0,
@@ -1177,26 +1171,18 @@ class NightlyReflector:
             "Now produce the synthesis JSON."
         )
 
-        # KNOWN LIMITATION (2026-05-18): the 35B reasoner is unusable
-        # on this Strix Halo iGPU under sustained workloads. With 4
-        # models commonly resident (qwen3.6:35b @ 34GB + qwen3:8b @
-        # 17GB + qwen3:0.6b @ 10GB + bge-m3 @ 1.1GB ≈ 62GB on a 64GB
-        # unified memory budget), the 35B load-time work hangs for 30+
-        # minutes even after we proactively unload everything else —
-        # because other agents (router, escalator, Telegram bot) reload
-        # the 8B in the gap between unload and our chat call.
-        #
-        # So we use the FALLBACK (8B) for synthesis too. The headline
-        # quality is slightly less polished than 35B output but it's a
-        # serviceable summary, and it actually completes. If/when GPU
-        # memory pressure is resolved (e.g. dedicated GPU, smaller
-        # context for the 35B), revisit and switch back to reasoner_model.
-        synthesis_model = self.fallback_model
+        # Synthesis now uses the reasoner (qwen3:14b). The historical
+        # 35B-on-Strix-Halo deadlock that forced us to the 8B is gone:
+        # the 14B fits in ~9 GB resident leaving plenty of headroom
+        # alongside the 8B + 0.6B + bge-m3 (total ~30 GB / 64 GB).
+        # Slightly better headline quality than 8B with no reliability
+        # tax.
+        synthesis_model = self.reasoner_model
 
-        # Still attempt the unload — it's cheap, leaves a cleaner GPU
-        # state for the synthesis call, and would be required if/when
-        # we switch back to the 35B. Best-effort: failures don't block
-        # the chat call.
+        # Still attempt the unload — cheap, leaves a cleaner GPU state
+        # for the synthesis call, and the helper is defensive against
+        # the keep target being already-loaded. Best-effort: failures
+        # don't block the chat call.
         try:
             await self._unload_other_ollama_models(keep=synthesis_model)
             await asyncio.sleep(1)

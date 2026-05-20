@@ -21,11 +21,28 @@ def _ha_states(*lights: tuple[str, str, str]) -> list[dict[str, Any]]:
     ]
 
 
-def _patch_client(monkeypatch, states: list[dict[str, Any]]):
-    """Install a fake HA client with the given states + a recording call_service."""
+def _patch_client(
+    monkeypatch,
+    states: list[dict[str, Any]],
+    *,
+    switch_states: list[dict[str, Any]] | None = None,
+):
+    """Install a fake HA client with the given states + a recording call_service.
+
+    When ``switch_states`` is provided, the fake returns it for
+    ``list_states(domain="switch")`` calls; otherwise the switch domain
+    returns an empty list (so legacy tests focused on light-domain
+    behavior keep working without modification).
+    """
     calls: list[dict[str, Any]] = []
     client = AsyncMock()
-    client.list_states = AsyncMock(return_value=states)
+
+    async def fake_list_states(domain: str | None = None, **_kw: Any) -> list[dict[str, Any]]:
+        if domain == "switch":
+            return list(switch_states or [])
+        return list(states)
+
+    client.list_states = fake_list_states
 
     async def fake_call_service(domain: str, service: str, data: dict) -> dict:
         calls.append({"domain": domain, "service": service, "data": data})
@@ -133,7 +150,12 @@ async def test_lights_off_handles_service_call_failure(monkeypatch) -> None:
         ("light.kitchen", "on", "Kitchen"),
     )
     client = AsyncMock()
-    client.list_states = AsyncMock(return_value=states)
+
+    async def fake_list_states(domain: str | None = None, **_kw: Any) -> list[dict[str, Any]]:
+        # No switch.* in this test — only light.* matters for the failure path.
+        return list(states) if domain != "switch" else []
+
+    client.list_states = fake_list_states
 
     call_count = {"n": 0}
 
@@ -206,3 +228,129 @@ async def test_lights_status_returns_count_excluding_filtered(monkeypatch) -> No
     assert result["on_count"] == 1
     assert result["total_count"] == 2
     assert result["on_lights"][0]["friendly_name"] == "Living Room"
+
+
+# ── switch.* light-switch coverage (May 19 bug — "switch off all the
+#    lights" silently left wall-switched ceiling fixtures on) ───────────
+
+
+@pytest.mark.asyncio
+async def test_lights_off_turns_off_switch_domain_lights_too(monkeypatch) -> None:
+    """Wall switches that ARE lights (Aqara wall_switch_*, switch.office_light,
+    smart plugs powering lamps) must turn off alongside light.* entities.
+    Uses Saeed's exact entity list from the May 19 incident as the fixture."""
+    light_states = _ha_states(
+        ("light.lightbulb", "on", "Office lightbulb"),
+        ("light.hue_play_gradient_lightstrip_1", "on", "Hue play gradient lightstrip 1"),
+    )
+    switch_states = _ha_states(
+        ("switch.wall_switch", "on", "Wall switch"),
+        ("switch.wall_switch_2", "on", "Wall switch"),
+        ("switch.wall_switch_3", "on", "Wall switch"),
+        ("switch.office_light", "on", "Office light"),
+        # Non-light switches — MUST NOT be touched
+        ("switch.pc_power", "on", "PC Power"),
+        ("switch.headphones", "on", "Headphones"),
+        ("switch.250w_prime_charger_usb_c_port_1", "on", "USB-C Port 1"),
+        ("switch.unifi_network_ha", "on", "UniFi Network HA"),
+        ("switch.han_a_c_on", "on", "HAN A/C"),
+        ("switch.aqara_hub_e1_4e55_pairing_mode", "on", "Aqara Hub pairing"),
+        ("switch.sound_sensor_tv_sound_detection", "on", "Sound sensor"),
+        ("switch.light_sensor_tv", "on", "Light sensor TV"),
+    )
+    calls = _patch_client(monkeypatch, light_states, switch_states=switch_states)
+    result = await lights_control.lights_off()
+
+    turned_off_ids = {t["entity_id"] for t in result["turned_off"]}
+    # All real lights + all wall switches + office_light must be off
+    assert turned_off_ids == {
+        "light.lightbulb",
+        "light.hue_play_gradient_lightstrip_1",
+        "switch.wall_switch",
+        "switch.wall_switch_2",
+        "switch.wall_switch_3",
+        "switch.office_light",
+    }
+    # And the non-light switches MUST stay untouched
+    untouched = {
+        "switch.pc_power",
+        "switch.headphones",
+        "switch.250w_prime_charger_usb_c_port_1",
+        "switch.unifi_network_ha",
+        "switch.han_a_c_on",
+        "switch.aqara_hub_e1_4e55_pairing_mode",
+        "switch.sound_sensor_tv_sound_detection",
+        "switch.light_sensor_tv",
+    }
+    assert untouched.isdisjoint(turned_off_ids)
+    # Service calls dispatch to the correct domain per entity
+    light_calls = [c for c in calls if c["data"]["entity_id"].startswith("light.")]
+    switch_calls = [c for c in calls if c["data"]["entity_id"].startswith("switch.")]
+    assert all(c["domain"] == "light" for c in light_calls)
+    assert all(c["domain"] == "switch" for c in switch_calls)
+    assert len(light_calls) == 2
+    assert len(switch_calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_lights_off_include_switches_false_restricts_to_light_domain(
+    monkeypatch,
+) -> None:
+    """Caller opting out (include_switches=False) gets the old behaviour."""
+    light_states = _ha_states(("light.lightbulb", "on", "Bulb"))
+    switch_states = _ha_states(("switch.wall_switch", "on", "Wall switch"))
+    calls = _patch_client(monkeypatch, light_states, switch_states=switch_states)
+    result = await lights_control.lights_off(include_switches=False)
+
+    assert {t["entity_id"] for t in result["turned_off"]} == {"light.lightbulb"}
+    assert all(c["domain"] == "light" for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_lights_on_does_not_pass_brightness_to_switch_domain(
+    monkeypatch,
+) -> None:
+    """switch.turn_on has no brightness parameter — must not be sent."""
+    light_states = _ha_states(("light.bulb", "off", "Bulb"))
+    switch_states = _ha_states(("switch.wall_switch", "off", "Wall switch"))
+    calls = _patch_client(monkeypatch, light_states, switch_states=switch_states)
+    result = await lights_control.lights_on(brightness=180)
+
+    assert result["ok"] is True
+    light_call = next(c for c in calls if c["domain"] == "light")
+    switch_call = next(c for c in calls if c["domain"] == "switch")
+    assert light_call["data"].get("brightness") == 180
+    assert "brightness" not in switch_call["data"]
+
+
+def test_is_light_switch_excludes_non_light_switches() -> None:
+    """Hard-coded test against the user's real switch entities so the
+    keyword-list never regresses."""
+    # SHOULD be detected as light switches
+    for eid, name in [
+        ("switch.wall_switch", "Wall switch"),
+        ("switch.wall_switch_3", "Wall switch"),
+        ("switch.office_light", "Office light"),
+        ("switch.lamp_corner", "Corner Lamp"),
+        ("switch.kitchen_ceiling_led", "Kitchen Ceiling LED"),
+    ]:
+        assert lights_control._is_light_switch(eid, name), (
+            f"{eid} should be a light switch"
+        )
+    # SHOULD NOT be detected as light switches
+    for eid, name in [
+        ("switch.pc_power", "PC Power"),
+        ("switch.headphones", "Headphones"),
+        ("switch.speakers", "Speakers"),
+        ("switch.250w_prime_charger_usb_c_port_1", "USB-C Port 1"),
+        ("switch.unifi_network_ha", "UniFi Network HA"),
+        ("switch.han_a_c_on", "HAN A/C"),
+        ("switch.aqara_hub_e1_4e55_pairing_mode", "Aqara Hub pairing"),
+        ("switch.sound_sensor_tv_sound_detection", "Sound sensor"),
+        ("switch.light_sensor_tv", "Light sensor TV"),
+        ("switch.washer_bubble_soak", "Bubble Soak"),
+        ("switch.office_thermostat", "Office Thermostat"),
+    ]:
+        assert not lights_control._is_light_switch(eid, name), (
+            f"{eid} should NOT be a light switch"
+        )
