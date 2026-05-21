@@ -158,7 +158,12 @@ jobs:
   - id: dashboard_summarize_activity
     description: "Refresh the dashboard activity narrative"
     trigger: interval
-    interval: { seconds: 60 }
+    # Was every 60s — 1,440 chat calls/day on qwen3:8b just for the
+    # 'Recent activity' tile. That's ~88% of all chat traffic and ~72
+    # min of iGPU time per day. Humans don't watch the dashboard at
+    # 60s resolution; 5 min matches the alert summary cadence and
+    # cuts LLM load by ~80% with no perceptible UX change.
+    interval: { minutes: 5 }
     dispatch:
       agent: dashboard_curator
       capability: summarize_activity
