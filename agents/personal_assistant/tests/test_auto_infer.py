@@ -710,3 +710,31 @@ def test_context_for_infer_converts_envelope_ts_to_local(monkeypatch) -> None:
     assert "10:53" in ctx
     assert "Asia/Dubai" in ctx
     assert "all timestamps below are LOCAL time" in ctx
+
+
+# ── Regression: _hh_mm must render in the configured local tz ───────
+
+
+def test_hh_mm_converts_utc_to_local_tz(monkeypatch: Any) -> None:
+    """User saw 'lightbulb turned on at 06:53:14' when actual local was
+    10:53 (UTC+4). _hh_mm must convert to the configured TZ before
+    formatting — never render raw UTC as if it were local time."""
+    monkeypatch.setenv("TZ", "Asia/Dubai")  # UTC+4 year-round
+    # 06:53 UTC = 10:53 in Dubai
+    assert auto_infer._hh_mm("2026-05-21T06:53:14+00:00") == "10:53"
+    # Trailing-Z form must also work
+    assert auto_infer._hh_mm("2026-05-21T06:53:14Z") == "10:53"
+
+
+def test_hh_mm_respects_user_tz_fallback(monkeypatch: Any) -> None:
+    """When TZ env is unset USER_TZ is the fallback."""
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setenv("USER_TZ", "America/New_York")
+    # 14:00 UTC = 10:00 EDT in May
+    assert auto_infer._hh_mm("2026-05-21T14:00:00Z") == "10:00"
+
+
+def test_hh_mm_returns_empty_on_bad_input() -> None:
+    assert auto_infer._hh_mm(None) == ""
+    assert auto_infer._hh_mm(12345) == ""
+    assert auto_infer._hh_mm("not an iso timestamp") == ""
