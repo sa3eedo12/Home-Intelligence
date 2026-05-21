@@ -56,9 +56,14 @@
           <li class="proposal-card routine-card" data-routine-id="{{ r.id }}">
             <div class="proposal-body">
               <h3 class="proposal-title">{{ r.name }}</h3>
-              {% set steps = r.get('steps') or {} %}
-              {% set attrs = (steps.get('attributes') if steps else {}) or {} %}
-              {% set step_list = (steps.get('steps') if steps else []) or [] %}
+              {% set steps_raw = r.get('steps') %}
+              {% if steps_raw is mapping %}
+                {% set steps_doc = steps_raw %}
+              {% else %}
+                {% set steps_doc = {'steps': steps_raw or [], 'attributes': {}} %}
+              {% endif %}
+              {% set attrs = (steps_doc.get('attributes') or {}) if steps_doc is mapping else {} %}
+              {% set step_list = (steps_doc.get('steps') or []) if steps_doc is mapping else [] %}
               <div class="proposal-meta muted">
                 {% if attrs.get('confidence') is not none %}
                   Confidence <strong>{{ '%.0f'|format((attrs.get('confidence') or 0) * 100) }}%</strong>
@@ -73,12 +78,19 @@
                   · confirmed <strong>{{ r.get('confirmed_count') }}</strong>/3
                 {% endif %}
               </div>
-              {% if step_list|length >= 2 %}
+              {% if step_list|length >= 2
+                    and step_list[0] is mapping and step_list[1] is mapping
+                    and step_list[0].get('trigger') and step_list[1].get('action') %}
               <p class="proposal-detail">
-                <code>{{ step_list[0].get('trigger', '?') }}</code>
+                <code>{{ step_list[0].get('trigger') }}</code>
                 →
-                <code>{{ step_list[1].get('action', '?') }}</code>
+                <code>{{ step_list[1].get('action') }}</code>
               </p>
+              {% elif step_list %}
+              <details class="proposal-detail">
+                <summary class="muted">Steps</summary>
+                <pre>{{ step_list }}</pre>
+              </details>
               {% endif %}
               {% if r.get('promoted_at') %}
                 <p class="muted">Promoted {{ r.get('promoted_at') }}</p>
