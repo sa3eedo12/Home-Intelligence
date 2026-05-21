@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Routines · Home Intelligence</title>
+  <link rel="stylesheet" href="/static/_design.css">
+  <link rel="stylesheet" href="/static/morning_brief.css">
+  <link rel="stylesheet" href="/static/proposals.css">
+  <script src="/static/_app.js" defer></script>
+  <script src="/static/routines.js" defer></script>
+</head>
+<body class="page-body proposals-body">
+  <header class="brief-topbar">
+    <a href="/dashboard" class="back-link">← Dashboard</a>
+    <h1>🔁 Routines</h1>
+    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
+  </header>
+
+  <main class="brief-shell">
+    <section class="proposals-controls card">
+      <p class="card-intro">
+        Patterns the system noticed in your events. Confirm three times to
+        promote a suggestion to an active routine; dismiss to hide it.
+      </p>
+      <div class="status-pills" role="tablist" aria-label="Filter by status">
+        <button type="button" class="status-pill is-active" data-status="suggested" role="tab">
+          Suggested <span class="pill-count">{{ stats.suggested }}</span>
+        </button>
+        <button type="button" class="status-pill" data-status="active" role="tab">
+          Active <span class="pill-count">{{ stats.active }}</span>
+        </button>
+        <button type="button" class="status-pill" data-status="dismissed" role="tab">
+          Dismissed <span class="pill-count">{{ stats.dismissed }}</span>
+        </button>
+      </div>
+    </section>
+
+    {% for group_key, group_label, group_items in [
+        ('suggested', 'Suggested', suggested),
+        ('active', 'Active', active),
+        ('dismissed', 'Dismissed', dismissed),
+      ] %}
+    <section class="brief-section card routines-group" data-status="{{ group_key }}"
+             {% if group_key != 'suggested' %}hidden{% endif %}>
+      <div class="section-header">
+        <h2>{{ group_label }}</h2>
+        <span class="muted">{{ group_items|length }} item{{ '' if group_items|length == 1 else 's' }}</span>
+      </div>
+
+      {% if not group_items %}
+        <p class="empty-state">No {{ group_label|lower }} routines yet.</p>
+      {% else %}
+        <ul class="proposals-list">
+          {% for r in group_items %}
+          <li class="proposal-card routine-card" data-routine-id="{{ r.id }}">
+            <div class="proposal-body">
+              <h3 class="proposal-title">{{ r.name }}</h3>
+              {% set steps = r.get('steps') or {} %}
+              {% set attrs = (steps.get('attributes') if steps else {}) or {} %}
+              {% set step_list = (steps.get('steps') if steps else []) or [] %}
+              <div class="proposal-meta muted">
+                {% if attrs.get('confidence') is not none %}
+                  Confidence <strong>{{ '%.0f'|format((attrs.get('confidence') or 0) * 100) }}%</strong>
+                {% endif %}
+                {% if attrs.get('pair_count') is not none %}
+                  · seen <strong>{{ attrs.get('pair_count') }}</strong>×
+                {% endif %}
+                {% if attrs.get('window_minutes') is not none %}
+                  · within <strong>{{ attrs.get('window_minutes') }} min</strong>
+                {% endif %}
+                {% if r.get('confirmed_count') %}
+                  · confirmed <strong>{{ r.get('confirmed_count') }}</strong>/3
+                {% endif %}
+              </div>
+              {% if step_list|length >= 2 %}
+              <p class="proposal-detail">
+                <code>{{ step_list[0].get('trigger', '?') }}</code>
+                →
+                <code>{{ step_list[1].get('action', '?') }}</code>
+              </p>
+              {% endif %}
+              {% if r.get('promoted_at') %}
+                <p class="muted">Promoted {{ r.get('promoted_at') }}</p>
+              {% elif r.get('dismissed_at') %}
+                <p class="muted">Dismissed {{ r.get('dismissed_at') }}</p>
+              {% else %}
+                <p class="muted">Suggested {{ r.get('created_at') }}</p>
+              {% endif %}
+            </div>
+            <div class="proposal-actions">
+              {% if group_key == 'suggested' %}
+                <button type="button" class="btn btn-primary btn-sm routine-confirm">Confirm</button>
+                <button type="button" class="btn btn-secondary btn-sm routine-dismiss">Dismiss</button>
+              {% elif group_key == 'dismissed' %}
+                <button type="button" class="btn btn-ghost btn-sm routine-override">Reconsider</button>
+              {% else %}
+                <button type="button" class="btn btn-secondary btn-sm routine-dismiss">Dismiss</button>
+              {% endif %}
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+    {% endfor %}
+  </main>
+</body>
+</html>

@@ -228,3 +228,114 @@ def test_dashboard_survives_count_proposals_error() -> None:
         resp = client.get("/dashboard")
     assert resp.status_code == 200
     assert "nav-badge" not in resp.text
+
+
+def test_dashboard_renders_routines_nav_badge_with_suggested_count() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    app = FastAPI()
+    app.include_router(router)
+
+    async def _status() -> dict:
+        return _minimal_status()
+
+    app.state.status_provider = _status
+    app.state.routine_lifecycle_store = SimpleNamespace(
+        stats=AsyncMock(return_value={"suggested": 4, "active": 1, "dismissed": 0}),
+    )
+
+    with TestClient(app) as client:
+        resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    assert 'href="/dashboard/routines"' in resp.text
+    assert 'aria-label="4 suggested"' in resp.text
+    assert ">4<" in resp.text
+
+
+def test_dashboard_routines_page_renders_three_buckets() -> None:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    app = FastAPI()
+    app.include_router(router)
+
+    def _row(rid, status, name="x -> y"):
+        return {
+            "id": rid,
+            "name": name,
+            "status": status,
+            "source": "routine_sequence_miner",
+            "confirmed_count": 2 if status == "suggested" else 3,
+            "steps": '{"steps":[{"trigger":"x.a"},{"action":"y.b"}],'
+                     '"attributes":{"confidence":0.85,"pair_count":7,'
+                     '"window_minutes":30}}',
+            "schedule": None,
+            "created_at": datetime(2026, 5, 21, tzinfo=UTC),
+            "updated_at": datetime(2026, 5, 21, tzinfo=UTC),
+            "promoted_at": datetime(2026, 5, 21, tzinfo=UTC) if status == "active" else None,
+            "dismissed_at": datetime(2026, 5, 21, tzinfo=UTC) if status == "dismissed" else None,
+        }
+
+    app.state.routine_lifecycle_store = SimpleNamespace(
+        list_suggested=AsyncMock(return_value=[_row(1, "suggested", "A -> B")]),
+        list_active=AsyncMock(return_value=[_row(2, "active", "C -> D")]),
+        list_dismissed=AsyncMock(return_value=[_row(3, "dismissed", "E -> F")]),
+        stats=AsyncMock(return_value={"suggested": 1, "active": 1, "dismissed": 1}),
+    )
+
+    with TestClient(app) as client:
+        resp = client.get("/dashboard/routines")
+    assert resp.status_code == 200
+    text = resp.text
+    # All three routine names render
+    assert "A -&gt; B" in text or "A -> B" in text
+    assert "C -&gt; D" in text or "C -> D" in text
+    assert "E -&gt; F" in text or "E -> F" in text
+    # Action buttons present for each bucket
+    assert "routine-confirm" in text
+    assert "routine-dismiss" in text
+    assert "routine-override" in text
+    # Confidence rendered (0.85 -> 85%)
+    assert "85%" in text
+
+
+def test_dashboard_routines_page_handles_empty() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.routine_lifecycle_store = SimpleNamespace(
+        list_suggested=AsyncMock(return_value=[]),
+        list_active=AsyncMock(return_value=[]),
+        list_dismissed=AsyncMock(return_value=[]),
+        stats=AsyncMock(return_value={"suggested": 0, "active": 0, "dismissed": 0}),
+    )
+    with TestClient(app) as client:
+        resp = client.get("/dashboard/routines")
+    assert resp.status_code == 200
+    assert "No suggested routines yet" in resp.text
+
+
+def test_dashboard_survives_routine_stats_error() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    app = FastAPI()
+    app.include_router(router)
+
+    async def _status() -> dict:
+        return _minimal_status()
+
+    app.state.status_provider = _status
+    app.state.routine_lifecycle_store = SimpleNamespace(
+        stats=AsyncMock(side_effect=Exception("boom")),
+    )
+
+    with TestClient(app) as client:
+        resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    # No badge when stats fail
+    assert 'aria-label="0 suggested"' not in resp.text

@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from home_agents_sdk.health_store import HealthStore
 from home_agents_sdk.reflection_store import ReflectionStore
+from home_agents_sdk.routine_lifecycle_store import RoutineLifecycleStore
 from home_agents_sdk.telemetry import get_logger
 
 from .admin import build_onboarding_state
@@ -688,12 +689,19 @@ async def dashboard(request: Request) -> HTMLResponse:
             pending_proposals = await store.count_proposals(status="pending")
         except Exception:
             pending_proposals = 0
+    suggested_routines = 0
+    try:
+        stats = await _routine_lifecycle_store(request).stats()
+        suggested_routines = int(stats.get("suggested") or 0)
+    except Exception:
+        suggested_routines = 0
     return templates.TemplateResponse(
         request=request,
         name="dashboard.html.j2",
         context={
             "status": await _status(request),
             "pending_proposals": pending_proposals,
+            "suggested_routines": suggested_routines,
         },
     )
 
@@ -818,5 +826,56 @@ async def proposals_page(
             "proposals": proposals,
             "counts": counts,
             "initial_status_filter": status or "pending",
+        },
+    )
+
+
+def _routine_lifecycle_store(request: Request) -> RoutineLifecycleStore:
+    store = getattr(request.app.state, "routine_lifecycle_store", None)
+    if store is not None:
+        return store
+    return RoutineLifecycleStore(getattr(request.app.state, "pool", None))
+
+
+def _format_routine_ts(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    return str(value)
+
+
+def _prep_routine(row: dict[str, Any]) -> dict[str, Any]:
+    """Tidy a routines row for the Jinja template — decode steps jsonb
+    and stringify the timestamps."""
+    out = dict(row)
+    steps = out.get("steps")
+    if isinstance(steps, str):
+        out["steps"] = decode_json(steps, {})
+    for ts_key in ("created_at", "updated_at", "promoted_at", "dismissed_at"):
+        if ts_key in out:
+            out[ts_key] = _format_routine_ts(out.get(ts_key))
+    return out
+
+
+@router.get("/dashboard/routines", response_class=HTMLResponse)
+async def routines_page(request: Request) -> HTMLResponse:
+    """Suggested / Active / Dismissed routines with confirm + dismiss
+    buttons. Phase 6 of the routine-inference roadmap."""
+    store = _routine_lifecycle_store(request)
+    suggested, active, dismissed, stats = (
+        await store.list_suggested(),
+        await store.list_active(),
+        await store.list_dismissed(),
+        await store.stats(),
+    )
+    return templates.TemplateResponse(
+        request=request,
+        name="routines.html.j2",
+        context={
+            "suggested": [_prep_routine(r) for r in suggested],
+            "active": [_prep_routine(r) for r in active],
+            "dismissed": [_prep_routine(r) for r in dismissed],
+            "stats": stats,
         },
     )
