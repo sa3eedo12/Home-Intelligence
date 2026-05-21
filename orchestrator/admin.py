@@ -15,6 +15,7 @@ from fastapi.responses import PlainTextResponse
 from home_agents_sdk.event_log import EventLogStore
 from home_agents_sdk.health_store import HealthStore
 from home_agents_sdk.reflection_store import ReflectionStore
+from home_agents_sdk.routine_lifecycle_store import RoutineLifecycleStore
 from home_agents_sdk.telemetry import get_logger
 
 from .data_science.common import current_embedding_model, decode_json
@@ -2015,3 +2016,109 @@ async def observations_recent(request: Request) -> dict[str, Any]:
         }
     items = [_event_log_row(row) for row in rows]
     return {"ok": True, "items": items, "count": len(items), "limit": limit}
+
+
+def _routine_lifecycle_store(request: Request) -> RoutineLifecycleStore:
+    store = getattr(request.app.state, "routine_lifecycle_store", None)
+    if store is not None:
+        return store
+    return RoutineLifecycleStore(getattr(request.app.state, "pool", None))
+
+
+@router.get("/admin/routines")
+async def list_routines(request: Request) -> dict[str, Any]:
+    """List all routines grouped by lifecycle state. Backs the Phase 6
+    dashboard tile."""
+    store = _routine_lifecycle_store(request)
+    suggested, active, dismissed, stats = (
+        await store.list_suggested(),
+        await store.list_active(),
+        await store.list_dismissed(),
+        await store.stats(),
+    )
+    return {
+        "ok": True,
+        "stats": stats,
+        "suggested": [_serialize_routine(r) for r in suggested],
+        "active": [_serialize_routine(r) for r in active],
+        "dismissed": [_serialize_routine(r) for r in dismissed],
+    }
+
+
+@router.get("/admin/routines/{routine_id}/history")
+async def routine_history(request: Request, routine_id: int) -> dict[str, Any]:
+    store = _routine_lifecycle_store(request)
+    rows = await store.history(routine_id)
+    return {
+        "ok": True,
+        "routine_id": routine_id,
+        "history": [
+            {
+                "id": r["id"],
+                "action": r["action"],
+                "source": r.get("source"),
+                "note": r.get("note"),
+                "ts": _format_timestamp(r.get("created_at")),
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.post("/admin/routines/{routine_id}/{action}")
+async def routine_action(
+    request: Request,
+    routine_id: int,
+    action: str,
+) -> dict[str, Any]:
+    """Record a user action on a routine. Promotion logic lives in the
+    store; this just surfaces the new state to the caller so the
+    dashboard can re-render without a full reload."""
+    if action not in {"confirm", "dismiss", "override"}:
+        raise HTTPException(status_code=400, detail="invalid_action")
+    store = _routine_lifecycle_store(request)
+    body: dict[str, Any] = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    note = body.get("note") if isinstance(body, dict) else None
+    source = body.get("source") if isinstance(body, dict) else None
+    if not isinstance(source, str):
+        source = "admin"
+    if not isinstance(note, str):
+        note = None
+    try:
+        updated = await store.record_action(
+            routine_id, action, source=source, note=note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="routine_not_found")
+    return {"ok": True, "routine": _serialize_routine(updated)}
+
+
+def _serialize_routine(row: dict[str, Any]) -> dict[str, Any]:
+    """Trim a routines row for the JSON response — JSON-friendly
+    timestamps + decoded steps."""
+    out: dict[str, Any] = {}
+    for k in (
+        "id", "name", "status", "source", "confirmed_count",
+    ):
+        if k in row:
+            out[k] = row[k]
+    for ts_key in ("created_at", "updated_at", "promoted_at", "dismissed_at"):
+        if ts_key in row:
+            out[ts_key] = _format_timestamp(row.get(ts_key))
+    steps = row.get("steps")
+    if isinstance(steps, str):
+        out["steps"] = decode_json(steps, {})
+    elif isinstance(steps, dict):
+        out["steps"] = steps
+    schedule = row.get("schedule")
+    if isinstance(schedule, str):
+        out["schedule"] = decode_json(schedule, None)
+    elif isinstance(schedule, dict):
+        out["schedule"] = schedule
+    return out

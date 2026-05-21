@@ -266,19 +266,31 @@ class RoutineSequenceMiner(SingleFlightJob):
     async def _upsert_routine(self, c: SequenceCandidate) -> bool:
         """Insert or refresh the routines row. Stores the proposal as a
         'suggested' routine; Phase 5 promotion logic decides whether to
-        auto-execute it."""
+        auto-execute it.
+
+        Skip routines the user has explicitly dismissed — re-suggesting
+        them would be obnoxious. They live on as dismissed rows so we
+        can detect repeat-suggestion attempts.
+        """
         steps_with_attrs = {
             "steps": c.to_steps(),
             "attributes": c.to_attributes(),
         }
         async with self.pool.acquire() as conn:
+            existing_status = await conn.fetchval(
+                "SELECT status FROM routines WHERE name = $1",
+                c.name,
+            )
+            if existing_status == "dismissed":
+                return False
             status = await conn.execute(
                 """
-                INSERT INTO routines(name, steps, schedule, source)
-                VALUES ($1, $2::jsonb, NULL, 'routine_sequence_miner')
+                INSERT INTO routines(name, steps, schedule, source, status)
+                VALUES ($1, $2::jsonb, NULL, 'routine_sequence_miner', 'suggested')
                 ON CONFLICT (name) DO UPDATE SET
                     steps = EXCLUDED.steps,
-                    source = COALESCE(EXCLUDED.source, routines.source)
+                    source = COALESCE(EXCLUDED.source, routines.source),
+                    updated_at = now()
                 """,
                 c.name,
                 json.dumps(steps_with_attrs, default=str),

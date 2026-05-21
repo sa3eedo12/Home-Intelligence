@@ -14,10 +14,10 @@ from tests.data_science_fakes import FakePool
 
 
 class Conn:
-    def __init__(self, rows: list[dict]) -> None:
+    def __init__(self, rows: list[dict], *, existing_status: str | None = None) -> None:
         self.fetch = AsyncMock(return_value=rows)
         self.fetchrow = AsyncMock(return_value=None)
-        self.fetchval = AsyncMock(return_value=None)
+        self.fetchval = AsyncMock(return_value=existing_status)
         self.execute = AsyncMock(return_value="INSERT 0 1")
 
 
@@ -231,6 +231,40 @@ def test_candidate_serialization_shape() -> None:
 
 
 # ── Noise/housekeeping filter ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_skips_routines_user_already_dismissed() -> None:
+    """If the routines row exists with status='dismissed', re-mining
+    must not resurrect it as 'suggested' — user said no."""
+    base = datetime(2026, 5, 11, 8, 0, tzinfo=UTC)
+    rows: list[dict] = []
+    eid = 0
+    for day in range(6):
+        eid += 1
+        rows.append(_row(eid, base + timedelta(days=day), "washer", "cycle_complete"))
+        eid += 1
+        rows.append(_row(
+            eid, base + timedelta(days=day, minutes=10), "dryer", "start"
+        ))
+    for i in range(6):
+        eid += 1
+        rows.append(_row(eid, base + timedelta(days=10 + i), "dryer", "start"))
+
+    conn = Conn(rows, existing_status="dismissed")
+    miner = RoutineSequenceMiner(
+        pool=FakePool(conn),
+        window_minutes=30,
+        min_support_a=5,
+        min_pair_count=4,
+        min_confidence=0.50,
+        min_lift=1.5,
+    )
+    result = await miner.run(window_days=30)
+    assert result["stored"] == 0
+    # Candidate found, but INSERT never issued because of dismissed status.
+    assert len(result["candidates"]) == 1
+    conn.execute.assert_not_called()
 
 
 @pytest.mark.asyncio

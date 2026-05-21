@@ -21,6 +21,7 @@ from home_agents_sdk.health_store import HealthStore
 from home_agents_sdk.knowledge_graph import KnowledgeGraph
 from home_agents_sdk.knowledge_graph_seeder import seed_from_baseline as kg_seed_from_baseline
 from home_agents_sdk.knowledge_graph_store import KnowledgeGraphStore
+from home_agents_sdk.routine_lifecycle_store import RoutineLifecycleStore
 from home_agents_sdk.llm import OllamaClient
 from home_agents_sdk.npu import NPUClient
 from home_agents_sdk.gap_store import GapStore
@@ -852,6 +853,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.reembed = reembed
     app.state.pattern_miner = pattern_miner
     app.state.routine_sequence_miner = routine_sequence_miner
+    app.state.routine_lifecycle_store = RoutineLifecycleStore(pool)
     app.state.reports = reports
     app.state.maintenance = maintenance
     app.state.lora_training = lora_training
