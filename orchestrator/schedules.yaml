@@ -18,6 +18,12 @@ jobs:
     cron: { hour: 3, minute: 45 }
     dispatch: { agent: __orchestrator__, capability: data_science.pattern_mining, inputs: {} }
 
+  - id: nightly_routine_sequence_mining
+    description: "Detect A->B-within-W event sequences for routine inference"
+    trigger: cron
+    cron: { hour: 3, minute: 50 }
+    dispatch: { agent: __orchestrator__, capability: data_science.routine_sequence_mining, inputs: {} }
+
   - id: weekly_reembed
     trigger: cron
     cron: { day_of_week: "sun", hour: 4, minute: 0 }

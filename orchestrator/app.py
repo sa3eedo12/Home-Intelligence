@@ -419,6 +419,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         knowledge_graph=knowledge_graph,
         event_log_store=event_log_store,
     )
+    from .data_science.routine_sequence_miner import RoutineSequenceMiner
+    routine_sequence_miner = RoutineSequenceMiner(
+        pool=pool,
+        event_log_store=event_log_store,
+    )
     reports = ReportGenerator(pool=pool, llm=llm, event_log_store=event_log_store)
     maintenance = MaintenanceJob(pool=pool, redis=redis, event_log_store=event_log_store)
     lora_training = LoraTrainingJob(pool=pool, llm=llm, event_log_store=event_log_store)
@@ -563,6 +568,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async def _run_pattern_mining(_inputs: dict[str, Any]) -> dict[str, Any]:
         return await pattern_miner.run()
 
+    async def _run_routine_sequence_mining(_inputs: dict[str, Any]) -> dict[str, Any]:
+        return await routine_sequence_miner.run()
+
     async def _run_reembed(_inputs: dict[str, Any]) -> dict[str, Any]:
         return await reembed.run()
 
@@ -618,6 +626,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "morning_brief.send": _send_reflection_digest,
             "data_science.maintenance": _run_maintenance,
             "data_science.pattern_mining": _run_pattern_mining,
+            "data_science.routine_sequence_mining": _run_routine_sequence_mining,
             "data_science.reembed": _run_reembed,
             "data_science.weekly_report": _run_weekly_report,
             "data_science.monthly_report": _run_monthly_report,
@@ -830,6 +839,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.embedder = embedder
     app.state.reembed = reembed
     app.state.pattern_miner = pattern_miner
+    app.state.routine_sequence_miner = routine_sequence_miner
     app.state.reports = reports
     app.state.maintenance = maintenance
     app.state.lora_training = lora_training
