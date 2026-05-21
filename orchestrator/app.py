@@ -593,6 +593,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         sent = await emit_anomalies(anomalies=anomalies, redis=redis)
         return {"ok": True, "detected": len(anomalies), "emitted": sent}
 
+    async def _run_missing_routine_check(_inputs: dict) -> dict:
+        from .anomaly_detector import emit_anomalies
+        from .missing_routine_detector import detect_missing_routines
+
+        anomalies = await detect_missing_routines(
+            pool=pool,
+            user_tz_name=os.environ.get("USER_TZ", "Asia/Dubai"),
+        )
+        sent = await emit_anomalies(anomalies=anomalies, redis=redis)
+        return {"ok": True, "detected": len(anomalies), "emitted": sent}
+
     async def _run_proactive_scan(_inputs: dict[str, Any]) -> dict[str, Any]:
         from home_agents_sdk.auto_inferences_store import AutoInferencesStore
 
@@ -632,6 +643,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "data_science.monthly_report": _run_monthly_report,
             "data_science.lora_training": _run_lora_training,
             "orchestrator.anomaly_check": _run_anomaly_check,
+            "orchestrator.missing_routine_check": _run_missing_routine_check,
             "orchestrator.proactive_scan": _run_proactive_scan,
             "orchestrator.pre_bedtime_scan": _run_pre_bedtime_scan,
         },
