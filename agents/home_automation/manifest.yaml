@@ -1,325 +1,322 @@
 agent: home_automation
 version: 0.2.0
-description: Controls Home Assistant entities, monitors anomalies, suggests automations, and analyzes Ring doorbell events via Scrypted.
+description: Controls Home Assistant entities, monitors anomalies, suggests automations, and analyzes Ring doorbell events
+  via Scrypted.
 defaults:
   llm: qwen3:8b
   timeout_s: 30
 capabilities:
-  - id: list_entities
-    description: List Home Assistant entities grouped by area with friendly names. Hides unavailable entities by default; reports how many were hidden so the user can ask to see them. Filterable by domain (light, switch, sensor, etc.).
-    inputs: { domain: "string?", include_unavailable: "boolean?" }
-    side_effects: false
-    cost: low
-  - id: get_entity_state
-    description: Return the current state and attributes of a Home Assistant entity by entity_id.
-    inputs: { entity_id: string }
-    side_effects: false
-    cost: low
-  - id: search_entities
-    description: >-
-      Substring search across HA entities by entity_id AND friendly_name.
-      Use this when the user mentions a colloquial name ("car", "lock",
-      "vacuum", "blinds") and you need to find the matching entity_id
-      without scanning hundreds of entities. Much higher signal-per-token
-      than list_entities for discovery. Returns a focused list with
-      domain so the escalator can decide next-step tool calls.
-    inputs:
-      query: string
-      domain: "string?"
-      include_unavailable: "boolean?"
-      limit: "integer?"
-    side_effects: false
-    cost: low
-  - id: call_service
-    description: Call a Home Assistant service such as light.turn_on or scene.turn_on. Side-effecting. Returns affected entity names when entity targets are provided.
-    inputs: { domain: string, service: string, data: object }
-    side_effects: true
-    require_confirmation: false
-    cost: low
-  - id: call_service_in_area
-    description: Resolve a Home Assistant area name (for example kitchen), find all entities in that area for the requested domain, and call the service on each matching entity.
-    inputs: { area: string, domain: string, service: string, data: "object?" }
-    side_effects: true
-    require_confirmation: false
-    cost: low
-  - id: list_areas
-    description: List Home Assistant areas from the area registry so dashboards and LLM routing can target rooms by name.
-    side_effects: false
-    cost: low
-  - id: set_scene
-    description: Activate a Home Assistant scene by friendly name.
-    inputs: { scene_name: string }
-    side_effects: true
-    cost: low
-  - id: list_scenes
-    description: List all available scenes.
-    side_effects: false
-    cost: low
-  - id: doorbell.snapshot
-    description: Return the latest snapshot from the Ring doorbell (via Scrypted/HA camera entity).
-    inputs: { entity_id: "string?" }
-    side_effects: false
-    cost: low
-  - id: doorbell.summarize_event
-    description: On a doorbell ring or motion event, fetch the latest snapshot, run NPU vision (yolov8n) for person/package/vehicle detection, and return a short text summary plus structured detections.
-    inputs: { entity_id: "string?", event_type: string }
-    side_effects: false
-    cost: medium
-  - id: doorbell.last_visitor
-    description: Summarize the most recent visitor event in the last N hours.
-    inputs: { hours: integer }
-    side_effects: false
-    cost: medium
-  - id: anomaly.scan
-    description: Run a z-score scan over the last 24h of state changes to detect anomalous device behavior.
-    inputs: { window_hours: integer }
-    side_effects: false
-    cost: medium
-  - id: suggest_automation
-    description: Analyze recent state changes and propose new Home Assistant automations as YAML.
-    inputs: { window_hours: integer }
-    side_effects: false
-    cost: high
-    llm: qwen3.6:35b-a3b
-  - id: ha.introspect
-    description: >
-      Discover all capabilities exposed by the Home Assistant MCP server, list existing
-      automations, count entities by domain, and surface configuration improvement
-      suggestions. Falls back gracefully when the mcp_server integration is not enabled.
-    inputs: {}
-    side_effects: false
-    cost: medium
-  - id: recent_appliance_activity
-    description: >
-      Report recent state and program/cycle attributes for a household appliance
-      (washer, dryer, dishwasher, oven, fridge, coffee machine, etc.). Returns
-      the current state, recent state changes, brand-aware friendly summaries, and
-      integration-specific highlights like 'program', 'remaining_time', 'finish_time'. Use this when the user asks
-      "what was the last wash cycle", "is the dishwasher done", "what's the oven set to".
-    inputs: { appliance: string, hours: "integer?" }
-    side_effects: false
-    cost: medium
-  - id: lights_off
-    description: >-
-      Turn off lights. By default acts on light.* entities only — what
-      HA considers a light. Wall-switched fixtures and smart plugs that
-      power lamps should be reclassified in HA itself ("Show as Light"
-      on the device) so they show up here automatically; that's more
-      reliable than our include_switches heuristic.
-      ALWAYS prefer passing area or entity_ids — calling it bare (with
-      no area and no entity_ids) tries to turn off every light in the
-      house, which is refused unless confirm_all=true is also passed.
-      For follow-ups like "turn it off" where the previous turn named
-      a room, re-pass that room's name as area — context is not
-      preserved across calls.
-    inputs:
-      entity_ids: "list[string]?"
-      area: "string?"
-      only_on: "boolean?"
-      include_switches: "boolean?"
-      confirm_all: "boolean?"
-    side_effects: true
-    cost: small
-  - id: lights_on
-    description: >-
-      Turn on lights with optional brightness 0-255. Same arg semantics
-      as lights_off — acts on light.* by default, with the confirm_all
-      safety guard for whole-house calls.
-    inputs:
-      entity_ids: "list[string]?"
-      area: "string?"
-      brightness: "integer?"
-      include_switches: "boolean?"
-      confirm_all: "boolean?"
-    side_effects: true
-    cost: small
-  - id: lights_status
-    description: >-
-      Return how many lights are currently on (excluding backlights/indicators)
-      and the friendly names. Cheap; safe to call from chat.
-    inputs: {}
-    side_effects: false
-    cost: small
-  - id: climate_status
-    description: >-
-      Report the state of thermostats / HVAC units (current and target
-      temperature, mode, supported modes). Pass area (e.g. "bedroom",
-      "living room", "office") to scope to one room. Use this for ANY
-      thermostat / temperature / AC / heating question — it correctly
-      resolves the area without needing the user to know entity_ids.
-    inputs:
-      area: "string?"
-    side_effects: false
-    cost: small
-  - id: climate_set_temperature
-    description: >-
-      Set the target temperature on a thermostat / AC / heater. Use this
-      for requests like "reduce the bedroom temperature to 22", "make
-      the living room cooler", "set the AC to 23". Always pass an area
-      (e.g. "bedroom") so the right physical thermostat is selected —
-      multiple rooms have a "Thermostat" so you cannot rely on entity_id
-      guessing. Returns the old vs new target and whether it was
-      clamped to the device's min/max range.
-    inputs:
-      temperature: number
-      area: "string?"
-      entity_id: "string?"
-    side_effects: true
-    require_confirmation: false
-    cost: small
-  - id: climate_set_mode
-    description: >-
-      Set HVAC mode (off, cool, heat, auto, dry, fan_only) on a
-      thermostat. Use for "turn off the bedroom AC", "switch the
-      living room to cool", "set heating in the office". Pass an area
-      so the right thermostat is targeted.
-    inputs:
-      mode: string
-      area: "string?"
-      entity_id: "string?"
-    side_effects: true
-    require_confirmation: false
-    cost: small
-  - id: cover_status
-    description: >-
-      List covers (curtains, blinds, roller shades) with state and
-      position. Pass area (e.g. "bedroom", "left") to narrow. Use
-      this for ANY curtain/blind question — it resolves area /
-      friendly_name without needing entity_id.
-    inputs:
-      area: "string?"
-    side_effects: false
-    cost: small
-  - id: cover_open
-    description: >-
-      Fully open a curtain / blind / roller shade. Pass area or
-      entity_id. Use for "open the left curtain", "raise the blinds".
-    inputs:
-      area: "string?"
-      entity_id: "string?"
-    side_effects: true
-    require_confirmation: false
-    cost: small
-  - id: cover_close
-    description: >-
-      Fully close a curtain / blind / roller shade. Use for
-      "close the right curtain", "lower the blinds".
-    inputs:
-      area: "string?"
-      entity_id: "string?"
-    side_effects: true
-    require_confirmation: false
-    cost: small
-  - id: cover_set_position
-    description: >-
-      Set a cover's position 0-100 percent (0=closed, 100=open).
-      Use for "open the left curtain halfway" -> position=50.
-    inputs:
-      position: integer
-      area: "string?"
-      entity_id: "string?"
-    side_effects: true
-    require_confirmation: false
-    cost: small
-  - id: lock_status
-    description: >-
-      Report the state of one or all locks (door locks, vehicle
-      locks). Use for "is the front door locked?", "is my car
-      locked?".
-    inputs:
-      area: "string?"
-      entity_id: "string?"
-    side_effects: false
-    cost: small
-  - id: lock_lock
-    description: >-
-      Lock a door or vehicle. Pass area or entity_id. Higher-stakes
-      than lights so require_confirmation defaults to true.
-    inputs:
-      area: "string?"
-      entity_id: "string?"
-    side_effects: true
-    require_confirmation: true
-    cost: small
-  - id: lock_unlock
-    description: >-
-      Unlock a door or vehicle. Always confirms before executing.
-    inputs:
-      area: "string?"
-      entity_id: "string?"
-    side_effects: true
-    require_confirmation: true
-    cost: small
-  - id: vacuum_status
-    description: >-
-      Report vacuum state, battery, fan_speed, and current activity.
-      Defaults to the only vacuum in the home. Use for "is the
-      Deebot charging?", "how much battery does the vacuum have?".
-    inputs:
-      entity_id: "string?"
-    side_effects: false
-    cost: small
-  - id: vacuum_start
-    description: >-
-      Start a cleaning cycle on the vacuum.
-    inputs:
-      entity_id: "string?"
-    side_effects: true
-    require_confirmation: false
-    cost: small
-  - id: vacuum_dock
-    description: >-
-      Send the vacuum back to its dock.
-    inputs:
-      entity_id: "string?"
-    side_effects: true
-    require_confirmation: false
-    cost: small
-  - id: ev_status
-    description: >-
-      Consolidated EV snapshot (BYD HAN today, any HA-exposed car
-      tomorrow): battery, range, charging, locked, doors/windows,
-      sentry, online, lock state, climate, location. Use for ANY
-      car question — "what's my car's battery?", "is the car
-      locked?", "is it charging?".
-    inputs:
-      vehicle: "string?"
-    side_effects: false
-    cost: small
-  - id: ev_start_charging
-    description: >-
-      Press the EV's start-charging button.
-    inputs:
-      vehicle: "string?"
-    side_effects: true
-    require_confirmation: false
-    cost: small
-  - id: ev_close_windows
-    description: >-
-      Press the EV's close-windows button.
-    inputs:
-      vehicle: "string?"
-    side_effects: true
-    require_confirmation: false
-    cost: small
-  - id: ev_flash_lights
-    description: >-
-      Flash the EV's lights — useful for locating in a car park.
-    inputs:
-      vehicle: "string?"
-    side_effects: true
-    require_confirmation: false
-    cost: small
-  - id: ev_find_car
-    description: >-
-      Trigger the EV's find-car action.
-    inputs:
-      vehicle: "string?"
-    side_effects: true
-    require_confirmation: false
-    cost: small
+- id: list_entities
+  description: List Home Assistant entities grouped by area with friendly names. Hides unavailable entities by default; reports
+    how many were hidden so the user can ask to see them. Filterable by domain (light, switch, sensor, etc.).
+  inputs:
+    domain: string?
+    include_unavailable: boolean?
+  side_effects: false
+  cost: low
+- id: get_entity_state
+  description: Return the current state and attributes of a Home Assistant entity by entity_id.
+  inputs:
+    entity_id: string
+  side_effects: false
+  cost: low
+- id: search_entities
+  description: Substring search across HA entities by entity_id AND friendly_name. Use this when the user mentions a colloquial
+    name ("car", "lock", "vacuum", "blinds") and you need to find the matching entity_id without scanning hundreds of entities.
+    Much higher signal-per-token than list_entities for discovery. Returns a focused list with domain so the escalator can
+    decide next-step tool calls.
+  inputs:
+    query: string
+    domain: string?
+    include_unavailable: boolean?
+    limit: integer?
+  side_effects: false
+  cost: low
+- id: call_service
+  description: Call a Home Assistant service such as light.turn_on or scene.turn_on. Side-effecting. Returns affected entity
+    names when entity targets are provided.
+  inputs:
+    domain: string
+    service: string
+    data: object
+  side_effects: true
+  require_confirmation: false
+  cost: low
+  chat_routable: false
+- id: call_service_in_area
+  description: Resolve a Home Assistant area name (for example kitchen), find all entities in that area for the requested
+    domain, and call the service on each matching entity.
+  inputs:
+    area: string
+    domain: string
+    service: string
+    data: object?
+  side_effects: true
+  require_confirmation: false
+  cost: low
+  chat_routable: false
+- id: list_areas
+  description: List Home Assistant areas from the area registry so dashboards and LLM routing can target rooms by name.
+  side_effects: false
+  cost: low
+- id: set_scene
+  description: Activate a Home Assistant scene by friendly name.
+  inputs:
+    scene_name: string
+  side_effects: true
+  cost: low
+  chat_routable: false
+- id: list_scenes
+  description: List all available scenes.
+  side_effects: false
+  cost: low
+- id: doorbell.snapshot
+  description: Return the latest snapshot from the Ring doorbell (via Scrypted/HA camera entity).
+  inputs:
+    entity_id: string?
+  side_effects: false
+  cost: low
+- id: doorbell.summarize_event
+  description: On a doorbell ring or motion event, fetch the latest snapshot, run NPU vision (yolov8n) for person/package/vehicle
+    detection, and return a short text summary plus structured detections.
+  inputs:
+    entity_id: string?
+    event_type: string
+  side_effects: false
+  cost: medium
+- id: doorbell.last_visitor
+  description: Summarize the most recent visitor event in the last N hours.
+  inputs:
+    hours: integer
+  side_effects: false
+  cost: medium
+- id: anomaly.scan
+  description: Run a z-score scan over the last 24h of state changes to detect anomalous device behavior.
+  inputs:
+    window_hours: integer
+  side_effects: false
+  cost: medium
+- id: suggest_automation
+  description: Analyze recent state changes and propose new Home Assistant automations as YAML.
+  inputs:
+    window_hours: integer
+  side_effects: false
+  cost: high
+  llm: qwen3.6:35b-a3b
+- id: ha.introspect
+  description: 'Discover all capabilities exposed by the Home Assistant MCP server, list existing automations, count entities
+    by domain, and surface configuration improvement suggestions. Falls back gracefully when the mcp_server integration is
+    not enabled.
+
+    '
+  inputs: {}
+  side_effects: false
+  cost: medium
+- id: recent_appliance_activity
+  description: 'Report recent state and program/cycle attributes for a household appliance (washer, dryer, dishwasher, oven,
+    fridge, coffee machine, etc.). Returns the current state, recent state changes, brand-aware friendly summaries, and integration-specific
+    highlights like ''program'', ''remaining_time'', ''finish_time''. Use this when the user asks "what was the last wash
+    cycle", "is the dishwasher done", "what''s the oven set to".
+
+    '
+  inputs:
+    appliance: string
+    hours: integer?
+  side_effects: false
+  cost: medium
+- id: lights_off
+  description: "Turn off lights. By default acts on light.* entities only \u2014 what HA considers a light. Wall-switched\
+    \ fixtures and smart plugs that power lamps should be reclassified in HA itself (\"Show as Light\" on the device) so they\
+    \ show up here automatically; that's more reliable than our include_switches heuristic. ALWAYS prefer passing area or\
+    \ entity_ids \u2014 calling it bare (with no area and no entity_ids) tries to turn off every light in the house, which\
+    \ is refused unless confirm_all=true is also passed. For follow-ups like \"turn it off\" where the previous turn named\
+    \ a room, re-pass that room's name as area \u2014 context is not preserved across calls."
+  inputs:
+    entity_ids: list[string]?
+    area: string?
+    only_on: boolean?
+    include_switches: boolean?
+    confirm_all: boolean?
+  side_effects: true
+  cost: small
+  chat_routable: false
+- id: lights_on
+  description: "Turn on lights with optional brightness 0-255. Same arg semantics as lights_off \u2014 acts on light.* by\
+    \ default, with the confirm_all safety guard for whole-house calls."
+  inputs:
+    entity_ids: list[string]?
+    area: string?
+    brightness: integer?
+    include_switches: boolean?
+    confirm_all: boolean?
+  side_effects: true
+  cost: small
+  chat_routable: false
+- id: lights_status
+  description: Return how many lights are currently on (excluding backlights/indicators) and the friendly names. Cheap; safe
+    to call from chat.
+  inputs: {}
+  side_effects: false
+  cost: small
+- id: climate_status
+  description: "Report the state of thermostats / HVAC units (current and target temperature, mode, supported modes). Pass\
+    \ area (e.g. \"bedroom\", \"living room\", \"office\") to scope to one room. Use this for ANY thermostat / temperature\
+    \ / AC / heating question \u2014 it correctly resolves the area without needing the user to know entity_ids."
+  inputs:
+    area: string?
+  side_effects: false
+  cost: small
+- id: climate_set_temperature
+  description: "Set the target temperature on a thermostat / AC / heater. Use this for requests like \"reduce the bedroom\
+    \ temperature to 22\", \"make the living room cooler\", \"set the AC to 23\". Always pass an area (e.g. \"bedroom\") so\
+    \ the right physical thermostat is selected \u2014 multiple rooms have a \"Thermostat\" so you cannot rely on entity_id\
+    \ guessing. Returns the old vs new target and whether it was clamped to the device's min/max range."
+  inputs:
+    temperature: number
+    area: string?
+    entity_id: string?
+  side_effects: true
+  require_confirmation: false
+  cost: small
+  chat_routable: false
+- id: climate_set_mode
+  description: Set HVAC mode (off, cool, heat, auto, dry, fan_only) on a thermostat. Use for "turn off the bedroom AC", "switch
+    the living room to cool", "set heating in the office". Pass an area so the right thermostat is targeted.
+  inputs:
+    mode: string
+    area: string?
+    entity_id: string?
+  side_effects: true
+  require_confirmation: false
+  cost: small
+  chat_routable: false
+- id: cover_status
+  description: "List covers (curtains, blinds, roller shades) with state and position. Pass area (e.g. \"bedroom\", \"left\"\
+    ) to narrow. Use this for ANY curtain/blind question \u2014 it resolves area / friendly_name without needing entity_id."
+  inputs:
+    area: string?
+  side_effects: false
+  cost: small
+- id: cover_open
+  description: Fully open a curtain / blind / roller shade. Pass area or entity_id. Use for "open the left curtain", "raise
+    the blinds".
+  inputs:
+    area: string?
+    entity_id: string?
+  side_effects: true
+  require_confirmation: false
+  cost: small
+  chat_routable: false
+- id: cover_close
+  description: Fully close a curtain / blind / roller shade. Use for "close the right curtain", "lower the blinds".
+  inputs:
+    area: string?
+    entity_id: string?
+  side_effects: true
+  require_confirmation: false
+  cost: small
+  chat_routable: false
+- id: cover_set_position
+  description: Set a cover's position 0-100 percent (0=closed, 100=open). Use for "open the left curtain halfway" -> position=50.
+  inputs:
+    position: integer
+    area: string?
+    entity_id: string?
+  side_effects: true
+  require_confirmation: false
+  cost: small
+  chat_routable: false
+- id: lock_status
+  description: Report the state of one or all locks (door locks, vehicle locks). Use for "is the front door locked?", "is
+    my car locked?".
+  inputs:
+    area: string?
+    entity_id: string?
+  side_effects: false
+  cost: small
+- id: lock_lock
+  description: Lock a door or vehicle. Pass area or entity_id. Higher-stakes than lights so require_confirmation defaults
+    to true.
+  inputs:
+    area: string?
+    entity_id: string?
+  side_effects: true
+  require_confirmation: true
+  cost: small
+  chat_routable: false
+- id: lock_unlock
+  description: Unlock a door or vehicle. Always confirms before executing.
+  inputs:
+    area: string?
+    entity_id: string?
+  side_effects: true
+  require_confirmation: true
+  cost: small
+  chat_routable: false
+- id: vacuum_status
+  description: Report vacuum state, battery, fan_speed, and current activity. Defaults to the only vacuum in the home. Use
+    for "is the Deebot charging?", "how much battery does the vacuum have?".
+  inputs:
+    entity_id: string?
+  side_effects: false
+  cost: small
+- id: vacuum_start
+  description: Start a cleaning cycle on the vacuum.
+  inputs:
+    entity_id: string?
+  side_effects: true
+  require_confirmation: false
+  cost: small
+  chat_routable: false
+- id: vacuum_dock
+  description: Send the vacuum back to its dock.
+  inputs:
+    entity_id: string?
+  side_effects: true
+  require_confirmation: false
+  cost: small
+  chat_routable: false
+- id: ev_status
+  description: "Consolidated EV snapshot (BYD HAN today, any HA-exposed car tomorrow): battery, range, charging, locked, doors/windows,\
+    \ sentry, online, lock state, climate, location. Use for ANY car question \u2014 \"what's my car's battery?\", \"is the\
+    \ car locked?\", \"is it charging?\"."
+  inputs:
+    vehicle: string?
+  side_effects: false
+  cost: small
+- id: ev_start_charging
+  description: Press the EV's start-charging button.
+  inputs:
+    vehicle: string?
+  side_effects: true
+  require_confirmation: false
+  cost: small
+  chat_routable: false
+- id: ev_close_windows
+  description: Press the EV's close-windows button.
+  inputs:
+    vehicle: string?
+  side_effects: true
+  require_confirmation: false
+  cost: small
+  chat_routable: false
+- id: ev_flash_lights
+  description: "Flash the EV's lights \u2014 useful for locating in a car park."
+  inputs:
+    vehicle: string?
+  side_effects: true
+  require_confirmation: false
+  cost: small
+  chat_routable: false
+- id: ev_find_car
+  description: Trigger the EV's find-car action.
+  inputs:
+    vehicle: string?
+  side_effects: true
+  require_confirmation: false
+  cost: small
+  chat_routable: false
 subscribes:
-  - events.home
+- events.home
 publishes:
-  # events.home is produced by ha_event_bridge; memory updates are owned by knowledge_notes.
-  - notify.outbound
+- notify.outbound

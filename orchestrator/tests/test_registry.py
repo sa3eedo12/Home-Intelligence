@@ -119,3 +119,36 @@ async def test_semantic_search_uses_query_points_not_search() -> None:
     assert results == [{"score": 0.92, "payload": {"agent": "x", "cap": "y"}}]
     qdrant.query_points.assert_awaited_once()
     qdrant.search.assert_not_called()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_capabilities_filters_chat_routable() -> None:
+    """Phase-1 scope demotion: tools marked chat_routable: false should
+    be hidden from the router's chat-classification prompt but still
+    available for direct invoke (reactive triggers, proactive nudges).
+    """
+    manifest_with_flag = {
+        "agent": "home_automation",
+        "version": "0.2.0",
+        "capabilities": [
+            {"id": "list_entities", "description": "List entities.", "side_effects": False},
+            {"id": "lights_off", "description": "Turn off.", "side_effects": True, "chat_routable": False},
+            {"id": "lights_status", "description": "Status.", "side_effects": False},
+        ],
+    }
+    respx.get("http://home_automation:8000/manifest").mock(
+        return_value=httpx.Response(200, json=manifest_with_flag)
+    )
+    registry = _make_registry()
+    await registry.bootstrap()
+
+    # Full list (default) includes everything.
+    all_caps = {c["id"] for c in registry.list_capabilities()}
+    assert all_caps == {"list_entities", "lights_off", "lights_status"}
+
+    # chat_routable_only=True hides lights_off (write tool) but keeps
+    # the reads. This is what the router uses for its prompt.
+    chat_caps = {c["id"] for c in registry.list_capabilities(chat_routable_only=True)}
+    assert chat_caps == {"list_entities", "lights_status"}
+    assert "lights_off" not in chat_caps

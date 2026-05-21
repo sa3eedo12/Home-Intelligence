@@ -139,21 +139,41 @@ class CapabilityRegistry:
     def get_capability(self, agent: str, capability: str) -> dict | None:
         return self._capabilities.get((agent, capability))
 
-    def list_capabilities(self) -> list[dict[str, Any]]:
+    def list_capabilities(
+        self, *, chat_routable_only: bool = False
+    ) -> list[dict[str, Any]]:
         """Return all known capabilities as flat dicts for prompt-building.
 
         Each entry has at least `agent`, `id`, and `description` keys; other
         manifest fields (`inputs`, `cost`, `side_effects`,
-        `require_confirmation`) are passed through when present.
+        `require_confirmation`, `chat_routable`) are passed through when
+        present.
+
+        When ``chat_routable_only=True``, filters out capabilities with
+        ``chat_routable: false`` in their manifest. Use for the router's
+        chat-classification prompt so device-control tools (lights_off,
+        lock_lock, ev_start_charging, …) don't get suggested by the
+        router LLM — direct device control is delegated to Siri / HA /
+        the Home app; this assistant focuses on observation and
+        analysis. Those tools stay invokable from reactive triggers
+        and proactive nudges, just not from chat.
         """
         out: list[dict[str, Any]] = []
         for (agent, cap_id), meta in self._capabilities.items():
+            if chat_routable_only and meta.get("chat_routable") is False:
+                continue
             entry: dict[str, Any] = {
                 "agent": agent,
                 "id": cap_id,
                 "description": meta.get("description", ""),
             }
-            for k in ("inputs", "cost", "side_effects", "require_confirmation"):
+            for k in (
+                "inputs",
+                "cost",
+                "side_effects",
+                "require_confirmation",
+                "chat_routable",
+            ):
                 if k in meta:
                     entry[k] = meta[k]
             out.append(entry)

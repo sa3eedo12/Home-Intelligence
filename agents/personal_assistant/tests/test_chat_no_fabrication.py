@@ -110,15 +110,14 @@ def test_action_verb_detector_negative_cases() -> None:
 
 
 def test_honest_refusal_does_not_fabricate() -> None:
-    """The refusal text must explicitly own the limitation and NOT
-    invent a fake error narrative."""
+    """The refusal text must own the limitation and NOT invent a fake
+    error narrative. New scope: refusal points the user at Siri / Home
+    app / HA UI for device control instead of pretending to route
+    elsewhere."""
     text = _HONEST_REFUSAL.lower()
-    # Things the refusal must say (owns the limitation)
-    assert "won't pretend" in text
-    assert "logged" in text
-    # Things the refusal must NOT say — these are the fabrication
-    # patterns we observed in the original bug. Check phrasing the LLM
-    # would use to invent an execution narrative.
+    # Things the refusal must communicate
+    assert "siri" in text or "home app" in text or "home assistant" in text
+    # Must NOT invent execution narrative
     fabrication_patterns = [
         "the device returned",
         "there was an error with",
@@ -127,6 +126,9 @@ def test_honest_refusal_does_not_fabricate() -> None:
         "the system reported",
         "the thermostat couldn",
         "the lights couldn",
+        "successfully turned",
+        "is now on",
+        "is now off",
     ]
     for pattern in fabrication_patterns:
         assert pattern not in text, f"refusal text contains fabrication pattern: {pattern!r}"
@@ -144,11 +146,13 @@ from tools.chat import _HONEST_QUERY_REFUSAL, _is_device_query
 
 @pytest.mark.asyncio
 async def test_chat_refuses_car_battery_query() -> None:
-    """The exact live-fired prompt that triggered the second hallucination."""
+    """The exact live-fired prompt that triggered the second hallucination.
+    New scope: refusal points user at Home app / HA, not at re-routing."""
     out = await chat(text="What's the battery percentage of my car?")
     assert out["reply"] == _HONEST_QUERY_REFUSAL
     assert out["refused_device_query"] is True
-    assert "won't make up" in out["reply"]
+    reply_lower = out["reply"].lower()
+    assert "home app" in reply_lower or "home assistant" in reply_lower
 
 
 @pytest.mark.asyncio
@@ -239,10 +243,10 @@ def test_device_query_detector_negatives() -> None:
 
 def test_honest_query_refusal_does_not_fabricate() -> None:
     """The query refusal must be honest — no invented device states
-    or made-up troubleshooting advice."""
+    or made-up troubleshooting advice. New scope: refusal points the
+    user at the Home app / HA UI for direct queries."""
     text = _HONEST_QUERY_REFUSAL.lower()
-    assert "won't make up" in text
-    assert "logged" in text
+    assert "home app" in text or "home assistant" in text
     # Things that would be fabricated if the LLM was generating
     for invented in [
         "make sure your car",

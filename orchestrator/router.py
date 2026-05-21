@@ -724,7 +724,13 @@ class Router:
             return 0
 
     async def _classify(self, text: str) -> dict[str, Any]:
-        capabilities = self._registry.list_capabilities()
+        # chat_routable_only=True hides device-control tools (lights_off,
+        # lock_lock, ev_start_charging, climate_set_*, etc.) from the
+        # router's chat-classification prompt. Direct device control is
+        # delegated to Siri / HA / the Home app; this assistant focuses
+        # on observation + analysis. Tools stay invokable from reactive
+        # triggers and proactive nudges, just not from chat.
+        capabilities = self._registry.list_capabilities(chat_routable_only=True)
         agents = sorted({cap["agent"] for cap in capabilities})
         agent_list = ", ".join(agents) if agents else "none"
         capability_block = _format_capability_inventory(capabilities)
