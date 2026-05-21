@@ -45,29 +45,47 @@ def _patch_client(
     *,
     switch_states: list[dict[str, Any]] | None = None,
     post_state_overrides: dict[str, str] | None = None,
+    area_map: dict[str, str] | None = None,
 ):
     """Install a fake HA client with the given states + a recording call_service.
 
-    When ``switch_states`` is provided, the fake returns it for
-    ``list_states(domain="switch")`` calls; otherwise the switch domain
-    returns an empty list (so legacy tests focused on light-domain
-    behavior keep working without modification).
+    The production _resolve_lights uses Jinja render_template against
+    HA so the area_name is authoritative. Tests intercept that by
+    mocking render_template per-domain (light/switch) and returning a
+    list of dicts shaped like the template output.
 
-    ``post_state_overrides`` lets a test simulate "device didn't actually
-    respond" for the post-state verification path — map entity_id to
-    the state we want ``get_state`` to return after the service call.
-    By default verification returns the expected post-state (i.e. an
-    on→off call sees state='off'), so the verification passes silently.
+    ``area_map`` (optional): entity_id → HA area name. Entities not in
+    the map get area="" — same as HA's "Unassigned".
     """
+    import json as _json
+
     calls: list[dict[str, Any]] = []
     client = AsyncMock()
+    areas = area_map or {}
 
-    async def fake_list_states(domain: str | None = None, **_kw: Any) -> list[dict[str, Any]]:
-        if domain == "switch":
-            return list(switch_states or [])
-        return list(states)
+    def _entry_dicts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = []
+        for s in rows:
+            eid = s["entity_id"]
+            attrs = s.get("attributes") or {}
+            out.append({
+                "entity_id": eid,
+                "name": attrs.get("friendly_name", eid),
+                "area": areas.get(eid, ""),
+                "state": s["state"],
+                "last_changed": s.get("last_changed", ""),
+            })
+        return out
 
-    client.list_states = fake_list_states
+    async def fake_render_template(template: str) -> str:
+        # The production templates are { for s in states.<domain> } — pick
+        # which list to return by sniffing the domain reference in the
+        # template body.
+        if "states.switch" in template:
+            return _json.dumps(_entry_dicts(switch_states or []))
+        return _json.dumps(_entry_dicts(states))
+
+    client.render_template = fake_render_template
 
     async def fake_call_service(domain: str, service: str, data: dict) -> dict:
         calls.append({"domain": domain, "service": service, "data": data})
@@ -79,7 +97,6 @@ def _patch_client(
         overrides = post_state_overrides or {}
         if entity_id in overrides:
             return {"entity_id": entity_id, "state": overrides[entity_id]}
-        # Default: assume the device responded — return the expected post-state.
         last_call = next(
             (c for c in reversed(calls) if c["data"].get("entity_id") == entity_id),
             None,
@@ -190,17 +207,29 @@ async def test_lights_off_empty_when_nothing_on(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_lights_off_handles_service_call_failure(monkeypatch) -> None:
     """Per-light failure must not cancel the rest of the operation."""
+    import json as _json
+
     states = _ha_states(
         ("light.living_room", "on", "Living Room"),
         ("light.kitchen", "on", "Kitchen"),
     )
     client = AsyncMock()
 
-    async def fake_list_states(domain: str | None = None, **_kw: Any) -> list[dict[str, Any]]:
-        # No switch.* in this test — only light.* matters for the failure path.
-        return list(states) if domain != "switch" else []
+    async def fake_render_template(template: str) -> str:
+        if "states.switch" in template:
+            return _json.dumps([])
+        return _json.dumps([
+            {
+                "entity_id": s["entity_id"],
+                "name": s["attributes"]["friendly_name"],
+                "area": "",
+                "state": s["state"],
+                "last_changed": s.get("last_changed", ""),
+            }
+            for s in states
+        ])
 
-    client.list_states = fake_list_states
+    client.render_template = fake_render_template
 
     call_count = {"n": 0}
 
@@ -213,8 +242,6 @@ async def test_lights_off_handles_service_call_failure(monkeypatch) -> None:
     client.call_service = flaky
 
     async def fake_get_state(entity_id: str) -> dict[str, Any]:
-        # The successful call's entity transitions to off; the failed
-        # call's entity stays on (HA never received the command).
         return {"entity_id": entity_id, "state": "off" if entity_id == "light.kitchen" else "on"}
 
     client.get_state = fake_get_state
@@ -713,3 +740,28 @@ async def test_lights_status_surfaces_stale_entities(monkeypatch) -> None:
     assert result["stale_count"] == 1
     assert result["stale_lights"][0]["entity_id"] == "light.stale_on"
     assert result["stale_lights"][0]["cached_state"] == "on"
+
+
+@pytest.mark.asyncio
+async def test_resolve_lights_matches_by_ha_area_registry(monkeypatch) -> None:
+    """The exact second May 21 bug: lights_on(area='office') returned
+    'all already on' because the area filter only checked friendly_name
+    and entity_id substrings ('Light' / 'light.lightbulb' contain no
+    'office'). HA's area_name registry is authoritative — must be used.
+    """
+    light_states = _ha_states(
+        ("light.lightbulb", "off", "Light"),  # named 'Light', area=Office in HA
+        ("light.cd", "off", "Living Room Spot"),  # in Living Room area
+    )
+    _patch_client(
+        monkeypatch,
+        light_states,
+        area_map={
+            "light.lightbulb": "Office",
+            "light.cd": "Living Room",
+        },
+    )
+    targets = await lights_control._resolve_lights(None, "office")
+    assert len(targets) == 1
+    assert targets[0]["entity_id"] == "light.lightbulb"
+    assert targets[0]["area"] == "Office"

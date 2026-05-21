@@ -144,56 +144,82 @@ def _is_light_switch(entity_id: str, friendly_name: str | None) -> bool:
     return False
 
 
+async def _fetch_domain_with_areas(domain: str) -> list[dict[str, Any]]:
+    """Fetch all entities for ``domain`` annotated with HA area_name +
+    last_changed timestamp. Uses the same Jinja-template pattern that
+    climate.py uses, so the area registry is the authoritative source
+    for area filters (not just substring matches on friendly_name).
+    """
+    client = get_ha_client()
+    template = (
+        "[{% for s in states." + domain + " if true %}"
+        "{{ '{' }}"
+        "\"entity_id\": {{ s.entity_id | tojson }}, "
+        "\"name\": {{ (state_attr(s.entity_id, 'friendly_name') or s.entity_id) | tojson }}, "
+        "\"area\": {{ (area_name(s.entity_id) or '') | tojson }}, "
+        "\"state\": {{ s.state | tojson }}, "
+        "\"last_changed\": {{ s.last_changed | tojson }}"
+        "{{ '}' }}"
+        "{% if not loop.last %},{% endif %}"
+        "{% endfor %}]"
+    )
+    import json as _json
+
+    rendered = await client.render_template(template)
+    try:
+        return _json.loads(rendered)
+    except _json.JSONDecodeError:
+        logger.warning("lights_list_bad_json", domain=domain, rendered=rendered[:200])
+        return []
+
+
 async def _resolve_lights(
     entity_ids: list[str] | None,
     area: str | None,
     *,
     include_switches: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return controllable "light" entities (each ``{entity_id,
-    friendly_name, state, domain, last_changed, is_stale}``) matching
-    the caller's intent.
+    """Return controllable "light" entities matching the caller's intent.
+
+    Each result: ``{entity_id, friendly_name, state, domain, area,
+    last_changed, is_stale}``.
 
     By default acts only on the ``light.*`` domain — what HA considers
     a light. Users who want wall-switch / smart-plug coverage should
-    reclassify those entities in HA itself (HA's "Show as Light" option
-    on the device → see deploy/docs). Power users can still opt in
-    with ``include_switches=True`` to also walk the ``switch.*`` domain
-    and apply a keyword heuristic (LIGHT_SWITCH_KEYWORDS).
+    reclassify those entities in HA itself ("Show as Light" on the
+    device). Power users opt in with ``include_switches=True``.
 
-    Each result is tagged with ``domain`` so callers can dispatch to
-    the correct HA service. ``is_stale`` is True when the entity's
-    state hasn't changed in more than ``_STALE_STATE_HOURS`` — the
-    underlying device is probably offline and the reported state can't
-    be trusted.
+    Area matching uses HA's native area_name (set on the device in
+    HA) — NOT just substring fuzzy matches on friendly_name. So
+    "office" correctly matches every light HA puts in the Office
+    area, even if the bulb is named "Light" or "Bulb 1".
     """
-    client = get_ha_client()
     domains_to_fetch = ["light"]
     if include_switches:
         domains_to_fetch.append("switch")
     grouped = await asyncio.gather(
-        *(client.list_states(domain=d) for d in domains_to_fetch)
+        *(_fetch_domain_with_areas(d) for d in domains_to_fetch)
     )
 
     real: list[dict[str, Any]] = []
-    for domain, states in zip(domains_to_fetch, grouped):
-        for s in states:
-            attrs = s.get("attributes") or {}
-            friendly = attrs.get("friendly_name")
+    for domain, entries in zip(domains_to_fetch, grouped):
+        for s in entries:
             eid = s["entity_id"]
+            friendly = s.get("name") or eid
             if domain == "light":
                 if not _is_real_light(eid, friendly):
                     continue
             else:  # switch
                 if not _is_light_switch(eid, friendly):
                     continue
-            last_changed_raw = s.get("last_changed") or s.get("last_updated")
+            last_changed_raw = s.get("last_changed")
             real.append(
                 {
                     "entity_id": eid,
-                    "friendly_name": friendly or eid,
+                    "friendly_name": friendly,
                     "state": s.get("state"),
                     "domain": domain,
+                    "area": s.get("area") or "",
                     "last_changed": last_changed_raw,
                     "is_stale": _is_stale(last_changed_raw),
                 }
@@ -204,10 +230,17 @@ async def _resolve_lights(
         return [r for r in real if r["entity_id"].casefold() in wanted]
     if area:
         area_lower = area.casefold()
+        # Authoritative match: HA's area_name (set on the device). Falls
+        # back to friendly_name / entity_id substring for the cases where
+        # the user names the entity after the room ("kitchen island
+        # light") but HA itself hasn't been told the device lives in
+        # that area.
         return [
             r
             for r in real
-            if area_lower in r["friendly_name"].casefold()
+            if area_lower == (r.get("area") or "").casefold()
+            or area_lower in (r.get("area") or "").casefold()
+            or area_lower in r["friendly_name"].casefold()
             or area_lower in r["entity_id"].casefold()
         ]
     return real
