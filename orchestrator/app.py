@@ -19,6 +19,8 @@ from home_agents_sdk.embeddings import Embedder
 from home_agents_sdk.event_log import EventLogStore
 from home_agents_sdk.health_store import HealthStore
 from home_agents_sdk.knowledge_graph import KnowledgeGraph
+from home_agents_sdk.knowledge_graph_seeder import seed_from_baseline as kg_seed_from_baseline
+from home_agents_sdk.knowledge_graph_store import KnowledgeGraphStore
 from home_agents_sdk.llm import OllamaClient
 from home_agents_sdk.npu import NPUClient
 from home_agents_sdk.gap_store import GapStore
@@ -368,6 +370,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # also track applied_migrations so re-runs are cheap.
     migration_results = await run_pending_migrations(pool)
     app.state.migration_results = migration_results
+
+    # Knowledge graph: seed nodes/edges from the structured baseline
+    # tables every boot. Idempotent via external_ref upserts, so this
+    # just refreshes existing rows in place. Failure is non-fatal so a
+    # broken seeder can never block orchestrator startup.
+    kg_store = KnowledgeGraphStore(pool)
+    try:
+        kg_seed_counts = await kg_seed_from_baseline(pool, store=kg_store)
+        app.state.kg_seed_counts = kg_seed_counts
+        logger.info("knowledge_graph_seeded", **kg_seed_counts)
+    except Exception as exc:
+        logger.warning("knowledge_graph_seed_failed", error=str(exc))
+        app.state.kg_seed_counts = {}
+    app.state.kg_store = kg_store
+
     bus = EventBus(redis_url)
     try:
         await bus.connect()
