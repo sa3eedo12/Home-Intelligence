@@ -158,7 +158,7 @@ async def _fetch_domain_with_areas(domain: str) -> list[dict[str, Any]]:
         "\"name\": {{ (state_attr(s.entity_id, 'friendly_name') or s.entity_id) | tojson }}, "
         "\"area\": {{ (area_name(s.entity_id) or '') | tojson }}, "
         "\"state\": {{ s.state | tojson }}, "
-        "\"last_changed\": {{ s.last_changed | tojson }}"
+        "\"last_changed\": {{ s.last_changed.isoformat() | tojson if s.last_changed else 'null' }}"
         "{{ '}' }}"
         "{% if not loop.last %},{% endif %}"
         "{% endfor %}]"
