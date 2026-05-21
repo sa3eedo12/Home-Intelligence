@@ -9,13 +9,31 @@ import pytest
 from tools import lights_control
 
 
-def _ha_states(*lights: tuple[str, str, str]) -> list[dict[str, Any]]:
-    """Each tuple is (entity_id, state, friendly_name)."""
+from datetime import UTC, datetime, timedelta
+
+
+def _ha_states(
+    *lights: tuple[str, str, str],
+    stale_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Each tuple is (entity_id, state, friendly_name).
+
+    ``stale_ids`` (if provided) sets the entity's last_changed to 2
+    days ago to simulate an offline device. Other entities get a
+    fresh last_changed (just now), which the production _is_stale
+    check sees as non-stale.
+    """
+    now = datetime.now(UTC)
+    stale_marker = (now - timedelta(days=2)).isoformat()
+    fresh_marker = now.isoformat()
+    stale = stale_ids or set()
     return [
         {
             "entity_id": eid,
             "state": state,
             "attributes": {"friendly_name": name},
+            "last_changed": stale_marker if eid in stale else fresh_marker,
+            "last_updated": stale_marker if eid in stale else fresh_marker,
         }
         for eid, state, name in lights
     ]
@@ -611,3 +629,87 @@ async def test_lights_on_refuses_whole_house_without_confirm(monkeypatch) -> Non
     assert result["error"] == "whole_house_requires_confirmation"
     assert result["would_affect"] == 22
     assert calls == []
+
+
+# ── Stale-state detection (May 21 'office light already on' bug) ──────
+
+
+def test_is_stale_threshold() -> None:
+    """Entities whose last_changed is older than _STALE_STATE_HOURS
+    must be treated as stale."""
+    fresh = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    stale = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    assert lights_control._is_stale(fresh) is False
+    assert lights_control._is_stale(stale) is True
+    # None / unparseable → stale (we don't have evidence the state is current)
+    assert lights_control._is_stale(None) is True
+    assert lights_control._is_stale("garbage") is True
+
+
+@pytest.mark.asyncio
+async def test_lights_on_ignores_stale_already_on_state(monkeypatch) -> None:
+    """The user's exact May 21 bug: user said 'turn on the office light'
+    and got 'already on'. HA cached an 'on' state from before the Aqara
+    went offline 2 days ago. The tool MUST disregard the stale cached
+    state and fire the call anyway."""
+    light_states = _ha_states(
+        ("light.office_bulb", "on", "Office Light"),  # cached on, but stale
+        stale_ids={"light.office_bulb"},
+    )
+    # Verification still returns 'on' so the call passes — what we're
+    # asserting here is that the call ACTUALLY HAPPENED instead of being
+    # skipped with reason='already_on'.
+    calls = _patch_client(
+        monkeypatch,
+        light_states,
+        post_state_overrides={"light.office_bulb": "on"},
+    )
+    result = await lights_control.lights_on(area="office")
+
+    # Call WAS made (not skipped as already_on).
+    assert len(calls) == 1
+    assert calls[0]["service"] == "turn_on"
+    assert calls[0]["data"]["entity_id"] == "light.office_bulb"
+    # And the tool reports the action, not "already on".
+    assert {t["entity_id"] for t in result["turned_on"]} == {"light.office_bulb"}
+
+
+@pytest.mark.asyncio
+async def test_lights_off_ignores_stale_already_off_state(monkeypatch) -> None:
+    """Mirror of the bug for the turn-off path."""
+    light_states = _ha_states(
+        ("light.office_bulb", "off", "Office Light"),  # cached off, but stale
+        stale_ids={"light.office_bulb"},
+    )
+    calls = _patch_client(
+        monkeypatch,
+        light_states,
+        post_state_overrides={"light.office_bulb": "off"},
+    )
+    result = await lights_control.lights_off(area="office")
+
+    assert len(calls) == 1
+    assert calls[0]["service"] == "turn_off"
+    assert calls[0]["data"]["entity_id"] == "light.office_bulb"
+
+
+@pytest.mark.asyncio
+async def test_lights_status_surfaces_stale_entities(monkeypatch) -> None:
+    """Status reports stale entities separately so the caller can warn
+    about devices that probably went offline."""
+    light_states = _ha_states(
+        ("light.fresh_on", "on", "Fresh On"),
+        ("light.fresh_off", "off", "Fresh Off"),
+        ("light.stale_on", "on", "Stale On"),
+        stale_ids={"light.stale_on"},
+    )
+    _patch_client(monkeypatch, light_states)
+    result = await lights_control.lights_status()
+
+    # Stale 'on' entity is NOT counted as "on" — its cached state is unreliable.
+    assert result["on_count"] == 1
+    assert result["on_lights"][0]["entity_id"] == "light.fresh_on"
+    # Stale entity surfaced separately.
+    assert result["stale_count"] == 1
+    assert result["stale_lights"][0]["entity_id"] == "light.stale_on"
+    assert result["stale_lights"][0]["cached_state"] == "on"

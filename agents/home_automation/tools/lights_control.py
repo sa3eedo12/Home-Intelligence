@@ -19,7 +19,9 @@ chat router can phrase into a confirmation.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from home_agents_sdk.telemetry import get_logger
@@ -149,7 +151,8 @@ async def _resolve_lights(
     include_switches: bool = False,
 ) -> list[dict[str, Any]]:
     """Return controllable "light" entities (each ``{entity_id,
-    friendly_name, state, domain}``) matching the caller's intent.
+    friendly_name, state, domain, last_changed, is_stale}``) matching
+    the caller's intent.
 
     By default acts only on the ``light.*`` domain — what HA considers
     a light. Users who want wall-switch / smart-plug coverage should
@@ -159,7 +162,10 @@ async def _resolve_lights(
     and apply a keyword heuristic (LIGHT_SWITCH_KEYWORDS).
 
     Each result is tagged with ``domain`` so callers can dispatch to
-    the correct HA service.
+    the correct HA service. ``is_stale`` is True when the entity's
+    state hasn't changed in more than ``_STALE_STATE_HOURS`` — the
+    underlying device is probably offline and the reported state can't
+    be trusted.
     """
     client = get_ha_client()
     domains_to_fetch = ["light"]
@@ -181,12 +187,15 @@ async def _resolve_lights(
             else:  # switch
                 if not _is_light_switch(eid, friendly):
                     continue
+            last_changed_raw = s.get("last_changed") or s.get("last_updated")
             real.append(
                 {
                     "entity_id": eid,
                     "friendly_name": friendly or eid,
                     "state": s.get("state"),
                     "domain": domain,
+                    "last_changed": last_changed_raw,
+                    "is_stale": _is_stale(last_changed_raw),
                 }
             )
 
@@ -209,6 +218,37 @@ async def _resolve_lights(
 # round-trip typically settles within ~1s; 1.5s gives us margin without
 # blowing the chat reply latency budget. Tunable via env for slow setups.
 _VERIFY_DELAY_S = float(__import__("os").getenv("LIGHTS_VERIFY_DELAY_S", "1.5"))
+
+# Entities whose last_changed is older than this are treated as having
+# stale state — the device is probably offline (Zigbee/Hue dropout,
+# Aqara battery dead, etc.) and HA's cached state can't be trusted.
+# We still TRY to act on stale entities (HA may queue and deliver
+# eventually); we just don't trust the pre-call state for "is it
+# already on/off?" decisions. Default 24h; tunable via env.
+_STALE_STATE_HOURS = float(os.getenv("LIGHTS_STALE_STATE_HOURS", "24"))
+
+
+def _is_stale(last_changed_raw: Any) -> bool:
+    """True iff the entity's last state change is older than the
+    staleness threshold. None / unparseable → treated as stale (we
+    don't have evidence the state is current)."""
+    if last_changed_raw is None:
+        return True
+    if isinstance(last_changed_raw, datetime):
+        last = last_changed_raw
+    elif isinstance(last_changed_raw, str):
+        try:
+            last = datetime.fromisoformat(
+                last_changed_raw.replace("Z", "+00:00")
+            )
+        except ValueError:
+            return True
+    else:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    age = datetime.now(UTC) - last
+    return age > timedelta(hours=_STALE_STATE_HOURS)
 
 
 async def _verify_state_changes(
@@ -327,11 +367,20 @@ async def lights_off(
     """
     targets = await _resolve_lights(entity_ids, area, include_switches=include_switches)
     if only_on:
-        actionable = [t for t in targets if t.get("state") == "on"]
+        # Treat stale-state entities as "unknown" — we don't trust the
+        # cached 'off' when the device hasn't reported in >24h, so we
+        # still try the call. The user complained: 'turn on the office
+        # light' got 'already on' (stale state was 'on' from before
+        # device went offline). With this guard the call goes through
+        # and post-state verification reports the truth.
+        actionable = [
+            t for t in targets
+            if t.get("state") == "on" or t.get("is_stale")
+        ]
         skipped = [
             {"entity_id": t["entity_id"], "reason": "already_off"}
             for t in targets
-            if t.get("state") != "on"
+            if t.get("state") != "on" and not t.get("is_stale")
         ]
     else:
         actionable = targets
@@ -440,11 +489,18 @@ async def lights_on(
     Returns ``{ok, turned_on, skipped, summary}``.
     """
     targets = await _resolve_lights(entity_ids, area, include_switches=include_switches)
-    actionable = [t for t in targets if t.get("state") != "on"]
+    # Stale state ('on' but unchanged in >24h) is treated as actionable —
+    # we don't trust a 2-day-old "on" reading to skip the call. The
+    # exact bug: 'turn on the office light' said "already on" because
+    # HA cached an 'on' state from before the Aqara went offline.
+    actionable = [
+        t for t in targets
+        if t.get("state") != "on" or t.get("is_stale")
+    ]
     skipped = [
         {"entity_id": t["entity_id"], "reason": "already_on"}
         for t in targets
-        if t.get("state") == "on"
+        if t.get("state") == "on" and not t.get("is_stale")
     ]
     # Same safety guard as lights_off — see _refuse_whole_house.
     if not entity_ids and not area and not confirm_all:
@@ -528,19 +584,36 @@ async def lights_on(
 
 @tool("lights_status")
 async def lights_status() -> dict[str, Any]:
-    """Return a count + list of currently-on lights. Cheap enough that the
-    chat router can call it before deciding what to suggest."""
+    """Return a count + list of currently-on lights. Cheap enough that
+    the chat router can call it before deciding what to suggest.
+
+    Surfaces stale entities (state hasn't changed in >24h — device
+    probably offline) separately so the caller can warn the user about
+    them instead of treating the cached state as authoritative.
+    """
     targets = await _resolve_lights(None, None)
     on_lights = [
         {"entity_id": t["entity_id"], "friendly_name": t["friendly_name"]}
         for t in targets
-        if t.get("state") == "on"
+        if t.get("state") == "on" and not t.get("is_stale")
+    ]
+    stale_lights = [
+        {
+            "entity_id": t["entity_id"],
+            "friendly_name": t["friendly_name"],
+            "cached_state": t.get("state"),
+            "last_changed": t.get("last_changed"),
+        }
+        for t in targets
+        if t.get("is_stale")
     ]
     return {
         "ok": True,
         "on_count": len(on_lights),
         "total_count": len(targets),
         "on_lights": on_lights,
+        "stale_count": len(stale_lights),
+        "stale_lights": stale_lights,
     }
 
 
