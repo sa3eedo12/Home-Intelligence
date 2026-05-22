@@ -297,3 +297,135 @@ async def test_skips_blacklisted_subjects() -> None:
     # data_science.pattern_mining should never appear as the trigger
     for c in result["candidates"]:
         assert c["name"] != "data_science.pattern_mining -> b.y"
+
+
+# ── Cadence-regularity filter ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_skips_cron_like_followups_auto_detected() -> None:
+    """A subject that fires every 30 minutes ± 5 seconds (cron-like) must
+    not become B in any candidate, even if its co-occurrence stats look
+    perfect. This was the actual bug observed on the first production
+    run: `system_health.anomaly_check` ran every 30 min and won every
+    suggestion slot, producing 29 garbage 'X -> anomaly_check' rows."""
+    base = datetime(2026, 5, 11, 0, 0, tzinfo=UTC)
+    rows: list[dict] = []
+    eid = 0
+    # 12 user events ("lights off") on different days
+    for day in range(12):
+        eid += 1
+        rows.append(_row(eid, base + timedelta(days=day), "home_automation", "lights_off"))
+    # 200 cron events: a "system_health.cron_metric" subject (NOT in the
+    # static skip list) that fires every 30 min ± 3 sec. CV will be ~0.
+    cron_start = base
+    for tick in range(200):
+        eid += 1
+        jitter_seconds = (tick % 5) - 2  # ±2 seconds jitter
+        rows.append(_row(
+            eid,
+            cron_start + timedelta(minutes=30 * tick, seconds=jitter_seconds),
+            "system_health",
+            "cron_metric",
+        ))
+
+    conn = Conn(rows)
+    miner = RoutineSequenceMiner(
+        pool=FakePool(conn),
+        window_minutes=30,
+        min_support_a=5,
+        min_pair_count=4,
+        min_confidence=0.50,
+        min_lift=1.5,
+    )
+    result = await miner.run(window_days=400)
+    # Auto-detected cron — cron_metric must not appear as B
+    for c in result["candidates"]:
+        assert "cron_metric" not in c["name"].split(" -> ")[1], (
+            f"cron-like subject leaked into candidates: {c['name']!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_static_skip_list_blocks_known_housekeeping() -> None:
+    """Even if cadence detection misses a subject (e.g. it fires fewer
+    than min_samples times in the window), the static _SKIP_SUBJECTS
+    list still keeps the obvious housekeeping ones out."""
+    base = datetime(2026, 5, 11, 8, 0, tzinfo=UTC)
+    rows: list[dict] = []
+    eid = 0
+    for day in range(8):
+        eid += 1
+        rows.append(_row(eid, base + timedelta(days=day), "washer", "cycle_complete"))
+        eid += 1
+        # system_health.anomaly_check is on the static skip list
+        rows.append(_row(
+            eid,
+            base + timedelta(days=day, minutes=10),
+            "system_health",
+            "anomaly_check",
+        ))
+
+    conn = Conn(rows)
+    miner = RoutineSequenceMiner(
+        pool=FakePool(conn),
+        window_minutes=30,
+        min_support_a=5,
+        min_pair_count=4,
+        min_confidence=0.5,
+        min_lift=1.0,
+    )
+    result = await miner.run(window_days=30)
+    for c in result["candidates"]:
+        assert "system_health.anomaly_check" not in c["name"], (
+            f"static-blocked subject leaked: {c['name']!r}"
+        )
+
+
+def test_detect_cron_like_subjects_helper() -> None:
+    """The _detect_cron_like_subjects helper should flag tight cadences
+    and leave noisy human events alone."""
+    from orchestrator.data_science.routine_sequence_miner import (
+        _Event,
+        _detect_cron_like_subjects,
+    )
+
+    base = datetime(2026, 5, 11, 0, 0, tzinfo=UTC)
+    events: list[_Event] = []
+    eid = 0
+    # Tight cron: 60 min ± 1 sec
+    for i in range(20):
+        eid += 1
+        events.append(_Event(
+            event_id=eid,
+            ts=base + timedelta(hours=i, seconds=(i % 3) - 1),
+            subject="cron.tight",
+        ))
+    # Bursty human events: very irregular
+    for offset_minutes in [0, 5, 600, 605, 1440, 1500, 2880, 3000, 4500, 4700]:
+        eid += 1
+        events.append(_Event(
+            event_id=eid,
+            ts=base + timedelta(minutes=offset_minutes),
+            subject="human.bursty",
+        ))
+
+    cron_like = _detect_cron_like_subjects(events)
+    assert "cron.tight" in cron_like
+    assert "human.bursty" not in cron_like
+
+
+def test_detect_cron_like_subjects_ignores_subjects_with_few_samples() -> None:
+    """A subject with only 3 observations doesn't have enough data to
+    decide cron-ness — leave it in play."""
+    from orchestrator.data_science.routine_sequence_miner import (
+        _Event,
+        _detect_cron_like_subjects,
+    )
+    base = datetime(2026, 5, 11, 0, 0, tzinfo=UTC)
+    events = [
+        _Event(event_id=i, ts=base + timedelta(hours=i), subject="rare")
+        for i in range(3)
+    ]
+    cron_like = _detect_cron_like_subjects(events)
+    assert "rare" not in cron_like

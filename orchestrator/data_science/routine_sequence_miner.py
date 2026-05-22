@@ -31,6 +31,7 @@ import json
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from statistics import mean, pstdev
 from typing import Any
 
 from home_agents_sdk.telemetry import get_logger
@@ -47,12 +48,43 @@ DEFAULT_MIN_SUPPORT_A = 5         # subject A must occur at least this often
 DEFAULT_MIN_PAIR_COUNT = 4        # A → B must happen at least this many times
 DEFAULT_MIN_CONFIDENCE = 0.50     # P(B | A) >= 50%
 DEFAULT_MIN_LIFT = 2.0            # at least 2× base rate
-# Skip these subjects on both sides — they're noise / housekeeping.
+# If subject B's inter-arrival CV (std / mean) is below this threshold,
+# treat it as a cron-driven job and exclude it from being a follow-up
+# candidate. 0.20 admits real-world jitter while still rejecting fixed
+# 30-minute intervals which would otherwise win every miner candidate.
+DEFAULT_REGULAR_CADENCE_CV = 0.20
+DEFAULT_MIN_SAMPLES_FOR_CV = 6
+# Skip these subjects on both sides — they're cron-driven housekeeping
+# or self-recursion noise. The cadence detector above catches most of
+# this automatically, but the static list is a belt-and-braces backstop
+# (and is checked first so we can short-circuit before any counting).
 _SKIP_SUBJECTS = {
+    # data_science / orchestrator-internal
     "data_science.pattern_mining",
+    "data_science.routine_sequence_mining",
     "data_science.maintenance",
+    "data_science.reembed",
+    "data_science.weekly_report",
+    "data_science.monthly_report",
+    "data_science.lora_training",
     "reflector.run",
     "advisor.run",
+    "orchestrator.anomaly_check",
+    "orchestrator.missing_routine_check",
+    "orchestrator.proactive_scan",
+    "orchestrator.pre_bedtime_scan",
+    # Cron-driven scheduled jobs that appear in event_log as
+    # "<dispatch_agent>.<capability>"; mining A → these is meaningless
+    # because they fire on a fixed clock, not in response to A.
+    "system_health.anomaly_check",
+    "storage_backup.summarize_storage",
+    "storage_backup.validate_backup",
+    "knowledge_notes.index_path",
+    "household_ops.pantry_low_stock",
+    "personal_assistant.morning_brief",
+    "personal_assistant.evening_recap",
+    "personal_assistant.infer_sleep_summary",
+    "personal_assistant.late_bedtime_check",
     "dashboard_curator.summarize_activity",
     "dashboard_curator.summarize_alerts",
 }
@@ -204,6 +236,16 @@ class RoutineSequenceMiner(SingleFlightJob):
         # Defensive sort — the SQL has ORDER BY ts ASC but if callers
         # feed events directly we must not assume that.
         events = sorted(events, key=lambda e: e.ts)
+
+        # Detect subjects whose inter-arrival cadence is too regular to
+        # be event-driven (i.e. they're cron-driven housekeeping). Any
+        # such subject is barred from being a B (followup), because the
+        # miner would otherwise pair it with everything that fires in
+        # the same 30-minute window — exactly what we saw on the first
+        # production run where `system_health.anomaly_check` won every
+        # candidate slot.
+        cron_like_subjects = _detect_cron_like_subjects(events)
+
         window = timedelta(minutes=self.window_minutes)
         support: Counter[str] = Counter()
         pair_counts: Counter[tuple[str, str]] = Counter()
@@ -218,10 +260,12 @@ class RoutineSequenceMiner(SingleFlightJob):
             j = i + 1
             while j < n and (events[j].ts - a.ts) <= window:
                 b = events[j]
-                # Skip A→A self-sequences and housekeeping noise.
+                # Skip A→A self-sequences, housekeeping noise, and
+                # detected-cron subjects on the B side.
                 if (
                     b.subject != a.subject
                     and b.subject not in _SKIP_SUBJECTS
+                    and b.subject not in cron_like_subjects
                     and b.subject not in seen_b
                 ):
                     key = (a.subject, b.subject)
@@ -315,3 +359,44 @@ def _event_from_row(row: Any) -> _Event | None:
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _detect_cron_like_subjects(
+    events: list[_Event],
+    *,
+    cv_threshold: float = DEFAULT_REGULAR_CADENCE_CV,
+    min_samples: int = DEFAULT_MIN_SAMPLES_FOR_CV,
+) -> set[str]:
+    """Find subjects whose inter-arrival times are too regular to be
+    user/event-driven.
+
+    Cron and interval jobs land in event_log with tightly-spaced
+    inter-arrival times (60 min ± a few seconds). Real human-driven
+    events (lights, washer, presence) have wide spread. We compute the
+    coefficient of variation (CV = std/mean) per subject and flag
+    anything below ``cv_threshold``.
+
+    Requires at least ``min_samples`` events per subject — otherwise
+    we have too few intervals to make a reliable judgement and the
+    subject is left in play.
+    """
+    by_subject: dict[str, list[datetime]] = defaultdict(list)
+    for e in events:
+        by_subject[e.subject].append(e.ts)
+
+    cron_like: set[str] = set()
+    for subject, timestamps in by_subject.items():
+        if len(timestamps) < min_samples:
+            continue
+        timestamps.sort()
+        intervals = [
+            (timestamps[i] - timestamps[i - 1]).total_seconds()
+            for i in range(1, len(timestamps))
+        ]
+        avg = mean(intervals)
+        if avg <= 0:
+            continue
+        cv = pstdev(intervals) / avg
+        if cv < cv_threshold:
+            cron_like.add(subject)
+    return cron_like
