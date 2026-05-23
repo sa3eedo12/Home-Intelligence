@@ -738,3 +738,120 @@ def test_hh_mm_returns_empty_on_bad_input() -> None:
     assert auto_infer._hh_mm(None) == ""
     assert auto_infer._hh_mm(12345) == ""
     assert auto_infer._hh_mm("not an iso timestamp") == ""
+
+
+# ── Auto-confirm for passive observations ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_passive_observation_auto_confirms_and_dispatches(monkeypatch) -> None:
+    """anomaly.detected is a passive observation — there's no user choice
+    to be made, just journal it. The auto-infer pipeline must auto-
+    confirm + dispatch so the proactive scanner (which keys on
+    'confirmed' status) actually has something to draw from. Without
+    this fix, 34 auto_inferences sat in 'proposed' forever on TrueNAS."""
+    store = _FakeStore(count=0)
+
+    async def _store() -> _FakeStore:
+        return store
+
+    dispatch_calls: list[dict] = []
+
+    async def _dispatch(action: dict) -> dict:
+        dispatch_calls.append(action)
+        return {"ok": True, "result": {"ok": True, "stored_id": 42}}
+
+    monkeypatch.setattr(auto_infer, "_auto_store", _store)
+    monkeypatch.setattr(auto_infer, "_dispatch_proposed_action", _dispatch)
+
+    result = await auto_infer.auto_infer_observer_event(
+        agent="observer.system",
+        kind="anomaly.detected",
+        summary="🌙 You're 60 min past your usual bedtime",
+        payload={"anomaly_type": "late_bedtime"},
+    )
+    assert result["ok"] is True
+    assert result["auto_confirmed"] is True
+    # No keyboard once auto-confirmed (no decision needed)
+    assert "keyboard" not in result
+    # The action was dispatched + confirm() was called on the store
+    assert len(dispatch_calls) == 1
+    assert dispatch_calls[0]["agent"] == "knowledge_notes"
+    assert dispatch_calls[0]["capability"] == "record_event"
+    assert store.confirm_calls and store.confirm_calls[0]["id"] == 77
+
+
+@pytest.mark.asyncio
+async def test_non_observational_kind_still_requires_user_confirm(monkeypatch) -> None:
+    """User-choice inferences (e.g. 'did you go to bed at 02:30?') stay
+    in 'proposed' state — only Telegram callback can confirm them."""
+    store = _FakeStore(count=0)
+
+    async def _store() -> _FakeStore:
+        return store
+
+    async def _dispatch(_action: dict) -> dict:
+        raise AssertionError("dispatch must NOT be called for non-observational kinds")
+
+    async def _infer(_context: str) -> dict:
+        return {
+            "inference": "Saeed went to bed at 02:30",
+            "confidence": 0.9,
+            "proposed_action": {
+                "agent": "knowledge_notes",
+                "capability": "record_event",
+                "payload": {
+                    "agent": "personal_assistant",
+                    "capability": "inferred_event",
+                    "summary": "Saeed went to bed at 02:30",
+                    "payload": {"source": "llm"},
+                },
+            },
+        }
+
+    monkeypatch.setattr(auto_infer, "_auto_store", _store)
+    monkeypatch.setattr(auto_infer, "_dispatch_proposed_action", _dispatch)
+    monkeypatch.setattr(auto_infer.infer_tool, "infer", _infer)
+
+    result = await auto_infer.auto_infer_observer_event(
+        agent="observer.sleep",
+        kind="sleep.bedtime_question",   # not in _AUTO_CONFIRM_SOURCE_KINDS
+        summary="Looks like bedtime",
+        payload={},
+    )
+    assert result["ok"] is True
+    assert result["auto_confirmed"] is False
+    # Keyboard is present so the user can confirm/reject
+    assert "keyboard" in result
+    assert store.confirm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_auto_confirm_below_threshold_stays_proposed(monkeypatch) -> None:
+    """Even a passive observational kind must clear the confidence
+    floor before we auto-confirm — a low-confidence guess shouldn't
+    sneak straight into the knowledge graph."""
+    store = _FakeStore(count=0)
+
+    async def _store() -> _FakeStore:
+        return store
+
+    async def _dispatch(_action: dict) -> dict:
+        raise AssertionError("dispatch must NOT be called below threshold")
+
+    # The rule-based path for anomaly.detected hard-codes its own
+    # confidence. To exercise the threshold, lower the cap.
+    monkeypatch.setattr(auto_infer, "_AUTO_CONFIRM_MIN_CONFIDENCE", 0.99)
+    monkeypatch.setattr(auto_infer, "_auto_store", _store)
+    monkeypatch.setattr(auto_infer, "_dispatch_proposed_action", _dispatch)
+
+    result = await auto_infer.auto_infer_observer_event(
+        agent="observer.system",
+        kind="anomaly.detected",
+        summary="Front door opened at 03:14",
+        payload={"anomaly_type": "after_hours_door"},
+    )
+    assert result["ok"] is True
+    assert result["auto_confirmed"] is False
+    assert "keyboard" in result
+    assert store.confirm_calls == []

@@ -29,7 +29,7 @@ Return ONLY compact JSON in this shape:
       "rationale": "why this may help now",
       "agent": "exact agent id",
       "capability": "exact capability id",
-      "inputs": {"argument": "value"},
+      "inputs": {"<real_input_field>": "<value>"},
       "evidence_event_ids": [1, 2],
       "confidence": 0.0,
       "cost_estimate": "none|tiny|small|medium",
@@ -42,7 +42,71 @@ Rules:
 - Prefer no proposal over a weak or repetitive suggestion.
 - Never suggest locks, alarms, payments, purchases, deletes, resets, or irreversible actions.
 - Every proposal should cite event ids when available.
+- Inputs MUST use the real field names from the capability spec (e.g. {"entity_id": "light.kitchen"} for home_automation.call_service). Never use placeholder fields like {"argument": "optimize"} — tools reject those.
+- Do NOT propose calling internal scheduled jobs: anomaly_check, summarize_storage, validate_backup, summarize_activity, summarize_alerts, infer_sleep_summary, morning_brief, evening_recap, index_path, pantry_low_stock, lora_training, reembed, pattern_mining, maintenance. They run on a cron — proposing them is noise.
+- Do NOT use verbs like "Optimize", "Monitor", "Review", "Check", or "Validate" in titles unless the action is a real, user-facing change.
 """
+
+# Internal cron-driven capabilities the advisor must never propose
+# (the LLM otherwise hallucinates "Optimize X" cards that target them
+# with invented arguments like {"argument": "optimize"}). Keep in sync
+# with `routine_sequence_miner._SKIP_SUBJECTS`.
+_NOISE_TARGET_CAPABILITIES = {
+    ("system_health", "anomaly_check"),
+    ("storage_backup", "summarize_storage"),
+    ("storage_backup", "validate_backup"),
+    ("knowledge_notes", "index_path"),
+    ("household_ops", "pantry_low_stock"),
+    ("personal_assistant", "morning_brief"),
+    ("personal_assistant", "evening_recap"),
+    ("personal_assistant", "infer_sleep_summary"),
+    ("personal_assistant", "late_bedtime_check"),
+    ("personal_assistant", "auto_infer_observer_event"),
+    ("dashboard_curator", "summarize_activity"),
+    ("dashboard_curator", "summarize_alerts"),
+    ("data_science", "pattern_mining"),
+    ("data_science", "routine_sequence_mining"),
+    ("data_science", "maintenance"),
+    ("data_science", "reembed"),
+    ("data_science", "weekly_report"),
+    ("data_science", "monthly_report"),
+    ("data_science", "lora_training"),
+}
+
+# Verb prefixes that, when paired with an internal-job action, almost
+# always indicate a hallucinated "Optimize X / Monitor Y" card with
+# made-up arguments. Used as a belt-and-braces filter after the
+# target-capability check above.
+_HALLUCINATED_VERB_PREFIXES = ("optimize", "monitor", "review", "check", "validate", "summarize")
+
+# Placeholder input shapes the LLM invents when it doesn't know the
+# real input fields. None of the real capabilities accept a key named
+# literally "argument" — its presence is a 1-bit signal of hallucination.
+_HALLUCINATED_INPUT_KEYS = {"argument"}
+
+
+def _is_noise_proposal(proposal: dict[str, Any]) -> tuple[bool, str | None]:
+    """Return ``(True, reason)`` when a proposal should be dropped as
+    LLM noise. Designed for the recurring reflector pattern:
+
+        title: "Optimize Auto-Infer Observer Event"
+        agent/capability: personal_assistant.auto_infer_observer_event
+        inputs: {"argument": "optimize"}
+
+    The target capability is cron-driven, the title verb is hollow,
+    and the inputs use a placeholder key the tool will reject."""
+    agent = str(proposal.get("agent") or "").strip()
+    capability = str(proposal.get("capability") or "").strip()
+    inputs = proposal.get("inputs") or {}
+    title = str(proposal.get("title") or "").strip().lower()
+    if (agent, capability) in _NOISE_TARGET_CAPABILITIES:
+        return True, "internal_cron_capability"
+    if isinstance(inputs, dict) and _HALLUCINATED_INPUT_KEYS.intersection(inputs.keys()):
+        return True, "placeholder_input_argument"
+    for verb in _HALLUCINATED_VERB_PREFIXES:
+        if title.startswith(verb + " "):
+            return True, f"hollow_verb:{verb}"
+    return False, None
 
 HERE = Path(__file__).resolve().parent
 
@@ -335,7 +399,7 @@ class Advisor:
         title = str(item.get("title") or "").strip()
         if not agent or not capability or not title:
             return None
-        return {
+        proposal = {
             "title": title,
             "rationale": str(item.get("rationale") or "").strip(),
             "agent": agent,
@@ -346,6 +410,17 @@ class Advisor:
             "cost_estimate": str(item.get("cost_estimate") or "").strip() or None,
             "impact_estimate": str(item.get("impact_estimate") or "").strip() or None,
         }
+        is_noise, reason = _is_noise_proposal(proposal)
+        if is_noise:
+            logger.info(
+                "advisor_dropped_noise_proposal",
+                agent=agent,
+                capability=capability,
+                title=title,
+                reason=reason,
+            )
+            return None
+        return proposal
 
     async def _save_proposal(
         self,

@@ -87,6 +87,22 @@ _SKIP_SUBJECTS = {
     "personal_assistant.late_bedtime_check",
     "dashboard_curator.summarize_activity",
     "dashboard_curator.summarize_alerts",
+    # Read-only / agent-self-verification tools. Whenever the chat or
+    # an automation calls a write action it almost always follows up
+    # with one of these to confirm the change took. That's tool-chain
+    # housekeeping, not a real user routine — the first production
+    # mining run produced 4 candidates like "lights_on -> get_entity_state"
+    # which are completely uninteresting.
+    "home_automation.get_entity_state",
+    "home_automation.list_entities",
+    "home_automation.search_entities",
+    "home_automation.call_service_in_area",
+    "home_automation.recent_appliance_activity",
+    "home_automation.ev_status",
+    "personal_assistant.auto_infer_observer_event",
+    "personal_assistant.infer_presence_return",
+    "personal_assistant.confirm_presence_return",
+    "personal_assistant.chat",
 }
 
 

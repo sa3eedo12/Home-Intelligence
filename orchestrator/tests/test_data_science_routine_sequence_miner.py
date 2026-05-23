@@ -429,3 +429,42 @@ def test_detect_cron_like_subjects_ignores_subjects_with_few_samples() -> None:
     ]
     cron_like = _detect_cron_like_subjects(events)
     assert "rare" not in cron_like
+
+
+@pytest.mark.asyncio
+async def test_excludes_ha_tool_chain_self_verification() -> None:
+    """home_automation.get_entity_state / list_entities / search_entities
+    / call_service_in_area are read-only helpers the agent calls right
+    after a write to verify the change. Mining 'lights_on ->
+    get_entity_state' is uninteresting tool-chain noise, not a routine.
+    First production run on TrueNAS surfaced 4 such candidates — this
+    test pins the fix."""
+    base = datetime(2026, 5, 11, 8, 0, tzinfo=UTC)
+    rows: list[dict] = []
+    eid = 0
+    # 10 days of lights_on -> get_entity_state within 30s, very strong stats
+    for day in range(10):
+        eid += 1
+        rows.append(_row(eid, base + timedelta(days=day), "home_automation", "lights_on"))
+        eid += 1
+        rows.append(_row(
+            eid, base + timedelta(days=day, seconds=30),
+            "home_automation", "get_entity_state",
+        ))
+
+    conn = Conn(rows)
+    miner = RoutineSequenceMiner(
+        pool=FakePool(conn),
+        window_minutes=30,
+        min_support_a=5,
+        min_pair_count=4,
+        min_confidence=0.5,
+        min_lift=1.0,
+    )
+    result = await miner.run(window_days=30)
+    for c in result["candidates"]:
+        assert "home_automation.get_entity_state" not in c["name"], (
+            f"HA query tool leaked into candidates: {c['name']!r}"
+        )
+        assert "home_automation.list_entities" not in c["name"]
+        assert "home_automation.search_entities" not in c["name"]

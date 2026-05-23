@@ -534,6 +534,23 @@ def _agent_url(agent: str) -> str:
     return f"http://{agent}:8000"
 
 
+# Source kinds where the inference is a *passive observation* (the
+# system just logging that something happened) rather than a user
+# choice. For these we auto-confirm + auto-dispatch the record_event
+# action so the inferences actually flow into knowledge_notes (and
+# downstream the proactive scanner can use them). Without this, the
+# Telegram callback is the only way auto-inferences ever exit
+# 'proposed' state, and the proactive loop starves.
+_AUTO_CONFIRM_SOURCE_KINDS = {
+    "anomaly.detected",
+    "entertainment.left_on",
+    "device.state_changed",
+    "appliance.state_changed",
+    "presence.left_on",
+}
+_AUTO_CONFIRM_MIN_CONFIDENCE = 0.60
+
+
 async def _dispatch_proposed_action(action: dict[str, Any]) -> dict[str, Any]:
     url = _agent_url(str(action["agent"]))
     async with httpx.AsyncClient(timeout=10) as client:
@@ -729,14 +746,63 @@ async def auto_infer_observer_event(**envelope: Any) -> dict[str, Any]:
         auto_inference_id=auto_inference_id,
         corrections=corrections,
     )
-    return {
+
+    # Passive observations auto-confirm so the inference layer actually
+    # flows downstream instead of stalling forever on a Telegram
+    # callback that may never come. We only do this for explicitly
+    # observational source kinds + above the confidence floor; user
+    # *choices* (e.g. "did you go to bed at 02:30?") still require a
+    # confirm tap.
+    auto_confirmed = False
+    if (
+        source_kind in _AUTO_CONFIRM_SOURCE_KINDS
+        and confidence >= _AUTO_CONFIRM_MIN_CONFIDENCE
+        and _safe_record_event_action(proposed_action)
+    ):
+        try:
+            action_result = await _dispatch_proposed_action(proposed_action)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "auto_infer_auto_confirm_dispatch_failed",
+                auto_inference_id=auto_inference_id,
+                error=str(exc),
+            )
+            action_result = None
+        if action_result is not None and _action_succeeded(action_result):
+            try:
+                await store.confirm(
+                    auto_inference_id,
+                    chat_id=None,
+                    action_result=action_result,
+                )
+                auto_confirmed = True
+                logger.info(
+                    "auto_infer_auto_confirmed",
+                    source_kind=source_kind,
+                    auto_inference_id=auto_inference_id,
+                    confidence=confidence,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "auto_infer_auto_confirm_persist_failed",
+                    auto_inference_id=auto_inference_id,
+                    error=str(exc),
+                )
+
+    response = {
         "ok": True,
         "summary": _summary_for(inference, envelope, reason),
-        "keyboard": _keyboard_for(auto_inference_id),
         "auto_inference_id": auto_inference_id,
         "inference": inference,
         "confidence": confidence,
+        "auto_confirmed": auto_confirmed,
     }
+    # Only include the confirm keyboard when the inference still
+    # needs a user decision. Auto-confirmed rows shouldn't show buttons
+    # — the user can't "un-confirm" via Telegram anyway.
+    if not auto_confirmed:
+        response["keyboard"] = _keyboard_for(auto_inference_id)
+    return response
 
 
 @tool("confirm_auto_inference", side_effects=True)

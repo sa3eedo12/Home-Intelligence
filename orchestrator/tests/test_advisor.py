@@ -234,3 +234,106 @@ async def test_never_tier_proposal_is_dropped_without_dispatch() -> None:
     registry.dispatch.assert_awaited_once_with(
         "home_automation", "list_entities", {"domain": "media_player"}
     )
+
+
+# ── Noise filter for hallucinated reflector/advisor proposals ────
+
+
+def test_is_noise_proposal_blocks_internal_cron_capability() -> None:
+    from orchestrator.advisor import _is_noise_proposal
+
+    is_noise, reason = _is_noise_proposal({
+        "title": "Tweak Anomaly Detection",
+        "agent": "system_health",
+        "capability": "anomaly_check",
+        "inputs": {"window_minutes": 30},
+    })
+    assert is_noise
+    assert reason == "internal_cron_capability"
+
+
+def test_is_noise_proposal_blocks_placeholder_argument_input() -> None:
+    """The LLM invents {"argument": "monitor"} when it can't recall the
+    real input fields. No tool accepts a key literally named 'argument'."""
+    from orchestrator.advisor import _is_noise_proposal
+
+    is_noise, reason = _is_noise_proposal({
+        "title": "Some real-sounding action",
+        "agent": "home_automation",
+        "capability": "call_service",
+        "inputs": {"argument": "monitor"},
+    })
+    assert is_noise
+    assert reason == "placeholder_input_argument"
+
+
+def test_is_noise_proposal_blocks_hollow_verb_titles() -> None:
+    """'Optimize/Monitor/Review/Check/Validate/Summarize <thing>' titles
+    are the recurring hallucinated card shape — drop them."""
+    from orchestrator.advisor import _is_noise_proposal
+
+    for title in (
+        "Optimize Knowledge Notes",
+        "Monitor Health Metrics",
+        "Review Health Sync",
+        "Check Auto Infer",
+        "Validate Backups",
+        "Summarize Activity",
+    ):
+        is_noise, reason = _is_noise_proposal({
+            "title": title,
+            "agent": "knowledge_notes",
+            "capability": "list",   # not in internal list, so verb is sole signal
+            "inputs": {"limit": 10},
+        })
+        assert is_noise, f"{title!r} should be flagged"
+        assert reason and reason.startswith("hollow_verb:")
+
+
+def test_is_noise_proposal_passes_real_user_facing_action() -> None:
+    """A concrete action with real inputs and a content-bearing title
+    must NOT be flagged."""
+    from orchestrator.advisor import _is_noise_proposal
+
+    is_noise, reason = _is_noise_proposal({
+        "title": "Set bedroom thermostat to 21°C for tonight",
+        "agent": "home_automation",
+        "capability": "call_service",
+        "inputs": {
+            "domain": "climate",
+            "service": "set_temperature",
+            "entity_id": "climate.bedroom",
+            "temperature": 21,
+        },
+    })
+    assert not is_noise
+    assert reason is None
+
+
+def test_normalize_proposal_drops_noise_at_intake() -> None:
+    """The whole intake pipeline (_normalize_proposal) must return None
+    for noise so it never reaches add_proposal()."""
+    from unittest.mock import MagicMock
+    from orchestrator.advisor import Advisor
+
+    advisor = Advisor.__new__(Advisor)
+    # Internal noise — drops
+    result = advisor._normalize_proposal({
+        "title": "Optimize Auto Infer Event Processing",
+        "agent": "personal_assistant",
+        "capability": "auto_infer_observer_event",
+        "inputs": {"argument": "optimize"},
+        "confidence": 0.85,
+    })
+    assert result is None
+
+    # Real proposal — passes through
+    result = advisor._normalize_proposal({
+        "title": "Wind down the lights",
+        "agent": "home_automation",
+        "capability": "call_service_in_area",
+        "inputs": {"domain": "light", "area_id": "living_room"},
+        "confidence": 0.7,
+    })
+    assert result is not None
+    assert result["title"] == "Wind down the lights"
