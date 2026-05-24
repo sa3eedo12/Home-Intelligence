@@ -23,6 +23,12 @@ SKIP_KINDS = {
     "coffee.brewed",
     "cleaning.completed",
     "presence.changed",
+    # device.state_changed events get persisted to event_log directly by
+    # the device_activity_recorder observer. They don't need a separate
+    # LLM inference round — adding one was an expensive no-op that
+    # contributed to the post-reboot CPU fire when thousands of
+    # unavailable→on transitions stacked up.
+    "device.state_changed",
 }
 DEFAULT_MIN_CONFIDENCE = 0.5
 DEFAULT_HOURLY_CAP = 5
@@ -544,7 +550,9 @@ def _agent_url(agent: str) -> str:
 _AUTO_CONFIRM_SOURCE_KINDS = {
     "anomaly.detected",
     "entertainment.left_on",
-    "device.state_changed",
+    # NOTE: device.state_changed used to be here but is now in
+    # SKIP_KINDS — the recorder persists rows directly and the LLM
+    # inference round was an expensive no-op.
     "appliance.state_changed",
     "presence.left_on",
 }

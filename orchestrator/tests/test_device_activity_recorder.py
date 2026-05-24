@@ -342,3 +342,33 @@ async def test_unknown_unavailable_dropped() -> None:
     await obs.handle(_payload("light.x", "unknown"))
     await obs.handle(_payload("light.x", "unavailable"))
     assert obs.emitted == []
+
+
+@pytest.mark.asyncio
+async def test_reconnection_from_unavailable_dropped() -> None:
+    """When HA itself restarts, every entity flips from 'unavailable' to
+    its actual state in one burst. These transitions are NOT real user
+    activity — nothing actually toggled — so the recorder must drop
+    them. Without this filter, a single NAS reboot produced thousands
+    of phantom device.state_changed events on TrueNAS, each triggering
+    a downstream LLM inference and pegging Ollama at 800%+ CPU."""
+    obs = _Capture()
+    # First call sets the baseline (this one DOES emit because old="off")
+    await obs.handle(_payload("light.kitchen", "on"))
+    assert len(obs.emitted) == 1
+    obs.emitted.clear()
+    # Simulate HA reconnect: every entity goes unavailable → its state
+    await obs.handle(_payload("switch.charger_port_1", "on", old_state="unavailable"))
+    await obs.handle(_payload("switch.charger_port_2", "off", old_state="unavailable"))
+    await obs.handle(_payload("light.bedroom", "on", old_state="unavailable"))
+    assert obs.emitted == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_to_known_also_dropped() -> None:
+    """Similar to the unavailable case — when an entity has just been
+    added and HA still reports 'unknown' for its prior state, the first
+    real reading isn't user activity either."""
+    obs = _Capture()
+    await obs.handle(_payload("switch.brand_new", "on", old_state="unknown"))
+    assert obs.emitted == []

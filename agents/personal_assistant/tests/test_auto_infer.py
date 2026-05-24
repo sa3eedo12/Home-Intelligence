@@ -855,3 +855,28 @@ async def test_auto_confirm_below_threshold_stays_proposed(monkeypatch) -> None:
     assert result["auto_confirmed"] is False
     assert "keyboard" in result
     assert store.confirm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_device_state_changed_skipped_no_llm_round(monkeypatch) -> None:
+    """device.state_changed events are persisted directly by the
+    device_activity_recorder observer. Running an LLM inference per
+    transition is an expensive no-op — and after a NAS reboot when HA
+    flips every entity from unavailable->on, it produces a CPU fire.
+    The reactive trigger still fires (we can't change that without
+    yaml), but auto_infer_observer_event must short-circuit early."""
+    async def _fail_store() -> _FakeStore:
+        raise AssertionError("store must NOT be touched for skipped kinds")
+
+    monkeypatch.setattr(auto_infer, "_auto_store", _fail_store)
+
+    result = await auto_infer.auto_infer_observer_event(
+        kind="device.state_changed",
+        summary="Light kitchen turned on",
+        payload={"entity_id": "light.kitchen", "domain": "light"},
+    )
+    assert result == {
+        "ok": True,
+        "skipped": True,
+        "reason": "skip_kind:device.state_changed",
+    }

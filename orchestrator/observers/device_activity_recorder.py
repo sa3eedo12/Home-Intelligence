@@ -112,6 +112,15 @@ class DeviceActivityRecorder(Observer):
         if new_norm is None or new_norm in {"", "unknown", "unavailable"}:
             return
         old_norm = normalized_state(change.old_state)
+        # Drop reconnection transitions: when HA itself restarts (or the
+        # NAS reboots), every entity flips from "unavailable" → its actual
+        # state. That's not user activity — nothing actually changed — so
+        # we MUST not record it. Without this filter, a single NAS reboot
+        # produced ~thousands of phantom device.state_changed events,
+        # each firing a downstream LLM inference call and pegging Ollama
+        # at 800%+ CPU for ~20 min.
+        if old_norm in {None, "", "unknown", "unavailable"}:
+            return
         # Only write rows on real transitions
         if old_norm == new_norm:
             return
