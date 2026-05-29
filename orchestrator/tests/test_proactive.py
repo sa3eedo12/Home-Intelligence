@@ -331,3 +331,98 @@ async def test_scan_survives_store_unavailable() -> None:
     assert result["emitted"] == 0
     assert result["skipped"] == "store_unavailable"
     reflection_store.add_proposal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scan_suppresses_dismissed_source_kind_for_30_days() -> None:
+    """When the user dismisses a proactive suggestion, the same
+    source_kind must not be re-emitted for ~30 days. Without this,
+    'TV around lunch?' came back 5× after dismissal because the 4h
+    dedup window kept rolling over."""
+    confirmed = [
+        _confirmed_inference(kind="entertainment.left_on", when="2026-05-10T12:00:00+00:00"),
+        _confirmed_inference(kind="entertainment.left_on", when="2026-05-11T12:00:00+00:00"),
+        _confirmed_inference(kind="entertainment.left_on", when="2026-05-12T12:00:00+00:00"),
+    ]
+    # User dismissed it yesterday
+    existing = [
+        {
+            "kind": "proactive_suggestion",
+            "status": "dismissed",
+            "rationale": "Confirmed 3 times. source_kind=entertainment.left_on; recent_examples=[]",
+            "created_at": "2026-05-13T12:00:00+00:00",
+            "resolved_at": "2026-05-13T12:30:00+00:00",
+        }
+    ]
+    auto_store, reflection_store = _make_stores(confirmed, existing_proposals=existing)
+
+    now = datetime(2026, 5, 14, 12, 42, tzinfo=UTC)
+    result = await scan_for_opportunities(
+        reflection_store=reflection_store,
+        auto_store=auto_store,
+        pool=None,
+        now=now,
+    )
+    assert result["emitted"] == 0
+    reflection_store.add_proposal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scan_re_emits_after_dismissed_suppression_window_passes() -> None:
+    """If the dismissal was >30 days ago, the suppression expires and
+    the scanner may emit again (gives the user a fresh opportunity)."""
+    confirmed = [
+        _confirmed_inference(kind="entertainment.left_on", when="2026-05-10T12:00:00+00:00"),
+        _confirmed_inference(kind="entertainment.left_on", when="2026-05-11T12:00:00+00:00"),
+        _confirmed_inference(kind="entertainment.left_on", when="2026-05-12T12:00:00+00:00"),
+    ]
+    existing = [
+        {
+            "kind": "proactive_suggestion",
+            "status": "dismissed",
+            "rationale": "Confirmed 3 times. source_kind=entertainment.left_on; recent_examples=[]",
+            "created_at": "2026-04-01T12:00:00+00:00",
+            "resolved_at": "2026-04-01T13:00:00+00:00",  # > 30 days before "now"
+        }
+    ]
+    auto_store, reflection_store = _make_stores(confirmed, existing_proposals=existing)
+
+    now = datetime(2026, 5, 14, 12, 42, tzinfo=UTC)
+    result = await scan_for_opportunities(
+        reflection_store=reflection_store,
+        auto_store=auto_store,
+        pool=None,
+        now=now,
+    )
+    # Dismissal aged out → free to suggest again
+    assert result["emitted"] == 1
+    reflection_store.add_proposal.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_scan_still_dedups_pending_proposals_short_window() -> None:
+    """A *pending* proposal (not yet dismissed/accepted) within the
+    short 4h window still blocks re-emission to avoid spamming
+    between scans."""
+    confirmed = [
+        _confirmed_inference(kind="x.y", when="2026-05-12T18:00:00+00:00"),
+        _confirmed_inference(kind="x.y", when="2026-05-13T18:00:00+00:00"),
+        _confirmed_inference(kind="x.y", when="2026-05-14T18:00:00+00:00"),
+    ]
+    existing = [
+        {
+            "kind": "proactive_suggestion",
+            "status": "pending",
+            "rationale": "Confirmed 3 times. source_kind=x.y; recent_examples=[]",
+            "created_at": "2026-05-14T17:30:00+00:00",  # 1h ago
+        }
+    ]
+    auto_store, reflection_store = _make_stores(confirmed, existing_proposals=existing)
+    now = datetime(2026, 5, 14, 18, 42, tzinfo=UTC)
+    result = await scan_for_opportunities(
+        reflection_store=reflection_store,
+        auto_store=auto_store,
+        pool=None,
+        now=now,
+    )
+    assert result["emitted"] == 0

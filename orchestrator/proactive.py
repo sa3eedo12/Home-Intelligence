@@ -41,6 +41,13 @@ DEFAULT_SLOT_MINUTES = 60
 DEFAULT_LOOKBACK_DAYS = 30
 DEFAULT_MIN_CONFIRMATIONS = 3
 DEFAULT_DEDUP_HOURS = 4
+# Once the user has dismissed a proactive suggestion for a given
+# source_kind, suppress further suggestions for the same source_kind
+# for this many days. Without this guard, the scanner re-emits the
+# same "you usually do X around now" proposal every scan cycle past
+# the 4h dedup window, even though the user already said no — which
+# made the inbox feel like spam (e.g. "TV around lunch?" repeated 5×).
+DEFAULT_DISMISSED_SUPPRESS_DAYS = 30
 DEFAULT_MAX_PROPOSALS_PER_SCAN = 1
 
 
@@ -74,6 +81,15 @@ def _dedup_hours() -> int:
         return max(1, int(raw))
     except (TypeError, ValueError):
         return DEFAULT_DEDUP_HOURS
+
+
+def _dismissed_suppress_days() -> int:
+    raw = os.getenv("PROACTIVE_DISMISSED_SUPPRESS_DAYS",
+                    str(DEFAULT_DISMISSED_SUPPRESS_DAYS))
+    try:
+        return max(1, min(int(raw), 365))
+    except (TypeError, ValueError):
+        return DEFAULT_DISMISSED_SUPPRESS_DAYS
 
 
 def _max_per_scan() -> int:
@@ -205,29 +221,53 @@ async def _recent_proactive_kinds(
     dedup_hours: int,
     *,
     now: datetime | None = None,
+    dismissed_suppress_days: int | None = None,
 ) -> set[str]:
-    """Return the source_kinds we've already proposed about in the dedup
-    window. Reuses list_proposals; cheap for the volumes we're at."""
+    """Return source_kinds we should NOT propose about right now.
+
+    A source_kind is suppressed when EITHER:
+      - it's been proposed within the last ``dedup_hours`` hours
+        (covers any status — don't spam between scans), OR
+      - a proposal for it was *dismissed* within the last
+        ``dismissed_suppress_days`` days (user explicitly said no — leave
+        them alone for a while).
+
+    Without the dismissed branch, the scanner re-emits the same
+    suggestion every cycle past the 4h dedup window, and dismissed
+    suggestions pile right back up (e.g. "TV around lunch?" reappeared
+    5× after the user had already dismissed it).
+    """
     try:
-        rows = await reflection_store.list_proposals(limit=200)
+        rows = await reflection_store.list_proposals(limit=400)
     except Exception as exc:
         logger.warning("proactive_list_proposals_failed", error=str(exc))
         return set()
-    cutoff = (now or datetime.now(UTC)) - timedelta(hours=dedup_hours)
+    now = now or datetime.now(UTC)
+    short_cutoff = now - timedelta(hours=dedup_hours)
+    long_cutoff = now - timedelta(
+        days=dismissed_suppress_days or DEFAULT_DISMISSED_SUPPRESS_DAYS
+    )
     seen: set[str] = set()
     for row in rows:
         if row.get("kind") != "proactive_suggestion":
             continue
-        created = _parse_dt(row.get("created_at"))
-        if created is None or created < cutoff:
-            continue
-        # We tag the source_kind into the rationale; pull it back out.
         rationale = str(row.get("rationale") or "")
         marker = "source_kind="
-        if marker in rationale:
-            tag = rationale.split(marker, 1)[1].split(";", 1)[0].strip()
-            if tag:
-                seen.add(tag)
+        if marker not in rationale:
+            continue
+        tag = rationale.split(marker, 1)[1].split(";", 1)[0].strip()
+        if not tag:
+            continue
+        # Use resolved_at when present so dismissals from yesterday still
+        # suppress today; fall back to created_at otherwise.
+        ts = _parse_dt(row.get("resolved_at")) or _parse_dt(row.get("created_at"))
+        if ts is None:
+            continue
+        status = str(row.get("status") or "")
+        if status == "dismissed" and ts >= long_cutoff:
+            seen.add(tag)
+        elif ts >= short_cutoff:
+            seen.add(tag)
     return seen
 
 
@@ -296,7 +336,12 @@ async def scan_for_opportunities(
         )
     )
 
-    seen = await _recent_proactive_kinds(reflection_store, _dedup_hours(), now=now)
+    seen = await _recent_proactive_kinds(
+        reflection_store,
+        _dedup_hours(),
+        now=now,
+        dismissed_suppress_days=_dismissed_suppress_days(),
+    )
     emitted = 0
     out: list[dict[str, Any]] = []
     for kind, _slot, rows in candidates:
