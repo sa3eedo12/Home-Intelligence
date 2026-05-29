@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
@@ -12,6 +13,8 @@ import asyncpg
 from home_agents_sdk import tool
 from home_agents_sdk.health_store import HealthStore
 from home_agents_sdk.sleep_summaries_store import SleepSummariesStore
+
+logger = logging.getLogger("personal_assistant.sleep_inference")
 
 _POOL: asyncpg.Pool | None = None
 
@@ -822,6 +825,20 @@ async def infer_sleep_summary(
         used_in_bed_fallback = bool(sleep_intervals)
 
     if not sleep_intervals:
+        # Surface this clearly — silent "no data" returns are the reason
+        # the anomaly detector kept warning about missing sleep summaries
+        # while the scheduled job was actually running successfully but
+        # finding nothing because it fired too early (before the watch
+        # had synced last night's sleep).
+        logger.warning(
+            "infer_sleep_summary_no_data",
+            member_id=resolved_member_id,
+            night_of=str(night),
+            window_start=window_start.isoformat(),
+            window_end=window_end.isoformat(),
+            total_health_rows=len(health_rows),
+            dropped_envelope_rows=len(dropped_envelope_rows),
+        )
         return {
             "ok": False,
             "summary": "",

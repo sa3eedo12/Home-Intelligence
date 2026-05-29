@@ -85,9 +85,15 @@ jobs:
     notify: { severity: info, topic: brief.evening }
 
   - id: sleep_summary_morning
-    description: "Infer last night's sleep quality"
+    description: "Infer last night's sleep quality (fires AFTER member wake_time + ~2h so HealthKit has synced the night)"
     trigger: cron
-    cron: { hour: 8, minute: 0 }
+    # 11:00 local. Member wake_time defaults to ~09:00 — Apple Watch
+    # only syncs sleep when the user gets out of bed + opens the
+    # Health app or auto-export runs. Firing at 08:00 was BEFORE the
+    # data existed; the job ran successfully every day but found
+    # "No HealthKit sleep rows" and silently exited. Result: anomaly
+    # detector kept reporting "No sleep summary for N nights".
+    cron: { hour: 11, minute: 0 }
     dispatch:
       agent: personal_assistant
       capability: infer_sleep_summary
