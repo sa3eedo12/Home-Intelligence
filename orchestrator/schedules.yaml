@@ -240,3 +240,21 @@ jobs:
       agent: __orchestrator__
       capability: orchestrator.pre_bedtime_scan
       inputs: {}
+
+  - id: health_goals_compute
+    description: "Walk active health goals + write today's progress snapshot (23:30 local)"
+    trigger: cron
+    cron: { hour: 23, minute: 30 }
+    dispatch:
+      agent: __orchestrator__
+      capability: orchestrator.health_goals_compute
+      inputs: {}
+
+  - id: health_goals_workout_nag
+    description: "Playful workout nag for goals whose workout_budget says today is a workout day"
+    trigger: interval
+    interval: { minutes: 30 }
+    dispatch:
+      agent: __orchestrator__
+      capability: orchestrator.health_goals_workout_nag
+      inputs: {}

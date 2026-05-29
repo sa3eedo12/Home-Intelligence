@@ -639,6 +639,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             pool=pool,
         )
 
+    async def _run_health_goals_compute(_inputs: dict[str, Any]) -> dict[str, Any]:
+        from . import health_goals as hg_mod
+
+        return await hg_mod.compute_today(
+            pool=pool, store=app.state.health_goals_store,
+        )
+
+    async def _run_workout_nags(_inputs: dict[str, Any]) -> dict[str, Any]:
+        from . import health_goals as hg_mod
+
+        return await hg_mod.run_workout_nags(
+            pool=pool, redis=redis,
+            store=app.state.health_goals_store,
+            nag_store=app.state.member_nag_windows_store,
+        )
+
     async def _run_pre_bedtime_scan(_inputs: dict[str, Any]) -> dict[str, Any]:
         from .pre_bedtime import scan_pre_bedtime
 
@@ -671,6 +687,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "orchestrator.noon_orders_poll": _run_noon_orders_poll,
             "orchestrator.proactive_scan": _run_proactive_scan,
             "orchestrator.pre_bedtime_scan": _run_pre_bedtime_scan,
+            "orchestrator.health_goals_compute": _run_health_goals_compute,
+            "orchestrator.health_goals_workout_nag": _run_workout_nags,
         },
     )
     await scheduler.start()
@@ -703,6 +721,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     notify_task = asyncio.create_task(
         run_consumer(redis=redis, policy_engine=policy_engine, send_fn=_send_fn)
     )
+
+    from . import chore_auto_detect as _chore_auto_detect
+    chore_auto_task = asyncio.create_task(
+        _chore_auto_detect.run_consumer(
+            redis=redis, pool=pool, store=app.state.chore_store,
+        )
+    )
+    app.state.chore_auto_task = chore_auto_task
 
     activity_aggregator = ActivityAggregator(redis)
     await activity_aggregator.start()
@@ -907,6 +933,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await activity_aggregator.stop()
     await scheduler.shutdown()
     notify_task.cancel()
+    chore_auto_task.cancel()
     warmup_task.cancel()
     try:
         await tg_app.updater.stop()
