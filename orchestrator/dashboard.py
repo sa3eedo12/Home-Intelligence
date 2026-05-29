@@ -9,6 +9,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from home_agents_sdk.health_store import HealthStore
+from home_agents_sdk.health_goals_store import HealthGoalsStore
+from home_agents_sdk.chore_store import ChoreStore
+from home_agents_sdk.member_nag_windows_store import MemberNagWindowsStore
 from home_agents_sdk.reflection_store import ReflectionStore
 from home_agents_sdk.routine_lifecycle_store import RoutineLifecycleStore
 from home_agents_sdk.telemetry import get_logger
@@ -695,6 +698,12 @@ async def dashboard(request: Request) -> HTMLResponse:
         suggested_routines = int(stats.get("suggested") or 0)
     except Exception:
         suggested_routines = 0
+    overdue_chores = 0
+    try:
+        chore_rows = await _chore_store(request).list_status(include_recent=False)
+        overdue_chores = sum(1 for c in chore_rows if c.status == "overdue")
+    except Exception:
+        overdue_chores = 0
     return templates.TemplateResponse(
         request=request,
         name="dashboard.html.j2",
@@ -702,6 +711,7 @@ async def dashboard(request: Request) -> HTMLResponse:
             "status": await _status(request),
             "pending_proposals": pending_proposals,
             "suggested_routines": suggested_routines,
+            "overdue_chores": overdue_chores,
         },
     )
 
@@ -837,6 +847,50 @@ def _routine_lifecycle_store(request: Request) -> RoutineLifecycleStore:
     return RoutineLifecycleStore(getattr(request.app.state, "pool", None))
 
 
+def _chore_store(request: Request) -> ChoreStore:
+    store = getattr(request.app.state, "chore_store", None)
+    if store is not None:
+        return store
+    return ChoreStore(getattr(request.app.state, "pool", None))
+
+
+def _prep_chore(status: Any) -> dict[str, Any]:
+    """Render a ChoreStatus row for the template. Picks a human label
+    for the next-due copy and a deterministic CSS class for color."""
+    last_done = _format_dt(getattr(status, "last_done_at", None))
+    days_overdue = int(getattr(status, "days_overdue", 0))
+    if status.status == "overdue":
+        days_late = days_overdue
+        when_label = (
+            f"{days_late} day overdue" if days_late == 1
+            else f"{days_late} days overdue"
+        )
+    elif status.status == "due_today":
+        when_label = "due today"
+    elif status.status == "soon":
+        days_until = -days_overdue
+        when_label = "due tomorrow" if days_until == 1 else f"due in {days_until} days"
+    else:
+        days_until = -days_overdue
+        when_label = (
+            "done — next in a week"
+            if days_until >= 7
+            else f"done — next in {days_until} day{'s' if days_until != 1 else ''}"
+        )
+    return {
+        "template_id": status.template_id,
+        "name": status.name,
+        "category": status.category,
+        "description": status.description or "",
+        "cadence_days": status.cadence_days,
+        "auto_detect_kind": status.auto_detect_kind,
+        "last_done_at": last_done,
+        "next_due_on": status.next_due_on.isoformat() if status.next_due_on else None,
+        "when_label": when_label,
+        "status": status.status,
+    }
+
+
 def _format_routine_ts(value: Any) -> str | None:
     if value is None:
         return None
@@ -877,6 +931,130 @@ async def routines_page(request: Request) -> HTMLResponse:
             "active": [_prep_routine(r) for r in active],
             "dismissed": [_prep_routine(r) for r in dismissed],
             "stats": stats,
+        },
+    )
+
+
+@router.get("/dashboard/chores", response_class=HTMLResponse)
+async def chores_page(request: Request) -> HTMLResponse:
+    """Recurring household chores: overdue / due today / soon / recent
+    with a manual mark-done button on each. Status is computed from
+    the chore_log; the template just declares cadence."""
+    store = _chore_store(request)
+    all_status = await store.list_status(include_recent=True)
+    buckets: dict[str, list[Any]] = {
+        "overdue": [], "due_today": [], "soon": [], "recent": [],
+    }
+    for s in all_status:
+        buckets.setdefault(s.status, []).append(_prep_chore(s))
+    return templates.TemplateResponse(
+        request=request,
+        name="chores.html.j2",
+        context={
+            "overdue": buckets["overdue"],
+            "due_today": buckets["due_today"],
+            "soon": buckets["soon"],
+            "recent": buckets["recent"],
+            "total": len(all_status),
+        },
+    )
+
+
+@router.get("/dashboard/goals", response_class=HTMLResponse)
+async def goals_page(request: Request) -> HTMLResponse:
+    """Health goals for the household. Shows each active + paused goal
+    as a prose card with its plan, latest progress, and a button to
+    refresh the plan. Creating a new goal happens in plain English
+    via Telegram; this page is the canonical viewer."""
+    store = _health_goals_store(request)
+    pool = getattr(request.app.state, "pool", None)
+    members: list[dict[str, Any]] = []
+    if pool is not None:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, name FROM household_members ORDER BY id"
+            )
+        members = [dict(r) for r in rows]
+    cards: list[dict[str, Any]] = []
+    for m in members:
+        member_goals = await store.list_all_for_member(
+            m["id"], include_archived=False,
+        )
+        for g in member_goals:
+            cards.append(await _prep_goal(g, m, store))
+    return templates.TemplateResponse(
+        request=request,
+        name="goals.html.j2",
+        context={"goals": cards, "members": members},
+    )
+
+
+def _health_goals_store(request: Request) -> HealthGoalsStore:
+    store = getattr(request.app.state, "health_goals_store", None)
+    if store is not None:
+        return store
+    return HealthGoalsStore(getattr(request.app.state, "pool", None))
+
+
+async def _prep_goal(
+    goal: dict[str, Any],
+    member: dict[str, Any],
+    store: HealthGoalsStore,
+) -> dict[str, Any]:
+    """Shape a goal row for the goals template — pulls latest progress
+    + milestones in the same call so the template stays declarative."""
+    latest = await store.get_progress(int(goal["id"]))
+    milestones = await store.list_milestones(int(goal["id"]))
+    today_progress: dict[str, Any] | None = None
+    if latest:
+        today_progress = {
+            "label": latest.get("on_track_label") or "no_data",
+            "score": latest.get("on_track_score"),
+            "workout_required": latest.get("workout_required"),
+            "workout_completed": latest.get("workout_completed"),
+            "rest_day_excused": latest.get("rest_day_excused"),
+            "day": latest.get("day").isoformat() if latest.get("day") else None,
+        }
+    return {
+        "id": goal["id"],
+        "member_id": goal["member_id"],
+        "member_name": member.get("name") or f"Member {member.get('id')}",
+        "title": goal["title"],
+        "description": goal["description"],
+        "status": goal["status"],
+        "plan_text": goal.get("plan_text") or "",
+        "plan_generated_at": _format_dt(goal.get("plan_generated_at")),
+        "start_date": goal["start_date"].isoformat() if goal.get("start_date") else None,
+        "target_date": goal["target_date"].isoformat() if goal.get("target_date") else None,
+        "metric_links": goal.get("metric_links") or [],
+        "workout_budget": goal.get("workout_budget") or {},
+        "today_progress": today_progress,
+        "milestones": [
+            {
+                "id": ms["id"],
+                "due_date": ms["due_date"].isoformat() if ms.get("due_date") else None,
+                "target_description": ms["target_description"],
+                "status": ms["status"],
+            }
+            for ms in milestones
+        ],
+    }
+    store = _chore_store(request)
+    all_status = await store.list_status(include_recent=True)
+    buckets: dict[str, list[Any]] = {
+        "overdue": [], "due_today": [], "soon": [], "recent": [],
+    }
+    for s in all_status:
+        buckets.setdefault(s.status, []).append(_prep_chore(s))
+    return templates.TemplateResponse(
+        request=request,
+        name="chores.html.j2",
+        context={
+            "overdue": buckets["overdue"],
+            "due_today": buckets["due_today"],
+            "soon": buckets["soon"],
+            "recent": buckets["recent"],
+            "total": len(all_status),
         },
     )
 

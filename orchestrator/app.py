@@ -22,6 +22,9 @@ from home_agents_sdk.knowledge_graph import KnowledgeGraph
 from home_agents_sdk.knowledge_graph_seeder import seed_from_baseline as kg_seed_from_baseline
 from home_agents_sdk.knowledge_graph_store import KnowledgeGraphStore
 from home_agents_sdk.routine_lifecycle_store import RoutineLifecycleStore
+from home_agents_sdk.chore_store import ChoreStore
+from home_agents_sdk.health_goals_store import HealthGoalsStore
+from home_agents_sdk.member_nag_windows_store import MemberNagWindowsStore
 from home_agents_sdk.llm import OllamaClient
 from home_agents_sdk.npu import NPUClient
 from home_agents_sdk.gap_store import GapStore
@@ -385,6 +388,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.warning("knowledge_graph_seed_failed", error=str(exc))
         app.state.kg_seed_counts = {}
     app.state.kg_store = kg_store
+
+    # Chore + health goal stores. Both run after migrations so the new
+    # 26_chores_goals.sql tables exist. Seeding chore_templates is
+    # idempotent — first boot installs the 15 defaults, every boot
+    # after that is a no-op.
+    chore_store = ChoreStore(pool)
+    try:
+        seeded = await chore_store.seed_defaults()
+        if seeded:
+            logger.info("chore_templates_seeded", count=seeded)
+    except Exception as exc:
+        logger.warning("chore_seed_failed", error=str(exc))
+    app.state.chore_store = chore_store
+    app.state.health_goals_store = HealthGoalsStore(pool)
+    app.state.member_nag_windows_store = MemberNagWindowsStore(pool)
 
     bus = EventBus(redis_url)
     try:

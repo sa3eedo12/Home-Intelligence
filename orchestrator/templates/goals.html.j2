@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Goals · Home Intelligence</title>
+  <link rel="stylesheet" href="/static/_design.css">
+  <link rel="stylesheet" href="/static/morning_brief.css">
+  <link rel="stylesheet" href="/static/proposals.css">
+  <script src="/static/_app.js" defer></script>
+</head>
+<body class="page-body proposals-body">
+  <header class="brief-topbar">
+    <a href="/dashboard" class="back-link">← Dashboard</a>
+    <h1>🎯 Goals</h1>
+    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
+  </header>
+
+  <main class="brief-shell">
+    <section class="proposals-controls card">
+      <p class="card-intro">
+        Health goals you're tracking. To create a new goal, just message the
+        assistant on Telegram — say something like "I want to work out four times
+        a week" and it will write the plan and start checking in. Pause, skip,
+        or change your mind the same way.
+      </p>
+    </section>
+
+    {% if not goals %}
+      <section class="brief-section card">
+        <p class="empty-state">No active goals yet. Start one in chat.</p>
+      </section>
+    {% else %}
+      {% for g in goals %}
+        <section class="brief-section card goal-card" data-goal-id="{{ g.id }}">
+          <div class="section-header">
+            <div>
+              <h2>{{ g.title }}</h2>
+              <p class="muted">{{ g.member_name }} · started {{ g.start_date or 'recently' }}{% if g.target_date %} · target {{ g.target_date }}{% endif %}</p>
+            </div>
+            <span class="status-pill is-active">{{ g.status }}</span>
+          </div>
+
+          <p>{{ g.description }}</p>
+
+          {% if g.plan_text %}
+            <div class="goal-plan">
+              <h3>The plan</h3>
+              <p>{{ g.plan_text }}</p>
+              {% if g.plan_generated_at %}
+                <p class="muted">Refreshed {{ g.plan_generated_at }}</p>
+              {% endif %}
+            </div>
+          {% else %}
+            <p class="muted">Plan still being generated.</p>
+          {% endif %}
+
+          {% if g.today_progress %}
+            <div class="goal-today">
+              <h3>Today</h3>
+              <p>
+                Status: <strong>{{ g.today_progress.label }}</strong>{% if g.today_progress.score is not none %} ({{ g.today_progress.score }}/100){% endif %}.
+                {% if g.today_progress.workout_required %}
+                  {% if g.today_progress.workout_completed %}
+                    Workout: done.
+                  {% elif g.today_progress.rest_day_excused %}
+                    Workout: excused for today.
+                  {% else %}
+                    Workout: still pending.
+                  {% endif %}
+                {% endif %}
+              </p>
+            </div>
+          {% endif %}
+
+          {% if g.workout_budget %}
+            <p class="muted">
+              Target {{ g.workout_budget.get('required_per_week', '?') }} workouts a week
+              {% if g.workout_budget.get('flexible_rest_per_week') %}
+                · up to {{ g.workout_budget.flexible_rest_per_week }} flex rest day{{ '' if g.workout_budget.flexible_rest_per_week == 1 else 's' }}
+              {% endif %}
+              {% if g.workout_budget.get('days_preferred') %}
+                · prefers {{ g.workout_budget.days_preferred|join(', ') }}
+              {% endif %}
+            </p>
+          {% endif %}
+
+          {% if g.milestones %}
+            <details class="goal-milestones">
+              <summary>{{ g.milestones|length }} milestone{{ '' if g.milestones|length == 1 else 's' }}</summary>
+              <ul>
+                {% for ms in g.milestones %}
+                  <li>
+                    <strong>{{ ms.due_date or 'no date' }}</strong> — {{ ms.target_description }}
+                    <span class="muted">({{ ms.status }})</span>
+                  </li>
+                {% endfor %}
+              </ul>
+            </details>
+          {% endif %}
+        </section>
+      {% endfor %}
+    {% endif %}
+  </main>
+</body>
+</html>

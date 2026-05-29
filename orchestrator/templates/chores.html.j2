@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chores · Home Intelligence</title>
+  <link rel="stylesheet" href="/static/_design.css">
+  <link rel="stylesheet" href="/static/morning_brief.css">
+  <link rel="stylesheet" href="/static/proposals.css">
+  <script src="/static/_app.js" defer></script>
+  <script src="/static/chores.js" defer></script>
+</head>
+<body class="page-body proposals-body">
+  <header class="brief-topbar">
+    <a href="/dashboard" class="back-link">← Dashboard</a>
+    <h1>🧹 Chores</h1>
+    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
+  </header>
+
+  <main class="brief-shell">
+    <section class="proposals-controls card">
+      <p class="card-intro">
+        Recurring household chores. Anything overdue or due today is at the top —
+        tap "Mark done" when you finish and the next due date recomputes from there.
+        Vacuum and laundry runs are picked up automatically from the appliance.
+      </p>
+      <div class="status-pills" role="tablist" aria-label="Chore status">
+        <span class="status-pill is-active">Overdue <span class="pill-count">{{ overdue|length }}</span></span>
+        <span class="status-pill">Due today <span class="pill-count">{{ due_today|length }}</span></span>
+        <span class="status-pill">Soon <span class="pill-count">{{ soon|length }}</span></span>
+        <span class="status-pill">Recent <span class="pill-count">{{ recent|length }}</span></span>
+      </div>
+    </section>
+
+    {% for group_key, group_label, group_items in [
+        ('overdue', 'Overdue', overdue),
+        ('due_today', 'Due today', due_today),
+        ('soon', 'Coming up', soon),
+        ('recent', 'Recently done', recent),
+      ] %}
+    <section class="brief-section card chores-group" data-status="{{ group_key }}">
+      <div class="section-header">
+        <h2>{{ group_label }}</h2>
+        <span class="muted">{{ group_items|length }} item{{ '' if group_items|length == 1 else 's' }}</span>
+      </div>
+
+      {% if not group_items %}
+        <p class="empty-state">
+          {% if group_key == 'overdue' %}Nothing overdue. Nice.
+          {% elif group_key == 'due_today' %}Nothing due today.
+          {% elif group_key == 'soon' %}Nothing on the horizon for the next couple of days.
+          {% else %}Nothing recently completed.
+          {% endif %}
+        </p>
+      {% else %}
+        <ul class="proposals-list">
+          {% for c in group_items %}
+          <li class="proposal-card chore-card" data-template-id="{{ c.template_id }}">
+            <div class="proposal-body">
+              <h3 class="proposal-title">{{ c.name }}</h3>
+              <p class="proposal-summary">{{ c.description }}</p>
+              <p class="proposal-meta muted">
+                <span>Every {{ c.cadence_days }} day{{ '' if c.cadence_days == 1 else 's' }}</span>
+                <span>·</span>
+                <span>{{ c.when_label }}</span>
+                {% if c.last_done_at %}
+                  <span>·</span>
+                  <span>last done {{ c.last_done_at }}</span>
+                {% endif %}
+                {% if c.auto_detect_kind %}
+                  <span>·</span>
+                  <span>auto-detected from {{ c.auto_detect_kind }}</span>
+                {% endif %}
+              </p>
+            </div>
+            <div class="proposal-actions">
+              <button type="button" class="btn btn-primary"
+                      data-chore-action="complete"
+                      data-template-id="{{ c.template_id }}">
+                Mark done
+              </button>
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+    {% endfor %}
+  </main>
+</body>
+</html>

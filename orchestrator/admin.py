@@ -16,6 +16,9 @@ from home_agents_sdk.event_log import EventLogStore
 from home_agents_sdk.health_store import HealthStore
 from home_agents_sdk.reflection_store import ReflectionStore
 from home_agents_sdk.routine_lifecycle_store import RoutineLifecycleStore
+from home_agents_sdk.chore_store import ChoreStore
+from home_agents_sdk.health_goals_store import HealthGoalsStore
+from home_agents_sdk.member_nag_windows_store import MemberNagWindowsStore
 from home_agents_sdk.telemetry import get_logger
 
 from .data_science.common import current_embedding_model, decode_json
@@ -2122,6 +2125,117 @@ def _serialize_routine(row: dict[str, Any]) -> dict[str, Any]:
     elif isinstance(schedule, dict):
         out["schedule"] = schedule
     return out
+
+
+# ── Chores + Health Goals + Nag Windows ──────────────────────────
+
+
+def _chore_store(request: Request) -> ChoreStore:
+    store = getattr(request.app.state, "chore_store", None)
+    if store is not None:
+        return store
+    return ChoreStore(getattr(request.app.state, "pool", None))
+
+
+def _health_goals_store(request: Request) -> HealthGoalsStore:
+    store = getattr(request.app.state, "health_goals_store", None)
+    if store is not None:
+        return store
+    return HealthGoalsStore(getattr(request.app.state, "pool", None))
+
+
+def _nag_windows_store(request: Request) -> MemberNagWindowsStore:
+    store = getattr(request.app.state, "member_nag_windows_store", None)
+    if store is not None:
+        return store
+    return MemberNagWindowsStore(getattr(request.app.state, "pool", None))
+
+
+@router.get("/admin/chores")
+async def list_chores(request: Request) -> dict[str, Any]:
+    """List every chore template with its computed status. JSON form of
+    the dashboard, useful for the Telegram intent path and tests."""
+    store = _chore_store(request)
+    rows = await store.list_status(include_recent=True)
+    counts = {"overdue": 0, "due_today": 0, "soon": 0, "recent": 0}
+    serialized = []
+    for s in rows:
+        counts[s.status] = counts.get(s.status, 0) + 1
+        serialized.append({
+            "template_id": s.template_id,
+            "name": s.name,
+            "category": s.category,
+            "cadence_days": s.cadence_days,
+            "grace_days": s.grace_days,
+            "auto_detect_kind": s.auto_detect_kind,
+            "last_done_at": _format_timestamp(s.last_done_at),
+            "next_due_on": s.next_due_on.isoformat() if s.next_due_on else None,
+            "days_overdue": s.days_overdue,
+            "status": s.status,
+            "description": s.description,
+        })
+    return {"ok": True, "counts": counts, "chores": serialized}
+
+
+@router.post("/admin/chores/{template_id}/complete")
+async def complete_chore(request: Request, template_id: int) -> dict[str, Any]:
+    """Record a manual completion. Used by the dashboard "Mark done"
+    button and by the Telegram intent classifier."""
+    store = _chore_store(request)
+    body: dict[str, Any] = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    source = body.get("source") if isinstance(body, dict) else None
+    note = body.get("note") if isinstance(body, dict) else None
+    member_id = body.get("member_id") if isinstance(body, dict) else None
+    log_id = await store.log_completion(
+        template_id,
+        member_id=int(member_id) if isinstance(member_id, int) else None,
+        source=str(source) if isinstance(source, str) else "dashboard",
+        note=str(note) if isinstance(note, str) else None,
+    )
+    if log_id is None:
+        raise HTTPException(status_code=503, detail="pool_unavailable")
+    return {"ok": True, "log_id": log_id}
+
+
+@router.get("/admin/members/{member_id}/nag-windows")
+async def get_nag_windows(request: Request, member_id: int) -> dict[str, Any]:
+    store = _nag_windows_store(request)
+    prefs = await store.get(member_id)
+    return {"ok": True, "windows": prefs}
+
+
+@router.post("/admin/members/{member_id}/nag-windows")
+async def set_nag_windows(request: Request, member_id: int) -> dict[str, Any]:
+    """Update a member's quiet-hours preference. Only provided fields
+    are touched. Accepts integers 0-23 for start hours and 1-24 for
+    end hours."""
+    store = _nag_windows_store(request)
+    body: dict[str, Any] = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid_body")
+    kwargs: dict[str, Any] = {}
+    for key in ("weekday_start_hour", "weekday_end_hour",
+                "weekend_start_hour", "weekend_end_hour"):
+        if key in body and body[key] is not None:
+            try:
+                kwargs[key] = int(body[key])
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"{key}_invalid") from exc
+    if "timezone" in body and isinstance(body["timezone"], str):
+        kwargs["timezone"] = body["timezone"]
+    try:
+        updated = await store.set(member_id, **kwargs)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "windows": updated}
 
 
 # ── Noon Minutes order tracking ──────────────────────────────────

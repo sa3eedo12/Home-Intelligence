@@ -208,14 +208,20 @@ jobs:
       capability: orchestrator.missing_routine_check
       inputs: {}
 
-  - id: noon_orders_poll
-    description: "Poll Noon Minutes for new orders (uses stored cookies)"
-    trigger: interval
-    interval: { minutes: 30 }
-    dispatch:
-      agent: __orchestrator__
-      capability: orchestrator.noon_orders_poll
-      inputs: {}
+  # Noon Minutes order polling is parked: Akamai's bot-manager binds
+  # the API to the live browser session via JS sensors, so even with
+  # curl_cffi TLS impersonation the /list endpoint silently returns
+  # an empty payload from any client other than the actual logged-in
+  # browser. Code + tables stay so we can revive when there's a path
+  # that doesn't require running a real browser on the user's Mac.
+  # - id: noon_orders_poll
+  #   description: "Poll Noon Minutes for new orders (uses stored cookies)"
+  #   trigger: interval
+  #   interval: { minutes: 30 }
+  #   dispatch:
+  #     agent: __orchestrator__
+  #     capability: orchestrator.noon_orders_poll
+  #     inputs: {}
 
   - id: proactive_scan
     description: "Surface gentle 'you usually do X around now' suggestions every 15min"
