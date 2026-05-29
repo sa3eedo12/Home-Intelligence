@@ -91,9 +91,9 @@ class HealthGoalsStore:
                     start_date, target_date
                 )
                 VALUES (
-                    $1, $2, $3, $4::jsonb, $5::jsonb, $6,
-                    CASE WHEN $6 IS NOT NULL THEN now() ELSE NULL END,
-                    COALESCE($7, CURRENT_DATE), $8
+                    $1, $2, $3, $4::jsonb, $5::jsonb, $6::text,
+                    CASE WHEN $6::text IS NOT NULL THEN now() ELSE NULL END,
+                    COALESCE($7::date, CURRENT_DATE), $8::date
                 )
                 RETURNING id
                 """,

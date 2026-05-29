@@ -336,3 +336,58 @@ def test_valid_statuses_cover_all_known_states() -> None:
 
 def test_valid_labels_cover_all_known_progress_labels() -> None:
     assert {"on_track", "slipping", "regressing", "achieved", "paused"} <= VALID_LABELS
+
+
+# ── Live-PG smoke test (only runs if PG_TEST_URL is set) ────────
+
+
+@pytest.mark.asyncio
+async def test_create_sql_round_trip_against_real_pg() -> None:
+    """Catches asyncpg parameter-type-inference regressions like
+    'could not determine data type of parameter $6'. Skips when no
+    Postgres is reachable; CI is mock-only so the burden falls on
+    manual runs against the live schema."""
+    import os
+    pg_url = os.environ.get("PG_TEST_URL")
+    if not pg_url:
+        pytest.skip("PG_TEST_URL not set")
+    import asyncpg  # type: ignore[import-not-found]
+
+    pool = await asyncpg.create_pool(pg_url, min_size=1, max_size=1)
+    try:
+        store = HealthGoalsStore(pool)
+        async with pool.acquire() as conn:
+            member_id = await conn.fetchval(
+                "SELECT id FROM household_members ORDER BY id LIMIT 1"
+            )
+        if not member_id:
+            pytest.skip("no household_members row to anchor FK on")
+        goal_id = await store.create(
+            member_id=int(member_id),
+            title="SQL smoke test",
+            description="Round-trip the create() statement.",
+            metric_links=[{"metric": "workout", "target_per_week": 3}],
+            workout_budget={"required_per_week": 3,
+                             "days_preferred": ["mon", "wed", "fri"]},
+            plan_text="Test plan text.",
+            target_date=date.today() + timedelta(days=14),
+        )
+        assert goal_id is not None
+        # Also exercise the None-plan-text path, which is where the
+        # original bug bit (CASE WHEN $6 IS NOT NULL with no cast).
+        goal_id2 = await store.create(
+            member_id=int(member_id),
+            title="SQL smoke test 2",
+            description="Round-trip with plan_text=None.",
+            plan_text=None,
+            workout_budget=None,
+        )
+        assert goal_id2 is not None
+        # Cleanup
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM health_goals WHERE id IN ($1, $2)",
+                goal_id, goal_id2,
+            )
+    finally:
+        await pool.close()
