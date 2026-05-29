@@ -655,6 +655,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             nag_store=app.state.member_nag_windows_store,
         )
 
+    async def _run_weekly_reflection(_inputs: dict[str, Any]) -> dict[str, Any]:
+        from . import health_goals as hg_mod
+
+        return await hg_mod.run_weekly_reflection(
+            pool=pool, redis=redis,
+            store=app.state.health_goals_store,
+            llm=llm,
+            reasoner_model=os.environ.get("REASONER_MODEL", "qwen3:14b"),
+        )
+
     async def _run_pre_bedtime_scan(_inputs: dict[str, Any]) -> dict[str, Any]:
         from .pre_bedtime import scan_pre_bedtime
 
@@ -689,6 +699,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "orchestrator.pre_bedtime_scan": _run_pre_bedtime_scan,
             "orchestrator.health_goals_compute": _run_health_goals_compute,
             "orchestrator.health_goals_workout_nag": _run_workout_nags,
+            "orchestrator.health_goals_weekly_reflection": _run_weekly_reflection,
         },
     )
     await scheduler.start()

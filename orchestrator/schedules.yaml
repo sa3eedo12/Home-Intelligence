@@ -258,3 +258,12 @@ jobs:
       agent: __orchestrator__
       capability: orchestrator.health_goals_workout_nag
       inputs: {}
+
+  - id: health_goals_weekly_reflection
+    description: "Sunday 21:00 — LLM weekly review per active goal"
+    trigger: cron
+    cron: { day_of_week: "sun", hour: 21, minute: 0 }
+    dispatch:
+      agent: __orchestrator__
+      capability: orchestrator.health_goals_weekly_reflection
+      inputs: {}

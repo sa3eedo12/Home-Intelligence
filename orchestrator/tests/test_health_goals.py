@@ -363,3 +363,97 @@ async def test_workout_nag_skipped_when_goal_muted() -> None:
     assert out["emitted"] == 0
     assert out["skipped"]["muted"] == 1
     redis.xadd.assert_not_called()
+
+
+# ── weekly reflection ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_weekly_reflection_fallback_when_no_llm() -> None:
+    pool = _conn_pool(fetchval=620842725)
+    redis = _redis_recorder()
+    store = SimpleNamespace(
+        list_active=AsyncMock(return_value=[{
+            "id": 1, "member_id": 2, "title": "Run more",
+            "description": "Run 3x a week",
+            "plan_text": "current plan",
+            "workout_budget": {"required_per_week": 3},
+        }]),
+        recent_progress=AsyncMock(return_value=[
+            {"workout_completed": True}, {"workout_completed": True},
+            {"workout_completed": False, "rest_day_excused": True},
+        ]),
+        update_plan=AsyncMock(return_value=None),
+        log_event=AsyncMock(return_value=None),
+    )
+    out = await hg.run_weekly_reflection(
+        pool=pool, redis=redis, store=store, llm=None,
+    )
+    assert out == {"ok": True, "reflected": 1, "skipped": 0}
+    redis.xadd.assert_awaited_once()
+    raw = redis.xadd.await_args.args[1]["payload"]
+    payload = json.loads(raw)
+    assert "Run more" in payload["text"]
+    assert "2 of 3" in payload["text"]
+    assert payload["topic"] == "goal:1:weekly"
+    # plan unchanged (no LLM, no new_plan_text)
+    store.update_plan.assert_not_called()
+    store.log_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_weekly_reflection_uses_llm_response() -> None:
+    pool = _conn_pool(fetchval=620842725)
+    redis = _redis_recorder()
+    store = SimpleNamespace(
+        list_active=AsyncMock(return_value=[{
+            "id": 1, "member_id": 2, "title": "Run more",
+            "description": "Run 3x", "plan_text": "old plan",
+            "workout_budget": {"required_per_week": 3},
+        }]),
+        recent_progress=AsyncMock(return_value=[
+            {"workout_completed": True}, {"workout_completed": True},
+            {"workout_completed": True},
+        ]),
+        update_plan=AsyncMock(return_value=None),
+        log_event=AsyncMock(return_value=None),
+    )
+    llm = MagicMock()
+    llm.chat = AsyncMock(return_value={"message": {"content": json.dumps({
+        "reflection_text": "Solid week. Lock in the same three days next week.",
+        "new_plan_text": "Three runs on Tue/Thu/Sat, easy pace.",
+    })}})
+    out = await hg.run_weekly_reflection(
+        pool=pool, redis=redis, store=store, llm=llm,
+    )
+    assert out["reflected"] == 1
+    store.update_plan.assert_awaited_once()
+    update_args = store.update_plan.await_args
+    assert update_args.kwargs["plan_text"].startswith("Three runs")
+
+
+@pytest.mark.asyncio
+async def test_weekly_reflection_continues_on_llm_failure() -> None:
+    pool = _conn_pool(fetchval=620842725)
+    redis = _redis_recorder()
+    store = SimpleNamespace(
+        list_active=AsyncMock(return_value=[
+            {"id": 1, "member_id": 2, "title": "G1",
+             "description": "x", "plan_text": "p",
+             "workout_budget": {"required_per_week": 3}},
+            {"id": 2, "member_id": 2, "title": "G2",
+             "description": "y", "plan_text": "q",
+             "workout_budget": {"required_per_week": 4}},
+        ]),
+        recent_progress=AsyncMock(return_value=[]),
+        update_plan=AsyncMock(return_value=None),
+        log_event=AsyncMock(return_value=None),
+    )
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=RuntimeError("boom"))
+    out = await hg.run_weekly_reflection(
+        pool=pool, redis=redis, store=store, llm=llm,
+    )
+    # Both fell back to template text; both got messages
+    assert out["reflected"] == 2
+    assert redis.xadd.await_count == 2
