@@ -2122,3 +2122,108 @@ def _serialize_routine(row: dict[str, Any]) -> dict[str, Any]:
     elif isinstance(schedule, dict):
         out["schedule"] = schedule
     return out
+
+
+# ── Noon Minutes order tracking ──────────────────────────────────
+
+
+@router.post("/admin/noon/credentials")
+async def noon_credentials(request: Request) -> dict[str, Any]:
+    """Accept a 'Copy as cURL' string from the user's DevTools Network
+    tab and store the extracted cookies + headers. The poller uses
+    these on every scrape; refresh whenever Noon's session expires
+    (the dashboard will warn you when last_poll_status='auth_expired').
+    """
+    from . import noon_poller
+
+    try:
+        body = await request.body()
+        curl_text = body.decode("utf-8", errors="replace").strip()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"bad body: {exc}") from exc
+    if not curl_text or not curl_text.startswith("curl"):
+        raise HTTPException(
+            status_code=400,
+            detail="POST raw cURL text as the request body (starts with 'curl')",
+        )
+    try:
+        parsed = noon_poller.parse_curl(curl_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    pool = getattr(request.app.state, "pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="pool_unavailable")
+    await noon_poller.ensure_helper_fn(pool)
+    await noon_poller.store_credentials(pool, parsed)
+    cookie_count = len(parsed.get("cookies") or {})
+    return {
+        "ok": True,
+        "cookie_count": cookie_count,
+        "customer_email": parsed.get("customer_email"),
+        "address_key_present": bool(parsed.get("address_key")),
+        "instant_zone_present": bool(parsed.get("instant_zone")),
+    }
+
+
+@router.post("/admin/noon/poll-now")
+async def noon_poll_now(request: Request) -> dict[str, Any]:
+    """Force an immediate poll. Returns the same summary the scheduled
+    job would log. Useful right after pasting fresh credentials.
+
+    Query params:
+      max_pages (default 3) — how many pages of order history to walk
+      start_page (default 1) — first page to fetch (use to backfill
+        ranges without re-reading what's already stored)
+    """
+    from . import noon_poller
+
+    pool = getattr(request.app.state, "pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="pool_unavailable")
+    max_pages = _query_int(request, "max_pages", default=3, low=1, high=100) or 3
+    start_page = _query_int(request, "start_page", default=1, low=1, high=1000) or 1
+    summary = await noon_poller.poll_once(
+        pool, max_pages=max_pages, start_page=start_page
+    )
+    return summary
+
+
+@router.get("/admin/noon/status")
+async def noon_status(request: Request) -> dict[str, Any]:
+    """Surface credential staleness + last poll outcome for the
+    dashboard tile."""
+    pool = getattr(request.app.state, "pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="pool_unavailable")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT cookie_expires_at, updated_at, last_poll_at,
+                   last_poll_status, last_poll_error, customer_email,
+                   (cookies ? '_natnetidv2') AS has_token
+            FROM noon_credentials WHERE id = 1
+            """
+        )
+        order_stats = await conn.fetchrow(
+            """
+            SELECT count(*) AS total,
+                   max(ordered_at) AS latest_order
+            FROM noon_orders
+            """
+        )
+    return {
+        "ok": True,
+        "credentials": {
+            "configured": bool(row and row.get("has_token")),
+            "customer_email": row["customer_email"] if row else None,
+            "cookie_expires_at": _format_timestamp(row["cookie_expires_at"]) if row else None,
+            "updated_at": _format_timestamp(row["updated_at"]) if row else None,
+            "last_poll_at": _format_timestamp(row["last_poll_at"]) if row else None,
+            "last_poll_status": row["last_poll_status"] if row else None,
+            "last_poll_error": row["last_poll_error"] if row else None,
+        },
+        "orders": {
+            "total": int(order_stats["total"]) if order_stats else 0,
+            "latest_order": _format_timestamp(order_stats["latest_order"]) if order_stats else None,
+        },
+    }

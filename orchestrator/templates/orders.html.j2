@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orders · Home Intelligence</title>
+  <link rel="stylesheet" href="/static/_design.css">
+  <link rel="stylesheet" href="/static/morning_brief.css">
+  <link rel="stylesheet" href="/static/proposals.css">
+  <script src="/static/_app.js" defer></script>
+</head>
+<body class="page-body proposals-body">
+  <header class="brief-topbar">
+    <a href="/dashboard" class="back-link">← Dashboard</a>
+    <h1>🛒 Orders</h1>
+    <button class="btn btn-secondary btn-icon topbar-theme" type="button" data-theme-toggle aria-label="Toggle theme" aria-pressed="false">🌙</button>
+  </header>
+
+  <main class="brief-shell">
+    <section class="brief-section card">
+      <div class="section-header">
+        <h2>Noon Minutes</h2>
+        {% if status.configured %}
+          <span class="muted">{{ status.customer_email or 'authenticated' }}</span>
+        {% else %}
+          <span class="muted">⚠ not configured</span>
+        {% endif %}
+      </div>
+      <p class="muted" style="margin: 0.5em 0 1em 0;">
+        {% if status.last_poll_status == 'auth_expired' %}
+          🔒 <strong>Cookies expired.</strong> Open minutes.noon.com → DevTools → Network → Fetch/XHR → find the
+          <code>/_svc/instant/order/list</code> POST → Copy as cURL → POST it as the body to <code>/admin/noon/credentials</code>.
+        {% elif status.last_poll_status == 'ok' %}
+          ✓ Last poll {{ status.last_poll_at or '?' }} ({{ status.last_poll_status }})
+        {% elif status.last_poll_status %}
+          ⚠ Last poll {{ status.last_poll_at or '?' }} — <code>{{ status.last_poll_status }}</code>
+          {% if status.last_poll_error %}<br><small>{{ status.last_poll_error[:200] }}</small>{% endif %}
+        {% else %}
+          ⏳ Waiting for first poll.
+        {% endif %}
+        {% if status.cookie_expires_at %}
+          <br><small class="muted">JWT exp: {{ status.cookie_expires_at }}</small>
+        {% endif %}
+      </p>
+    </section>
+
+    <section class="brief-section card">
+      <div class="section-header">
+        <h2>Recent orders</h2>
+        <span class="muted">{{ orders|length }} shown</span>
+      </div>
+
+      {% if not orders %}
+        <p class="empty-state">No orders captured yet. Either you haven't placed a Noon Minutes order recently,
+          or credentials need refreshing.</p>
+      {% else %}
+        <ul class="proposals-list">
+          {% for o in orders %}
+          <li class="proposal-card">
+            <div class="proposal-body">
+              <h3 class="proposal-title">
+                {% if o.total_amount is not none %}
+                  {{ '%.2f'|format(o.total_amount) }} {{ o.total_currency or 'AED' }}
+                {% else %}
+                  Order
+                {% endif %}
+                <span class="muted" style="font-weight: normal; font-size: 0.85em;">
+                  · {{ o.item_count or o['items']|length }} items
+                </span>
+              </h3>
+              <div class="proposal-meta muted">
+                {% if o.ordered_at %}Ordered {{ o.ordered_at }}{% endif %}
+                {% if o.delivered_at %} · Delivered {{ o.delivered_at }}{% endif %}
+                {% if o.status %} · <code>{{ o.status }}</code>{% endif %}
+                · ID <code>{{ o.external_id }}</code>
+              </div>
+              {% set items = o['items'] %}
+              {% if items %}
+              <details class="proposal-detail">
+                <summary class="muted">Items ({{ items|length }})</summary>
+                <ul>
+                  {% for it in items[:30] %}
+                  <li>
+                    {{ it.get('qty') or it.get('quantity') or '' }}×
+                    {{ it.get('name') or it.get('productName') or it.get('title') or '(unnamed)' }}
+                    {% set price = it.get('price') or it.get('unitPrice') or it.get('subtotal') %}
+                    {% if price %} — {{ price }}{% endif %}
+                  </li>
+                  {% endfor %}
+                </ul>
+              </details>
+              {% endif %}
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

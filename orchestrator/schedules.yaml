@@ -208,6 +208,15 @@ jobs:
       capability: orchestrator.missing_routine_check
       inputs: {}
 
+  - id: noon_orders_poll
+    description: "Poll Noon Minutes for new orders (uses stored cookies)"
+    trigger: interval
+    interval: { minutes: 30 }
+    dispatch:
+      agent: __orchestrator__
+      capability: orchestrator.noon_orders_poll
+      inputs: {}
+
   - id: proactive_scan
     description: "Surface gentle 'you usually do X around now' suggestions every 15min"
     trigger: interval

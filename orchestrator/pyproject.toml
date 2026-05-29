@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
   "home_agents_sdk",
   "jinja2>=3.1",
+  "curl_cffi>=0.7",
 ]
 
 [project.optional-dependencies]

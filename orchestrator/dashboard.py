@@ -879,3 +879,68 @@ async def routines_page(request: Request) -> HTMLResponse:
             "stats": stats,
         },
     )
+
+
+@router.get("/dashboard/orders", response_class=HTMLResponse)
+async def orders_page(request: Request) -> HTMLResponse:
+    """List recent Noon Minutes orders + show credential / poll status."""
+    pool = getattr(request.app.state, "pool", None)
+    orders: list[dict[str, Any]] = []
+    status: dict[str, Any] = {}
+    if pool is not None:
+        async with pool.acquire() as conn:
+            order_rows = await conn.fetch(
+                """
+                SELECT id, external_id, status, ordered_at, delivered_at,
+                       total_amount, total_currency, item_count, items_json
+                FROM noon_orders
+                ORDER BY ordered_at DESC NULLS LAST, first_seen_at DESC
+                LIMIT 50
+                """
+            )
+            cred = await conn.fetchrow(
+                """
+                SELECT customer_email, cookie_expires_at, updated_at,
+                       last_poll_at, last_poll_status, last_poll_error,
+                       (cookies ? '_natnetidv2') AS has_token
+                FROM noon_credentials WHERE id = 1
+                """
+            )
+        orders = [_prep_noon_order(r) for r in order_rows]
+        if cred is not None:
+            status = {
+                "configured": bool(cred["has_token"]),
+                "customer_email": cred["customer_email"],
+                "cookie_expires_at": _format_dt(cred["cookie_expires_at"]),
+                "updated_at": _format_dt(cred["updated_at"]),
+                "last_poll_at": _format_dt(cred["last_poll_at"]),
+                "last_poll_status": cred["last_poll_status"],
+                "last_poll_error": cred["last_poll_error"],
+            }
+    return templates.TemplateResponse(
+        request=request,
+        name="orders.html.j2",
+        context={"orders": orders, "status": status},
+    )
+
+
+def _prep_noon_order(row: Any) -> dict[str, Any]:
+    out = dict(row)
+    items = out.get("items_json")
+    if isinstance(items, str):
+        out["items"] = decode_json(items, [])
+    elif isinstance(items, list):
+        out["items"] = items
+    else:
+        out["items"] = []
+    out["ordered_at"] = _format_dt(out.get("ordered_at"))
+    out["delivered_at"] = _format_dt(out.get("delivered_at"))
+    return out
+
+
+def _format_dt(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    return str(value)
