@@ -370,6 +370,7 @@ def _make_text(
     redis: Redis,
     knowledge_graph: Any | None = None,
     proposal_store: Any | None = None,
+    goals_handler: Any | None = None,
 ):
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.effective_user is None or not _is_allowed(update.effective_user.id, allowed_ids):
@@ -383,6 +384,19 @@ def _make_text(
             return
         user_id = str(update.effective_user.id)
         member = await _member_for_update(update, knowledge_graph, proposal_store, redis)
+        # Goals / chores / nag-window intents are handled inline so the
+        # user can speak in plain English without slash commands. The
+        # handler returns handled=False for anything outside its scope,
+        # and we fall through to the regular router.
+        if goals_handler is not None:
+            try:
+                result = await goals_handler.try_handle(text, member=member)
+            except Exception as exc:
+                logger.warning("goals_chat_dispatch_failed", error=str(exc))
+                result = None
+            if result is not None and result.handled and result.text:
+                await _reply(update, result.text)
+                return
         result = await router.handle(text, user_id, **_member_kwargs(member))
         await _send_result(update, context, result, redis)
 
@@ -975,6 +989,7 @@ async def build_telegram_app(
     redis: Redis,
     knowledge_graph: Any | None = None,
     proposal_store: Any | None = None,
+    goals_handler: Any | None = None,
 ) -> Application:
     app = Application.builder().token(token).build()
     app.bot_data["registry"] = router._registry
@@ -999,7 +1014,8 @@ async def build_telegram_app(
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            _make_text(allowed_ids, router, redis, knowledge_graph, proposal_store),
+            _make_text(allowed_ids, router, redis, knowledge_graph,
+                       proposal_store, goals_handler=goals_handler),
         )
     )
     app.add_handler(

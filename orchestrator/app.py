@@ -697,6 +697,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     await reactive.start()
 
+    from .goals_chat import GoalsChatHandler
+    goals_chat_handler = GoalsChatHandler(
+        llm=llm,
+        goals_store=app.state.health_goals_store,
+        chore_store=app.state.chore_store,
+        nag_store=app.state.member_nag_windows_store,
+    )
+    app.state.goals_chat_handler = goals_chat_handler
+
     tg_app = await build_telegram_app(
         token=telegram_token,
         allowed_ids=allowed_ids,
@@ -708,6 +717,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         redis=redis,
         knowledge_graph=knowledge_graph,
         proposal_store=reflection_store,
+        goals_handler=goals_chat_handler,
     )
     tg_app_holder["app"] = tg_app
     await tg_app.initialize()
