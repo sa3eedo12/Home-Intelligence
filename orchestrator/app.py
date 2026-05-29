@@ -714,6 +714,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         goals_store=app.state.health_goals_store,
         chore_store=app.state.chore_store,
         nag_store=app.state.member_nag_windows_store,
+        redis=redis,
     )
     app.state.goals_chat_handler = goals_chat_handler
 

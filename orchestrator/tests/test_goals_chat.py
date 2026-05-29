@@ -469,3 +469,213 @@ async def test_handler_failure_returns_apology() -> None:
     r = await h.try_handle("start a goal", member=MEMBER)
     assert r.handled is True
     assert "something went wrong" in r.text
+
+
+# ── explain_plan + conversational context ────────────────────────
+
+
+def _fake_redis_stub() -> SimpleNamespace:
+    """Tiny in-memory Redis stub — just enough for SET ex= and GET."""
+    store: dict[str, str] = {}
+
+    async def _get(key):
+        return store.get(key)
+
+    async def _set(key, value, ex=None):
+        store[key] = value
+        return True
+
+    return SimpleNamespace(_store=store, get=AsyncMock(side_effect=_get),
+                           set=AsyncMock(side_effect=_set))
+
+
+def _fake_goals_store_with_get(*goals):
+    """Like _fake_goals_store but includes get() (needed by context load)."""
+    by_id = {int(g["id"]): g for g in goals}
+    base = _fake_goals_store(active=list(goals), all=list(goals))
+    base.get = AsyncMock(side_effect=lambda gid: by_id.get(int(gid)))
+    base.list_milestones = AsyncMock(return_value=[])
+    return base
+
+
+@pytest.mark.asyncio
+async def test_explain_plan_renders_full_plan_card() -> None:
+    llm = _llm_returning({"intent": "explain_plan"})
+    goal = {
+        "id": 1, "member_id": 2, "title": "Double pushups in 2 weeks",
+        "description": "Train 4x to double max pushup count",
+        "plan_text": "Greasing the groove: 5 short sets across each "
+                     "training day, finishing with one max-effort set.",
+        "workout_budget": {"required_per_week": 4,
+                            "flexible_rest_per_week": 1,
+                            "days_preferred": ["mon", "wed", "fri", "sun"]},
+        "status": "active",
+    }
+    goals = _fake_goals_store_with_get(goal)
+    goals.list_milestones = AsyncMock(return_value=[
+        {"due_date": date(2026, 6, 5),
+         "target_description": "Hit 1.5× starting max"},
+        {"due_date": date(2026, 6, 12),
+         "target_description": "Hit 2× starting max"},
+    ])
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("what would the plan involve?", member=MEMBER)
+    assert r.handled is True
+    assert r.intent == "explain_plan"
+    assert "Double pushups in 2 weeks" in r.text
+    assert "Greasing the groove" in r.text
+    assert "4 workouts per week" in r.text
+    assert "Hit 1.5× starting max" in r.text
+    assert "1.5× starting max" in r.text
+
+
+@pytest.mark.asyncio
+async def test_explain_plan_handles_missing_plan_text() -> None:
+    llm = _llm_returning({"intent": "explain_plan"})
+    goal = {
+        "id": 1, "member_id": 2, "title": "Sleep more",
+        "description": "Get to bed earlier",
+        "plan_text": None,
+        "workout_budget": {},
+        "status": "active",
+    }
+    goals = _fake_goals_store_with_get(goal)
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("what does this look like", member=MEMBER)
+    assert r.handled is True
+    assert "haven't written a detailed plan" in r.text
+
+
+@pytest.mark.asyncio
+async def test_create_goal_stashes_context_in_redis() -> None:
+    classify = {"intent": "create_goal", "title": "T", "description": "D"}
+    plan = {
+        "plan_text": "Plan.", "metric_links": [],
+        "workout_budget": None, "milestones": [],
+    }
+    llm = _llm_returning(classify, plan)
+    redis = _fake_redis_stub()
+    goals = _fake_goals_store()
+    goals.create = AsyncMock(return_value=42)
+    h = GoalsChatHandler(
+        llm=llm, goals_store=goals,
+        chore_store=_fake_chore_store(),
+        nag_store=_fake_nag_store(),
+        redis=redis,
+    )
+    r = await h.try_handle("T", member=MEMBER)
+    assert r.handled is True
+    # Context was written
+    assert "goals_chat:context:2" in redis._store
+    saved = json.loads(redis._store["goals_chat:context:2"])
+    assert saved["last_goal_id"] == 42
+    assert saved["last_intent"] == "create_goal"
+
+
+@pytest.mark.asyncio
+async def test_followup_explain_plan_uses_context_for_goal_resolution() -> None:
+    """The full bug-repro test: user creates a goal, then asks a vague
+    'what would the plan involve?' — must resolve to the freshly-created
+    goal even though the text contains no goal-identifying words."""
+    # First message: create
+    classify_create = {"intent": "create_goal", "title": "Double pushups",
+                       "description": "Double pushups in 2 weeks"}
+    plan = {
+        "plan_text": "Greasing the groove.", "metric_links": [],
+        "workout_budget": {"required_per_week": 4}, "milestones": [],
+    }
+    # Second message: explain_plan (after context is set, classifier
+    # sees recent-context block in the system prompt and returns
+    # explain_plan)
+    classify_explain = {"intent": "explain_plan"}
+    llm = _llm_returning(classify_create, plan, classify_explain)
+    redis = _fake_redis_stub()
+    goal_row = {
+        "id": 42, "member_id": 2, "title": "Double pushups",
+        "description": "Double pushups in 2 weeks",
+        "plan_text": "Greasing the groove.",
+        "workout_budget": {"required_per_week": 4},
+        "status": "active",
+    }
+    goals = _fake_goals_store_with_get(goal_row)
+    goals.create = AsyncMock(return_value=42)
+    h = GoalsChatHandler(
+        llm=llm, goals_store=goals,
+        chore_store=_fake_chore_store(),
+        nag_store=_fake_nag_store(),
+        redis=redis,
+    )
+    r1 = await h.try_handle(
+        "I want to double the number of pushups I can do in 2 weeks",
+        member=MEMBER,
+    )
+    assert r1.handled is True
+    r2 = await h.try_handle("what would the plan involve?", member=MEMBER)
+    assert r2.handled is True
+    assert r2.intent == "explain_plan"
+    assert "Double pushups" in r2.text
+    assert "Greasing the groove" in r2.text
+
+
+@pytest.mark.asyncio
+async def test_classifier_prompt_includes_recent_context_when_present() -> None:
+    """The classifier should see the just-created goal in its system
+    prompt so it can disambiguate vague follow-ups. Validates the
+    prompt-building path, not a live LLM call."""
+    prompt = GoalsChatHandler._classifier_prompt(
+        "tell me more about it",
+        context={
+            "last_goal_id": 1, "last_goal_title": "Sleep more",
+            "last_intent": "create_goal", "age_seconds": 60,
+        },
+    )
+    assert "RECENT CONTEXT" in prompt["system"]
+    assert "Sleep more" in prompt["system"]
+    assert "explain_plan" in prompt["system"]
+
+
+@pytest.mark.asyncio
+async def test_classifier_prompt_no_context_block_when_absent() -> None:
+    prompt = GoalsChatHandler._classifier_prompt("tell me", context=None)
+    assert "RECENT CONTEXT" not in prompt["system"]
+
+
+@pytest.mark.asyncio
+async def test_load_context_drops_stale_when_goal_abandoned() -> None:
+    """If the stashed goal_id maps to an abandoned/missing goal, the
+    context is treated as stale and ignored."""
+    redis = _fake_redis_stub()
+    redis._store["goals_chat:context:2"] = json.dumps({
+        "last_goal_id": 99, "last_intent": "create_goal",
+        "ts": datetime.now(UTC).isoformat(),
+    })
+    goals = _fake_goals_store_with_get({
+        "id": 99, "member_id": 2, "title": "Old goal",
+        "status": "abandoned",
+    })
+    h = GoalsChatHandler(
+        llm=MagicMock(), goals_store=goals,
+        chore_store=_fake_chore_store(),
+        nag_store=_fake_nag_store(),
+        redis=redis,
+    )
+    ctx = await h._load_context(2)
+    assert ctx is None
+
+
+@pytest.mark.asyncio
+async def test_explain_plan_falls_back_to_first_goal_with_no_context() -> None:
+    """No conversational context, no explicit 'which' → use the most
+    recent active goal (head of list_active output)."""
+    llm = _llm_returning({"intent": "explain_plan"})
+    goal = {
+        "id": 7, "member_id": 2, "title": "Strong",
+        "description": "Get strong", "plan_text": "Lift.",
+        "workout_budget": {"required_per_week": 3},
+        "status": "active",
+    }
+    goals = _fake_goals_store_with_get(goal)
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("what's the plan?", member=MEMBER)
+    assert r.handled is True
+    assert "Strong" in r.text

@@ -15,6 +15,11 @@ Design rules:
   the Telegram chat.
 - LLM budget per message: one classifier call (8b). Only the
   create_goal intent makes a second 14b call to write the actual plan.
+- Short-lived conversational context per member (Redis, 30-min TTL):
+  after any handled intent that touches a specific goal we remember
+  the goal_id, so a follow-up like "what would the plan involve?"
+  resolves to that goal instead of falling through to the generic
+  router. Keeps memory tiny — one key per member, no transcript.
 """
 from __future__ import annotations
 
@@ -36,12 +41,20 @@ logger = get_logger("orchestrator.goals_chat")
 CLASSIFIER_MODEL_DEFAULT = "qwen3:8b"
 PLANNER_MODEL_DEFAULT = "qwen3:14b"
 
+# Per-member context lives in Redis for this many seconds. Long enough
+# to cover a natural back-and-forth ("create goal" → "what's the plan?"
+# → "skip today") but short enough that a stale context from 2 hours
+# ago doesn't accidentally route a fresh question to the wrong goal.
+CONTEXT_TTL_SECONDS = 30 * 60
+CONTEXT_KEY_PREFIX = "goals_chat:context:"
+
 # Intents the classifier may return. "general_chat" means "not a goals
 # topic — pass through to the regular router". The order matters: when
 # the LLM is unsure between create_goal and check_progress, we tip
 # toward check_progress because create is irreversible (creates a row).
 VALID_INTENTS = {
     "create_goal", "check_progress", "list_goals",
+    "explain_plan",
     "skip_workout", "log_workout",
     "mute_goal", "unmute_goal", "abandon_goal", "pause_goal", "resume_goal",
     "set_nag_windows",
@@ -70,6 +83,7 @@ class GoalsChatHandler:
         goals_store: HealthGoalsStore,
         chore_store: ChoreStore,
         nag_store: MemberNagWindowsStore,
+        redis: Any | None = None,
         classifier_model: str = CLASSIFIER_MODEL_DEFAULT,
         planner_model: str = PLANNER_MODEL_DEFAULT,
     ) -> None:
@@ -77,6 +91,7 @@ class GoalsChatHandler:
         self.goals = goals_store
         self.chores = chore_store
         self.nag = nag_store
+        self.redis = redis
         self.classifier_model = classifier_model
         self.planner_model = planner_model
 
@@ -95,14 +110,16 @@ class GoalsChatHandler:
             return GoalsHandlerResult(handled=False)
         if member is None or "id" not in member:
             return GoalsHandlerResult(handled=False)
-        intent_info = await self._classify(text)
+        member_id = int(member["id"])
+        context = await self._load_context(member_id)
+        intent_info = await self._classify(text, context=context)
         intent = intent_info.get("intent", "general_chat")
         if intent == "general_chat" or intent not in VALID_INTENTS:
             return GoalsHandlerResult(handled=False, intent=intent)
-        member_id = int(member["id"])
         try:
-            reply = await self._dispatch(
-                intent=intent, args=intent_info, text=text, member_id=member_id,
+            reply, touched_goal_id = await self._dispatch(
+                intent=intent, args=intent_info, text=text,
+                member_id=member_id, context=context,
             )
         except Exception as exc:
             logger.warning("goals_chat_handler_failed",
@@ -114,6 +131,12 @@ class GoalsChatHandler:
                     "something went wrong. Could you try rephrasing?"
                 ),
             )
+        # Stash whichever goal we just touched so a follow-up question
+        # ("what's the plan?") routes back to it.
+        if touched_goal_id is not None:
+            await self._save_context(
+                member_id, last_goal_id=touched_goal_id, last_intent=intent,
+            )
         return GoalsHandlerResult(
             handled=True, intent=intent, text=reply,
             extras=intent_info,
@@ -121,11 +144,15 @@ class GoalsChatHandler:
 
     # ── Classifier ───────────────────────────────────────────────
 
-    async def _classify(self, text: str) -> dict[str, Any]:
+    async def _classify(
+        self, text: str, *, context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """One LLM call. Returns {intent, args}. The classifier is
         intentionally strict — anything that isn't clearly a goals
-        topic falls through to general_chat."""
-        prompt = self._classifier_prompt(text)
+        topic falls through to general_chat. When a recent goal
+        context is present we feed it to the model so vague follow-up
+        questions ('what does the plan look like') route correctly."""
+        prompt = self._classifier_prompt(text, context=context)
         try:
             resp = await self.llm.chat(
                 messages=[
@@ -149,7 +176,26 @@ class GoalsChatHandler:
         return parsed
 
     @staticmethod
-    def _classifier_prompt(text: str) -> dict[str, str]:
+    def _classifier_prompt(
+        text: str, *, context: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
+        context_block = ""
+        if context and context.get("last_goal_title"):
+            ttl_min = max(
+                0, int((CONTEXT_TTL_SECONDS - (context.get("age_seconds") or 0)) / 60)
+            )
+            context_block = (
+                "\n\nRECENT CONTEXT: The user just interacted with their "
+                f"goal titled \"{context['last_goal_title']}\" "
+                f"(intent='{context.get('last_intent')}', "
+                f"valid for ~{ttl_min} more minutes). If the new message "
+                "is a vague follow-up like 'what would the plan involve', "
+                "'tell me more', 'what does it look like', 'how does it "
+                "work', treat it as 'explain_plan' on that goal. If they "
+                "say 'skip it', 'mute it', 'pause it' without naming a "
+                "different goal, apply to this one. Don't override an "
+                "obviously-different intent."
+            )
         system = (
             "You classify a single user message into one of a fixed set "
             "of intents about their personal health goals, household "
@@ -163,6 +209,9 @@ class GoalsChatHandler:
             "args: {\"title\": str, \"description\": str}.\n"
             "- check_progress: user asks how they're doing on a goal.\n"
             "- list_goals: user asks 'what goals do I have'.\n"
+            "- explain_plan: user asks what the plan for a goal is, what "
+            "it involves, what it looks like, how it works. "
+            "args: {\"which\": str|null}.\n"
             "- skip_workout: user wants to skip today's workout / take "
             "a rest day. args: {\"reason\": str|null}.\n"
             "- log_workout: user reports they just worked out. "
@@ -187,6 +236,10 @@ class GoalsChatHandler:
             "\"description\": \"I want to work out four times a week.\"}\n\n"
             "USER: 'how am I doing this week'\n"
             "{\"intent\": \"check_progress\"}\n\n"
+            "USER: 'what would the plan involve'\n"
+            "{\"intent\": \"explain_plan\"}\n\n"
+            "USER: 'tell me more about how the plan works'\n"
+            "{\"intent\": \"explain_plan\"}\n\n"
             "USER: 'i did a workout just now'\n"
             "{\"intent\": \"log_workout\", \"note\": null}\n\n"
             "USER: 'skip workout today, sick'\n"
@@ -198,6 +251,7 @@ class GoalsChatHandler:
             "{\"intent\": \"complete_chore\", \"name\": \"vacuum\"}\n\n"
             "USER: 'whats the weather'\n"
             "{\"intent\": \"general_chat\"}\n"
+            + context_block
         )
         return {"system": system, "user": text.strip()}
 
@@ -206,38 +260,44 @@ class GoalsChatHandler:
     async def _dispatch(
         self, *, intent: str, args: dict[str, Any],
         text: str, member_id: int,
-    ) -> str:
+        context: dict[str, Any] | None = None,
+    ) -> tuple[str, int | None]:
+        """Returns (reply_text, touched_goal_id_or_None). The caller
+        uses the goal_id to update the per-member context so a
+        follow-up question lands on the same goal."""
         if intent == "create_goal":
             return await self._handle_create_goal(args, text, member_id)
         if intent == "check_progress":
-            return await self._handle_check_progress(args, member_id)
+            return await self._handle_check_progress(args, member_id, context)
         if intent == "list_goals":
-            return await self._handle_list_goals(member_id)
+            return await self._handle_list_goals(member_id), None
+        if intent == "explain_plan":
+            return await self._handle_explain_plan(args, member_id, context)
         if intent == "skip_workout":
             return await self._handle_skip_workout(args, member_id)
         if intent == "log_workout":
             return await self._handle_log_workout(args, member_id)
         if intent in {"mute_goal", "unmute_goal", "pause_goal", "resume_goal",
                        "abandon_goal"}:
-            return await self._handle_goal_state(intent, args, member_id)
+            return await self._handle_goal_state(intent, args, member_id, context)
         if intent == "set_nag_windows":
-            return await self._handle_set_nag_windows(args, member_id)
+            return await self._handle_set_nag_windows(args, member_id), None
         if intent == "complete_chore":
-            return await self._handle_complete_chore(args, member_id)
+            return await self._handle_complete_chore(args, member_id), None
         if intent == "list_chores":
-            return await self._handle_list_chores()
+            return await self._handle_list_chores(), None
         if intent == "weekly_review":
-            return await self._handle_weekly_review(member_id)
+            return await self._handle_weekly_review(member_id), None
         return (
             "I picked up something about goals but I don't know how to "
             "handle that specific request yet."
-        )
+        ), None
 
     # ── create_goal: LLM plan generation ─────────────────────────
 
     async def _handle_create_goal(
         self, args: dict[str, Any], text: str, member_id: int,
-    ) -> str:
+    ) -> tuple[str, int | None]:
         title = str(args.get("title") or text[:80]).strip()
         description = str(args.get("description") or text).strip()
         try:
@@ -283,10 +343,11 @@ class GoalsChatHandler:
                 f"on the day if you haven't logged one yet."
             )
         bits.append(
-            "Anytime you want to skip a day, just tell me. To stop the "
-            "nags entirely on a goal, say 'mute it'."
+            "Want the full plan with milestones? Just ask — say \"what "
+            "does the plan look like\". Skip a day anytime by saying so; "
+            "to silence nags on this goal say \"mute it\"."
         )
-        return "\n\n".join(b for b in bits if b)
+        return "\n\n".join(b for b in bits if b), goal_id
 
     async def _generate_plan(
         self, *, title: str, description: str,
@@ -348,19 +409,25 @@ class GoalsChatHandler:
 
     async def _handle_check_progress(
         self, args: dict[str, Any], member_id: int,
-    ) -> str:
+        context: dict[str, Any] | None = None,
+    ) -> tuple[str, int | None]:
         goals = await self.goals.list_active(member_id=member_id)
         if not goals:
             return (
                 "You don't have any active goals right now. If you want "
                 "to start one, just tell me what you're aiming for."
-            )
+            ), None
         which = str(args.get("which") or "").lower()
         target_goal = _match_goal(goals, which)
+        if target_goal is None and context and context.get("last_goal_id"):
+            target_goal = next(
+                (g for g in goals if int(g["id"]) == context["last_goal_id"]),
+                None,
+            )
         if target_goal is None:
             target_goal = goals[0]
         prog = await self.goals.get_progress(int(target_goal["id"])) or {}
-        return _format_progress_line(target_goal, prog)
+        return _format_progress_line(target_goal, prog), int(target_goal["id"])
 
     async def _handle_list_goals(self, member_id: int) -> str:
         goals = await self.goals.list_all_for_member(
@@ -374,17 +441,86 @@ class GoalsChatHandler:
             lines.append(f"- {g['title']} ({g['status']})")
         return "\n".join(lines)
 
+    async def _handle_explain_plan(
+        self, args: dict[str, Any], member_id: int,
+        context: dict[str, Any] | None = None,
+    ) -> tuple[str, int | None]:
+        """Explain the plan for a specific goal: plan_text, weekly
+        cadence, milestones. Resolves the goal from explicit 'which'
+        first, then conversational context, then the most-recent
+        active goal."""
+        goals = await self.goals.list_active(member_id=member_id)
+        if not goals:
+            return (
+                "You don't have any active goals yet. Tell me what you "
+                "want to work on and I'll write you a plan."
+            ), None
+        which = str(args.get("which") or "").lower()
+        target = _match_goal(goals, which)
+        if target is None and context and context.get("last_goal_id"):
+            target = next(
+                (g for g in goals if int(g["id"]) == context["last_goal_id"]),
+                None,
+            )
+        if target is None:
+            target = goals[0]
+        milestones = await self.goals.list_milestones(int(target["id"]))
+        bits = [f"Here's the plan for \"{target['title']}\":"]
+        plan_text = (target.get("plan_text") or "").strip()
+        if plan_text:
+            bits.append(plan_text)
+        else:
+            bits.append(
+                "I haven't written a detailed plan yet. Tell me a bit more "
+                "about how you'd like to approach it and I'll fill it in."
+            )
+        budget = target.get("workout_budget") or {}
+        if isinstance(budget, dict) and budget:
+            cadence_bits = []
+            if budget.get("required_per_week"):
+                cadence_bits.append(
+                    f"{budget['required_per_week']} workouts per week"
+                )
+            if budget.get("flexible_rest_per_week"):
+                cadence_bits.append(
+                    f"up to {budget['flexible_rest_per_week']} flexible "
+                    "rest day" +
+                    ("" if budget["flexible_rest_per_week"] == 1 else "s")
+                )
+            if budget.get("days_preferred"):
+                cadence_bits.append(
+                    "leaning toward " + _humanize_list(
+                        [str(d) for d in budget["days_preferred"]]
+                    )
+                )
+            if cadence_bits:
+                bits.append("Cadence: " + ", ".join(cadence_bits) + ".")
+        if milestones:
+            ms_lines = ["Milestones:"]
+            for ms in milestones[:5]:
+                due = ms.get("due_date")
+                due_str = due.isoformat() if hasattr(due, "isoformat") else str(due or "")
+                ms_lines.append(
+                    f"- {due_str}: {ms.get('target_description', '')}"
+                )
+            bits.append("\n".join(ms_lines))
+        bits.append(
+            "If the cadence doesn't fit, just say so — \"make it 2 days a "
+            "week\" or \"shift to Tue/Thu/Sat\" — and I'll rework it."
+        )
+        return "\n\n".join(b for b in bits if b), int(target["id"])
+
     # ── Workout actions ──────────────────────────────────────────
 
     async def _handle_skip_workout(
         self, args: dict[str, Any], member_id: int,
-    ) -> str:
+    ) -> tuple[str, int | None]:
         goals = await self.goals.list_active(member_id=member_id)
         if not goals:
             return (
                 "No active goals to skip workouts on. If you want to "
                 "track one, tell me what you're aiming for."
-            )
+            ), None
         reason = str(args.get("reason") or "").strip() or None
         excused = []
         over_budget = []
@@ -426,11 +562,12 @@ class GoalsChatHandler:
         if not bits:
             bits.append("Nothing to skip — you don't have a workout planned "
                         "for today.")
-        return "\n\n".join(bits)
+        last_touched = goals[0]["id"] if goals else None
+        return "\n\n".join(bits), int(last_touched) if last_touched else None
 
     async def _handle_log_workout(
         self, args: dict[str, Any], member_id: int,
-    ) -> str:
+    ) -> tuple[str, int | None]:
         # We log against the chore_log table as a "Laundry load"-style
         # entry? No — workouts are tracked in health_metrics. The user's
         # Apple Watch / HealthKit Auto Export populates that. For now,
@@ -438,6 +575,7 @@ class GoalsChatHandler:
         # today's progress as workout_completed=True so the nag stops.
         goals = await self.goals.list_active(member_id=member_id)
         marked = 0
+        last_touched = None
         for g in goals:
             if not (g.get("workout_budget") or {}):
                 continue
@@ -455,37 +593,47 @@ class GoalsChatHandler:
                 note=str(args.get("note") or "logged via chat") or None,
             )
             marked += 1
+            last_touched = int(g["id"])
         if marked == 0:
-            return "Nice. I don't have an active workout goal on file, but I'll remember you trained today."
+            return ("Nice. I don't have an active workout goal on file, but "
+                    "I'll remember you trained today."), None
         return (
             f"Nice — logged today's workout against {marked} goal" +
             ("" if marked == 1 else "s") + ". I'll back off the nags."
-        )
+        ), last_touched
 
     # ── Goal state ───────────────────────────────────────────────
 
     async def _handle_goal_state(
         self, intent: str, args: dict[str, Any], member_id: int,
-    ) -> str:
+        context: dict[str, Any] | None = None,
+    ) -> tuple[str, int | None]:
         goals = await self.goals.list_active(member_id=member_id)
         if not goals:
-            return "No active goals to change."
+            return "No active goals to change.", None
         which = str(args.get("which") or "").lower()
-        target = _match_goal(goals, which) or goals[0]
+        target = _match_goal(goals, which)
+        if target is None and context and context.get("last_goal_id"):
+            target = next(
+                (g for g in goals if int(g["id"]) == context["last_goal_id"]),
+                None,
+            )
+        if target is None:
+            target = goals[0]
         gid = int(target["id"])
         title = target["title"]
         if intent == "pause_goal":
             await self.goals.set_status(gid, "paused", note="user requested")
-            return f"Paused \"{title}\". Tell me when you want to resume."
+            return f"Paused \"{title}\". Tell me when you want to resume.", gid
         if intent == "resume_goal":
             await self.goals.set_status(gid, "active", note="user requested")
-            return f"Resumed \"{title}\"."
+            return f"Resumed \"{title}\".", gid
         if intent == "abandon_goal":
             await self.goals.set_status(gid, "abandoned", note="user requested")
             return (
                 f"Done — \"{title}\" is off the active list. No judgment, "
                 "we can pick a different one whenever."
-            )
+            ), gid
         if intent == "mute_goal":
             hours = args.get("duration_hours")
             try:
@@ -497,11 +645,11 @@ class GoalsChatHandler:
             return (
                 f"Muted \"{title}\" for {hours_int} hour" +
                 ("" if hours_int == 1 else "s") + "."
-            )
+            ), gid
         if intent == "unmute_goal":
             await self.goals.set_quiet_until(gid, until=None)
-            return f"Unmuted \"{title}\"."
-        return "Done."
+            return f"Unmuted \"{title}\".", gid
+        return "Done.", gid
 
     # ── Nag windows ──────────────────────────────────────────────
 
@@ -591,6 +739,79 @@ class GoalsChatHandler:
                 line += f" (target {target})"
             lines.append(line)
         return "Here's the week so far:\n" + "\n".join(lines)
+
+    # ── Conversational context (Redis-backed, 30-min TTL) ────────
+
+    async def _load_context(self, member_id: int) -> dict[str, Any] | None:
+        """Read the per-member context blob if present + still valid.
+        Augments it with the goal title (cheap lookup) and an
+        age_seconds field for the classifier prompt."""
+        if self.redis is None:
+            return None
+        try:
+            raw = await self.redis.get(CONTEXT_KEY_PREFIX + str(member_id))
+        except Exception as exc:
+            logger.warning("goals_chat_context_load_failed", error=str(exc))
+            return None
+        if not raw:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        try:
+            blob = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(blob, dict):
+            return None
+        goal_id = blob.get("last_goal_id")
+        title = None
+        if isinstance(goal_id, int):
+            try:
+                goal = await self.goals.get(goal_id)
+                if goal and goal.get("status") in {"active", "paused"}:
+                    title = goal.get("title")
+                else:
+                    # Stale (goal abandoned / wrong member) — drop the context
+                    return None
+            except Exception:
+                pass
+        ts = blob.get("ts")
+        age = None
+        try:
+            if ts:
+                age = max(0, int(
+                    datetime.now(UTC).timestamp() -
+                    datetime.fromisoformat(ts).timestamp()
+                ))
+        except (TypeError, ValueError):
+            age = None
+        return {
+            "last_goal_id": goal_id,
+            "last_goal_title": title,
+            "last_intent": blob.get("last_intent"),
+            "age_seconds": age,
+        }
+
+    async def _save_context(
+        self, member_id: int, *, last_goal_id: int, last_intent: str,
+    ) -> None:
+        """Stash the most-recent touched goal so a follow-up question
+        resolves to it. TTL keeps stale context from leaking forward."""
+        if self.redis is None:
+            return
+        blob = {
+            "last_goal_id": int(last_goal_id),
+            "last_intent": last_intent,
+            "ts": datetime.now(UTC).isoformat(),
+        }
+        try:
+            await self.redis.set(
+                CONTEXT_KEY_PREFIX + str(member_id),
+                json.dumps(blob),
+                ex=CONTEXT_TTL_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning("goals_chat_context_save_failed", error=str(exc))
 
 
 # ── Helpers ──────────────────────────────────────────────────────
