@@ -53,7 +53,7 @@ CONTEXT_KEY_PREFIX = "goals_chat:context:"
 # the LLM is unsure between create_goal and check_progress, we tip
 # toward check_progress because create is irreversible (creates a row).
 VALID_INTENTS = {
-    "create_goal", "check_progress", "list_goals",
+    "create_goal", "refine_goal", "check_progress", "list_goals",
     "explain_plan",
     "skip_workout", "log_workout",
     "mute_goal", "unmute_goal", "abandon_goal", "pause_goal", "resume_goal",
@@ -188,13 +188,23 @@ class GoalsChatHandler:
                 "\n\nRECENT CONTEXT: The user just interacted with their "
                 f"goal titled \"{context['last_goal_title']}\" "
                 f"(intent='{context.get('last_intent')}', "
-                f"valid for ~{ttl_min} more minutes). If the new message "
-                "is a vague follow-up like 'what would the plan involve', "
-                "'tell me more', 'what does it look like', 'how does it "
-                "work', treat it as 'explain_plan' on that goal. If they "
-                "say 'skip it', 'mute it', 'pause it' without naming a "
-                "different goal, apply to this one. Don't override an "
-                "obviously-different intent."
+                f"valid for ~{ttl_min} more minutes). "
+                "If the new message is a vague follow-up like 'what would "
+                "the plan involve', 'tell me more', 'what does it look "
+                "like', 'how does it work' — treat it as 'explain_plan' "
+                "on that goal. "
+                "If they propose a tweak / alternative approach to the "
+                "SAME outcome ('I was thinking instead I could…', 'what "
+                "if I did X instead', 'change it to…', 'make it 3x a "
+                "week', 'shift to Mon/Wed/Fri', 'what do you think about "
+                "doing it daily') — treat that as 'refine_goal' on this "
+                "existing goal, NOT a new 'create_goal'. Only return "
+                "'create_goal' when the new message is clearly a "
+                "different outcome (e.g. they just made a pushup goal "
+                "and now say 'I also want to lose weight'). "
+                "If they say 'skip it', 'mute it', 'pause it' without "
+                "naming a different goal, apply to this one. Don't "
+                "override an obviously-different intent."
             )
         system = (
             "You classify a single user message into one of a fixed set "
@@ -205,8 +215,13 @@ class GoalsChatHandler:
             "Return ONLY a JSON object: "
             "{\"intent\": <name>, ...args}.\n\n"
             "Allowed intents and what to extract:\n"
-            "- create_goal: user wants to start a new health goal. "
+            "- create_goal: user wants to start a NEW health goal. "
             "args: {\"title\": str, \"description\": str}.\n"
+            "- refine_goal: user proposes a different approach / "
+            "cadence / day-pattern for an EXISTING goal they just "
+            "talked about. args: {\"refinement\": str, \"which\": "
+            "str|null}. Use this ONLY when recent context names a "
+            "goal — never on a cold message.\n"
             "- check_progress: user asks how they're doing on a goal.\n"
             "- list_goals: user asks 'what goals do I have'.\n"
             "- explain_plan: user asks what the plan for a goal is, what "
@@ -234,6 +249,13 @@ class GoalsChatHandler:
             "USER: 'I want to work out four times a week'\n"
             "{\"intent\": \"create_goal\", \"title\": \"Work out 4x a week\", "
             "\"description\": \"I want to work out four times a week.\"}\n\n"
+            "USER (after just creating a pushup goal): 'I was thinking "
+            "doing pushups after every prayer daily, what do you think?'\n"
+            "{\"intent\": \"refine_goal\", \"refinement\": \"do pushups "
+            "after every prayer, daily cadence\"}\n\n"
+            "USER (after creating a goal): 'shift it to Tue/Thu/Sat'\n"
+            "{\"intent\": \"refine_goal\", \"refinement\": \"shift to "
+            "Tue/Thu/Sat\"}\n\n"
             "USER: 'how am I doing this week'\n"
             "{\"intent\": \"check_progress\"}\n\n"
             "USER: 'what would the plan involve'\n"
@@ -267,6 +289,8 @@ class GoalsChatHandler:
         follow-up question lands on the same goal."""
         if intent == "create_goal":
             return await self._handle_create_goal(args, text, member_id)
+        if intent == "refine_goal":
+            return await self._handle_refine_goal(args, text, member_id, context)
         if intent == "check_progress":
             return await self._handle_check_progress(args, member_id, context)
         if intent == "list_goals":
@@ -348,6 +372,81 @@ class GoalsChatHandler:
             "to silence nags on this goal say \"mute it\"."
         )
         return "\n\n".join(b for b in bits if b), goal_id
+
+    # ── Refine an existing goal in conversational context ────────
+
+    async def _handle_refine_goal(
+        self, args: dict[str, Any], text: str, member_id: int,
+        context: dict[str, Any] | None = None,
+    ) -> tuple[str, int | None]:
+        """User proposed a different approach to a goal we've been
+        discussing. Re-run the planner with the existing goal's
+        description + the refinement note, then overwrite the plan in
+        place (no new health_goals row)."""
+        goals = await self.goals.list_active(member_id=member_id)
+        if not goals:
+            return (
+                "There's no active goal to refine right now. Tell me "
+                "what you're aiming for and I'll set one up."
+            ), None
+        which = str(args.get("which") or "").lower()
+        target = _match_goal(goals, which)
+        if target is None and context and context.get("last_goal_id"):
+            target = next(
+                (g for g in goals if int(g["id"]) == context["last_goal_id"]),
+                None,
+            )
+        if target is None:
+            target = goals[0]
+        refinement = str(args.get("refinement") or text).strip()
+        try:
+            plan = await self._generate_plan(
+                title=target["title"],
+                description=(
+                    f"{target['description']}\n\n"
+                    f"REFINEMENT FROM USER: {refinement}"
+                ),
+            )
+        except Exception as exc:
+            logger.warning("goals_chat_refine_failed", error=str(exc))
+            return (
+                "I'd like to rework the plan but the planner is taking too "
+                "long right now. Try again in a minute, or tell me exactly "
+                "what to change."
+            ), int(target["id"])
+        try:
+            await self.goals.update_plan(
+                int(target["id"]),
+                plan_text=plan.get("plan_text") or "",
+                metric_links=plan.get("metric_links"),
+                workout_budget=plan.get("workout_budget"),
+                milestones=plan.get("milestones") or None,
+            )
+        except Exception as exc:
+            logger.warning("goals_chat_refine_persist_failed", error=str(exc))
+            return (
+                "I drafted an updated plan but couldn't save it. "
+                f"Here's what I had:\n\n{plan.get('plan_text') or ''}"
+            ), int(target["id"])
+        budget = plan.get("workout_budget") or {}
+        per_week = budget.get("required_per_week")
+        days = budget.get("days_preferred") or []
+        bits = [
+            f"Updated \"{target['title']}\". Here's the revised plan:",
+            plan.get("plan_text") or "",
+        ]
+        cadence = []
+        if per_week:
+            cadence.append(f"{per_week} workouts per week")
+        if days:
+            cadence.append("on " + _humanize_list([str(d) for d in days]))
+        if cadence:
+            bits.append("Cadence: " + ", ".join(cadence) + ".")
+        bits.append(
+            "Say the word and I'll keep refining it — or \"explain the "
+            "plan\" any time you want the full breakdown."
+        )
+        return "\n\n".join(b for b in bits if b), int(target["id"])
 
     async def _generate_plan(
         self, *, title: str, description: str,

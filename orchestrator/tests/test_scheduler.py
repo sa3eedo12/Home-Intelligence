@@ -184,3 +184,118 @@ jobs:
         assert payload["topic"] == "test.topic"
     finally:
         await scheduler.shutdown()
+
+
+# ── Notify payload building ─────────────────────────────────────
+
+
+def _make_scheduler(tmp_path: Path = None) -> Scheduler:
+    """Bare scheduler instance for unit-testing pure helpers."""
+    # Need a real (empty) schedules file because Scheduler.__init__
+    # tries to read it. Use a unique tmpfile each call.
+    import tempfile
+    fd = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False,
+    )
+    fd.write("jobs: []\n")
+    fd.close()
+    return Scheduler(
+        registry=MagicMock(),
+        redis=MagicMock(),
+        schedules_path=fd.name,
+        timezone="UTC",
+        internal_callbacks={},
+    )
+
+
+def test_notify_picks_markdown_field_when_no_text_field_configured() -> None:
+    """Tools like morning_brief and evening_recap return
+    {markdown: ...}. Without an explicit text_field, the scheduler
+    should pick the markdown content, not JSON-dump the whole dict."""
+    sched = _make_scheduler()
+    cfg = {"notify": {"severity": "info", "topic": "brief.morning"}}
+    dispatch = {"agent": "personal_assistant", "capability": "morning_brief"}
+    result = {"markdown": "### Morning Brief\n- All good"}
+    payload = sched._build_notify_payload(cfg, dispatch, result)
+    assert payload is not None
+    assert payload["text"] == "### Morning Brief\n- All good"
+    # Verify the JSON dump fallback didn't kick in
+    assert "{" not in payload["text"][:5]
+
+
+def test_notify_picks_summary_text_or_message_field() -> None:
+    sched = _make_scheduler()
+    cfg = {"notify": {"topic": "x"}}
+    for field in ("text", "summary", "markdown", "message"):
+        payload = sched._build_notify_payload(
+            cfg, {"agent": "a", "capability": "c"},
+            {field: f"hello via {field}"},
+        )
+        assert payload is not None
+        assert payload["text"] == f"hello via {field}"
+
+
+def test_notify_suppresses_empty_indexed_payload() -> None:
+    """notes.index returns {ok: True, indexed: 0, skipped: 0} on idle
+    polls — must be silent, not 'send me a JSON dump'."""
+    sched = _make_scheduler()
+    cfg = {"notify": {"topic": "notes.index"}}
+    dispatch = {"agent": "knowledge_notes", "capability": "index_path"}
+    payload = sched._build_notify_payload(
+        cfg, dispatch, {"ok": True, "indexed": 0, "skipped": 0},
+    )
+    assert payload is None
+
+
+def test_notify_suppresses_empty_items_payload() -> None:
+    """pantry_low_stock returns {items: []} when nothing is low. The
+    user should not be pinged with '{"items": []}'."""
+    sched = _make_scheduler()
+    cfg = {"notify": {"topic": "household.pantry_low"}}
+    dispatch = {"agent": "household_ops", "capability": "pantry_low_stock"}
+    payload = sched._build_notify_payload(cfg, dispatch, {"items": []})
+    assert payload is None
+
+
+def test_notify_still_sends_non_empty_items_payload() -> None:
+    sched = _make_scheduler()
+    cfg = {"notify": {"topic": "x"}}
+    dispatch = {"agent": "a", "capability": "c"}
+    payload = sched._build_notify_payload(
+        cfg, dispatch,
+        {"items": ["milk", "eggs"], "summary": "2 items low"},
+    )
+    assert payload is not None
+    assert payload["text"] == "2 items low"
+
+
+def test_notify_returns_none_for_null_output() -> None:
+    sched = _make_scheduler()
+    cfg = {"notify": {"topic": "x"}}
+    payload = sched._build_notify_payload(
+        cfg, {"agent": "a", "capability": "c"}, None,
+    )
+    assert payload is None
+
+
+def test_notify_respects_explicit_text_field_when_set() -> None:
+    """When the schedule explicitly names text_field, that takes
+    priority over the auto-detect heuristic."""
+    sched = _make_scheduler()
+    cfg = {"notify": {"text_field": "summary", "topic": "x"}}
+    payload = sched._build_notify_payload(
+        cfg, {"agent": "a", "capability": "c"},
+        {"summary": "use this", "markdown": "ignore this"},
+    )
+    assert payload is not None
+    assert payload["text"] == "use this"
+
+
+def test_notify_obeys_explicit_notify_false() -> None:
+    sched = _make_scheduler()
+    cfg = {"notify": {"topic": "x"}}
+    payload = sched._build_notify_payload(
+        cfg, {"agent": "a", "capability": "c"},
+        {"notify": False, "summary": "would have sent"},
+    )
+    assert payload is None

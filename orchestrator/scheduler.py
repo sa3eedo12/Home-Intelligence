@@ -146,16 +146,37 @@ class Scheduler:
         if isinstance(output, dict):
             if output.get("notify") is False:
                 return None
+            # Common low-signal payloads we should never push to the user
+            # as a notification. Catches results like {"ok": True,
+            # "indexed": 0, "skipped": 0} (notes.index when nothing
+            # changed) and {"items": []} (pantry_low_stock when nothing
+            # is low). The job still runs and gets logged; the user
+            # just doesn't get pinged about a non-event.
+            if _is_low_signal_payload(output):
+                return None
             text_field = notify.get("text_field")
             if text_field:
                 text = str(output.get(text_field) or "")
             else:
-                text = json.dumps(output, ensure_ascii=False, indent=2)[:1200]
+                # Try the conventional text-bearing fields before
+                # falling back to a JSON dump. Tools like morning_brief
+                # / evening_recap return {"markdown": "..."}; many
+                # others use 'summary' or 'text'.
+                text = ""
+                for field in ("text", "summary", "markdown", "message"):
+                    value = output.get(field)
+                    if isinstance(value, str) and value.strip():
+                        text = value
+                        break
+                if not text:
+                    text = json.dumps(output, ensure_ascii=False, indent=2)[:1200]
             keyboard_field = notify.get("keyboard_field")
             if keyboard_field:
                 keyboard = output.get(keyboard_field)
         elif isinstance(output, str):
             text = output
+        elif output is None:
+            return None
         else:
             text = json.dumps(output, ensure_ascii=False, indent=2)[:1200]
         if not text.strip():
@@ -241,3 +262,40 @@ class Scheduler:
         if job_id not in self._definitions:
             raise KeyError(job_id)
         return await self._execute_job(job_id)
+
+
+def _is_low_signal_payload(payload: dict[str, Any]) -> bool:
+    """True if a scheduled-job result is a no-news dict that shouldn't
+    become a user notification. Catches:
+    - {"items": []} / {"items": null}        (e.g. pantry_low_stock)
+    - {"indexed": 0, "skipped": 0, ...}      (notes.index when idle)
+    - {"count": 0, ...} / {"items": [], "count": 0}
+    Anything with a non-empty text/summary/markdown/message field is
+    always considered signal regardless of the other keys."""
+    for field in ("text", "summary", "markdown", "message"):
+        value = payload.get(field)
+        if isinstance(value, str) and value.strip():
+            return False
+    items = payload.get("items")
+    if items is not None and (
+        (isinstance(items, list) and not items)
+        or (isinstance(items, int) and items == 0)
+    ):
+        # Tool returned an explicit empty list with no other narrative.
+        non_zero = any(
+            v not in (None, 0, "", False, [])
+            and k not in ("items", "ok", "count")
+            for k, v in payload.items()
+        )
+        if not non_zero:
+            return True
+    indexed = payload.get("indexed")
+    skipped = payload.get("skipped")
+    if (
+        isinstance(indexed, int) and indexed == 0
+        and (skipped is None or (isinstance(skipped, int) and skipped == 0))
+    ):
+        # notes.index reporting zero new files indexed and zero skipped
+        # — neither is news for the user.
+        return True
+    return False

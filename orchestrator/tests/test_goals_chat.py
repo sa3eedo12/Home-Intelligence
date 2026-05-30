@@ -679,3 +679,117 @@ async def test_explain_plan_falls_back_to_first_goal_with_no_context() -> None:
     r = await h.try_handle("what's the plan?", member=MEMBER)
     assert r.handled is True
     assert "Strong" in r.text
+
+
+# ── refine_goal flow ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_refine_goal_updates_existing_plan_not_creates_new() -> None:
+    """User suggests an alternative approach after creating a goal —
+    must call update_plan on the existing goal, NOT create() a new
+    one. This is the exact regression bug from real usage."""
+    classify = {"intent": "refine_goal",
+                "refinement": "do pushups after every prayer, daily"}
+    new_plan = {
+        "plan_text": "Daily after each prayer: as many as you can.",
+        "metric_links": [{"metric": "workout", "target_per_week": 7}],
+        "workout_budget": {"required_per_week": 7,
+                            "flexible_rest_per_week": 0,
+                            "days_preferred": ["mon", "tue", "wed",
+                                                "thu", "fri", "sat", "sun"]},
+        "milestones": [],
+    }
+    llm = _llm_returning(classify, new_plan)
+    goal_row = {
+        "id": 5, "member_id": 2, "title": "Double Pushups in 2 Weeks",
+        "description": "Double pushup max in 14 days",
+        "plan_text": "Old plan: 3-4x/week",
+        "workout_budget": {"required_per_week": 3},
+        "status": "active",
+    }
+    goals = _fake_goals_store_with_get(goal_row)
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle(
+        "I was thinking doing as many push ups as I can after every prayer daily. What do you think",
+        member=MEMBER,
+    )
+    assert r.handled is True
+    assert r.intent == "refine_goal"
+    assert "Double Pushups in 2 Weeks" in r.text
+    assert "Daily after each prayer" in r.text
+    # The critical assertion: no new goal was created
+    goals.create.assert_not_called()
+    goals.update_plan.assert_awaited_once()
+    update_call = goals.update_plan.await_args
+    assert update_call.args == (5,)
+    assert "Daily after each prayer" in update_call.kwargs["plan_text"]
+    assert update_call.kwargs["workout_budget"]["required_per_week"] == 7
+
+
+@pytest.mark.asyncio
+async def test_refine_goal_with_no_active_goals_apologizes() -> None:
+    classify = {"intent": "refine_goal", "refinement": "make it daily"}
+    llm = _llm_returning(classify)
+    goals = _fake_goals_store(active=[])
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("make it daily", member=MEMBER)
+    assert r.handled is True
+    assert "no active goal to refine" in r.text
+
+
+@pytest.mark.asyncio
+async def test_refine_goal_uses_context_when_no_which_arg() -> None:
+    """Without explicit 'which', refine_goal resolves to the most
+    recently touched goal (from Redis context)."""
+    classify = {"intent": "refine_goal", "refinement": "Tue/Thu/Sat"}
+    plan = {
+        "plan_text": "Updated.", "metric_links": [],
+        "workout_budget": {"required_per_week": 3,
+                            "days_preferred": ["tue", "thu", "sat"]},
+        "milestones": [],
+    }
+    llm = _llm_returning(classify, plan)
+    redis = _fake_redis_stub()
+    redis._store["goals_chat:context:2"] = json.dumps({
+        "last_goal_id": 99, "last_intent": "create_goal",
+        "ts": datetime.now(UTC).isoformat(),
+    })
+    target = {
+        "id": 99, "member_id": 2, "title": "Run more",
+        "description": "Run 3x", "plan_text": "old",
+        "workout_budget": {"required_per_week": 3},
+        "status": "active",
+    }
+    other = {
+        "id": 100, "member_id": 2, "title": "Sleep more",
+        "description": "x", "plan_text": "y",
+        "workout_budget": {}, "status": "active",
+    }
+    goals = _fake_goals_store_with_get(other, target)  # `other` first in list_active
+    h = GoalsChatHandler(
+        llm=llm, goals_store=goals,
+        chore_store=_fake_chore_store(),
+        nag_store=_fake_nag_store(),
+        redis=redis,
+    )
+    r = await h.try_handle("shift to Tue Thu Sat", member=MEMBER)
+    assert r.handled is True
+    # Resolved via context, NOT head-of-list
+    update_call = goals.update_plan.await_args
+    assert update_call.args == (99,)
+    assert "Run more" in r.text
+
+
+def test_classifier_prompt_mentions_refine_in_context_block() -> None:
+    prompt = GoalsChatHandler._classifier_prompt(
+        "what if I did it daily instead",
+        context={
+            "last_goal_id": 1, "last_goal_title": "Pushups",
+            "last_intent": "create_goal", "age_seconds": 60,
+        },
+    )
+    # The context block must teach the classifier that mid-conversation
+    # "I was thinking instead..." is refine, not create.
+    assert "refine_goal" in prompt["system"]
+    assert "different outcome" in prompt["system"]

@@ -86,6 +86,23 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
+def _is_advisor_brief(brief: dict[str, Any]) -> bool:
+    """The advisor records side-briefs into the same morning_brief table
+    when it skips (quiet_hours_active, calendar_busy, etc.) or
+    produces zero proposals. Those are operational artifacts — not the
+    user's morning digest — and must be filtered out before picking
+    'most recent brief' for delivery."""
+    body = brief.get("body_json") or {}
+    if not isinstance(body, dict):
+        return False
+    if body.get("type") == "advisor":
+        return True
+    summary = brief.get("summary") or body.get("summary") or ""
+    if isinstance(summary, str) and summary.lower().startswith("advisor "):
+        return True
+    return False
+
+
 def _parse_timestamp(raw: Any) -> datetime | None:
     if isinstance(raw, datetime):
         return raw if raw.tzinfo else raw.replace(tzinfo=UTC)
@@ -562,13 +579,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             return {"ok": False, "error": "telegram_chat_id_invalid"}
         if chat_id <= 0:
             return {"ok": False, "error": "telegram_chat_id_missing"}
-        briefs = await reflector.store.list_briefs(limit=1)
-        if not briefs:
+        briefs = await reflector.store.list_briefs(limit=10)
+        # Advisor briefs (status='skipped' / type='advisor') share the
+        # morning_brief table but should never be surfaced as the user's
+        # morning digest — they're a side product of the 4h advisor loop.
+        # Filter to find the most recent real reflection brief.
+        brief = next(
+            (b for b in briefs if not _is_advisor_brief(b)),
+            None,
+        )
+        if brief is None:
             await reflector.run_once()
-            briefs = await reflector.store.list_briefs(limit=1)
-        if not briefs:
+            briefs = await reflector.store.list_briefs(limit=10)
+            brief = next(
+                (b for b in briefs if not _is_advisor_brief(b)),
+                None,
+            )
+        if brief is None:
             return {"ok": False, "error": "no_morning_brief"}
-        brief = briefs[0]
         await send_morning_brief(tg_app_ref, brief, chat_id)
         try:
             async with pool.acquire() as conn:
