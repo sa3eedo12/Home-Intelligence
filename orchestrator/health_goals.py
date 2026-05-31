@@ -108,8 +108,12 @@ async def _compose_nag_text(
         "You are a calm, brief health coach checking in with one user. "
         "Write exactly ONE sentence (max ~25 words). Warm, conversational, "
         "no emoji-as-syntax, no markdown, no exclamation marks, no clichés "
-        "like 'crush it' or 'you got this'. Reference the actual progress "
-        "shown in the status line so the nudge feels real, not generic. "
+        "like 'crush it' or 'you got this'. "
+        "GROUND your message in the status line provided. NEVER invent "
+        "numbers (kilograms lost, percentages, streaks) that aren't shown "
+        "there. If the status line shows 0 progress or no data, "
+        "acknowledge that honestly rather than inventing improvement. "
+        "If the status doesn't justify celebration, don't celebrate. "
         f"Tone: {tone_hint}.\n\n"
         "Return ONLY the sentence — no quotes, no preamble."
     )
@@ -368,17 +372,30 @@ async def run_weekly_reflection(
     llm: Any | None = None,
     reasoner_model: str = "qwen3:14b",
 ) -> dict[str, Any]:
-    """Per active goal, fetch the last 7 days of progress and ask the
-    reasoner for a one-paragraph reflection. Sends it to the user via
-    notify.outbound. Updates plan_text if the reasoner returned a new
-    one."""
+    """Per active goal, build a tracker-spec-driven summary of the
+    last 7 days and ask the reasoner for a one-paragraph reflection.
+    Sends it to the user via notify.outbound. Updates plan_text if
+    the reasoner returned a new one."""
+    from . import goal_engine
+
     active = await store.list_active()
     reflected = 0
     skipped = 0
     for goal in active:
         member_id = int(goal["member_id"])
-        progress_rows = await store.recent_progress(int(goal["id"]), days=7)
-        stats = _summarize_week(progress_rows, goal)
+        try:
+            log_rows = await store.recent_log(int(goal["id"]), limit=500)
+            eval_result = goal_engine.evaluate(goal=goal, log_rows=log_rows)
+            progress_rows = await store.recent_progress(int(goal["id"]), days=7)
+            stats = _summarize_week(
+                goal=goal, log_rows=log_rows, progress_rows=progress_rows,
+                eval_result=eval_result,
+            )
+        except Exception as exc:
+            logger.warning("weekly_reflection_summarize_failed",
+                           goal_id=goal["id"], error=str(exc))
+            skipped += 1
+            continue
         if llm is None:
             reflection_text = _fallback_reflection_text(goal, stats)
             new_plan = None
@@ -426,48 +443,131 @@ async def run_weekly_reflection(
 
 
 def _summarize_week(
-    progress_rows: list[dict[str, Any]], goal: dict[str, Any],
+    *, goal: dict[str, Any],
+    log_rows: list[dict[str, Any]],
+    progress_rows: list[dict[str, Any]],
+    eval_result: Any,
 ) -> dict[str, Any]:
-    """Roll the week's progress rows into the inputs the LLM (or the
-    fallback writer) needs."""
-    workouts_done = sum(1 for r in progress_rows if r.get("workout_completed"))
+    """Build a tracker-spec-driven week summary. Generic across goal
+    shapes — anything in the tracker_spec gets summarized.
+
+    For each tracker:
+    - kind=counter, reset=daily   → sum of logs over the last 7 days,
+                                    plus per-day breakdown
+    - kind=counter, reset=weekly  → current weekly total + target
+    - kind=gauge                  → latest reading + 7-day-ago reading
+                                    + change
+
+    Plus general rollups: total log count, excused days, nags sent."""
+    spec = goal.get("tracker_spec") or {}
+    trackers = spec.get("trackers") or []
+    by_id = {t.get("id"): t for t in trackers if isinstance(t, dict)}
+
+    # Per-tracker summary
+    trackers_summary: list[dict[str, Any]] = []
+    now_local_day = datetime.now(UTC).date()
+    seven_days_ago = now_local_day - timedelta(days=7)
+    for tcfg in trackers:
+        if not isinstance(tcfg, dict):
+            continue
+        tid = tcfg.get("id")
+        kind = tcfg.get("kind") or "counter"
+        target = tcfg.get("target")
+        unit = tcfg.get("unit") or ""
+        label = tcfg.get("label") or tid
+        # Pull this tracker's values out of the week's logs
+        values_with_ts: list[tuple[datetime, float]] = []
+        for row in log_rows:
+            ts = row.get("ts")
+            if not isinstance(ts, datetime):
+                continue
+            if ts.date() < seven_days_ago:
+                continue
+            deltas = row.get("deltas") or {}
+            if not isinstance(deltas, dict) or tid not in deltas:
+                continue
+            try:
+                values_with_ts.append((ts, float(deltas[tid])))
+            except (TypeError, ValueError):
+                continue
+        if kind == "gauge":
+            latest_val = values_with_ts[-1][1] if values_with_ts else None
+            oldest_val = values_with_ts[0][1] if values_with_ts else None
+            change = (
+                latest_val - oldest_val
+                if (latest_val is not None and oldest_val is not None)
+                else None
+            )
+            trackers_summary.append({
+                "id": tid, "label": label, "kind": kind,
+                "unit": unit, "target": target,
+                "latest_value": latest_val,
+                "change_over_week": change,
+                "samples_this_week": len(values_with_ts),
+            })
+        else:
+            total = sum(v for _, v in values_with_ts)
+            trackers_summary.append({
+                "id": tid, "label": label, "kind": kind,
+                "unit": unit, "target": target,
+                "week_total": total,
+                "events_this_week": len(values_with_ts),
+            })
+
+    # General rollups
     excused = sum(1 for r in progress_rows if r.get("rest_day_excused"))
     nags = sum(int(r.get("nags_sent_today") or 0) for r in progress_rows)
-    labels = [r.get("on_track_label") for r in progress_rows
-              if r.get("on_track_label")]
-    target = (goal.get("workout_budget") or {}).get("required_per_week")
+    completed_days = sum(1 for r in progress_rows if r.get("workout_completed"))
+
     return {
-        "workouts_done": workouts_done,
-        "workouts_target": target,
+        "trackers": trackers_summary,
+        "completed_days": completed_days,
         "excused_days": excused,
         "nags_sent": nags,
-        "labels": labels,
         "days_with_data": len(progress_rows),
+        "overall_pct_now": getattr(eval_result, "overall_pct", None),
+        "today_complete": getattr(eval_result, "today_complete", False),
     }
 
 
 def _fallback_reflection_text(
     goal: dict[str, Any], stats: dict[str, Any],
 ) -> str:
-    """Used when the LLM is unavailable. Plain template, no shame."""
-    target = stats["workouts_target"]
-    done = stats["workouts_done"]
-    if target and done >= int(target):
+    """Used when the LLM is unavailable. Pure template — describes
+    each tracker honestly without inventing progress."""
+    title = goal.get("title") or "your goal"
+    lines: list[str] = []
+    for t in stats.get("trackers") or []:
+        label = t.get("label") or t.get("id") or "tracker"
+        unit = t.get("unit") or ""
+        target = t.get("target")
+        if t.get("kind") == "gauge":
+            latest = t.get("latest_value")
+            if latest is None:
+                lines.append(f"- {label}: no readings this week.")
+                continue
+            line = f"- {label}: latest {latest} {unit}".strip()
+            change = t.get("change_over_week")
+            if change is not None and change != 0:
+                arrow = "↑" if change > 0 else "↓"
+                line += f" ({arrow}{abs(change):.1f} over the week)"
+            if target is not None:
+                line += f"; target {target} {unit}".strip()
+            lines.append(line)
+        else:
+            total = t.get("week_total") or 0
+            line = f"- {label}: {int(total) if total == int(total) else total} {unit}".strip()
+            if target is not None:
+                line += f" this week (target {target})"
+            lines.append(line)
+    if not lines:
         return (
-            f"Great week — you hit {done} of {target} workouts. "
-            "Keep the same rhythm next week and the cadence will start "
-            "feeling automatic."
-        )
-    if target:
-        return (
-            f"This week you logged {done} of {target} workouts. "
-            "Not bad, but there's room. If a particular day keeps "
-            "slipping, swap it for one that fits your schedule better."
+            f"This week I didn't see any logged activity for \"{title}\". "
+            "Tell me what you've done and I'll start tracking properly."
         )
     return (
-        f"This week you logged {done} workout" +
-        ("" if done == 1 else "s") + ". I'll keep tracking and "
-        "nudge you when a session is due."
+        f"Quick check-in on \"{title}\":\n"
+        + "\n".join(lines)
     )
 
 
@@ -476,18 +576,31 @@ def _format_reflection_message(
 ) -> str:
     """Compose the user-facing weekly summary message."""
     title = goal["title"]
-    target = stats["workouts_target"]
-    done = stats["workouts_done"]
     header = f"Weekly check-in on \"{title}\""
     body = reflection.strip()
+    # Per-tracker fact strip (only when we have non-trivial data)
     facts = []
-    if target:
-        facts.append(f"Workouts: {done} of {target}")
-    if stats["excused_days"]:
-        facts.append(
-            f"Rest days excused: {stats['excused_days']}"
-        )
-    return "\n\n".join([header, body] + ([" · ".join(facts)] if facts else []))
+    for t in stats.get("trackers") or []:
+        label = t.get("label") or t.get("id")
+        unit = t.get("unit") or ""
+        if t.get("kind") == "gauge":
+            latest = t.get("latest_value")
+            if latest is None:
+                continue
+            facts.append(f"{label}: {latest} {unit}".strip())
+        else:
+            total = t.get("week_total") or 0
+            target = t.get("target")
+            if target:
+                facts.append(f"{label}: {int(total) if total == int(total) else total} of {target}")
+            elif total:
+                facts.append(f"{label}: {int(total) if total == int(total) else total}")
+    if stats.get("excused_days"):
+        facts.append(f"Rest days excused: {stats['excused_days']}")
+    parts = [header, body]
+    if facts:
+        parts.append(" · ".join(facts))
+    return "\n\n".join(parts)
 
 
 async def _llm_reflect(
@@ -503,10 +616,15 @@ async def _llm_reflect(
         "You are a calm, practical health coach reviewing one user's "
         "week against one specific goal. Be warm, brief, and concrete. "
         "Avoid praise inflation. Avoid the word 'consistency'.\n\n"
+        "Ground your reflection in the per-tracker stats provided. "
+        "Never invent numbers (kg lost, percentages, streaks) that "
+        "don't appear in the stats. If a tracker has no data this "
+        "week, acknowledge that — don't pretend there was progress.\n\n"
         "Return ONLY a JSON object: "
         "{\"reflection_text\": str, \"new_plan_text\": str|null}.\n"
         "- reflection_text: 2 to 4 sentences about how the week went and "
-        "one small adjustment to try next week.\n"
+        "ONE small adjustment to try next week. Reference at least one "
+        "actual number from the stats.\n"
         "- new_plan_text: only set if the existing plan no longer fits "
         "(e.g. user is consistently missing the same day). Otherwise null."
     )

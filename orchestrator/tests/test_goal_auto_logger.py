@@ -380,3 +380,144 @@ async def test_notification_capped_per_goal_per_day() -> None:
     notifications = redis._store.get("_xadd:notify.outbound") or []
     # But notifications capped at the per-goal-per-day limit
     assert len(notifications) == al.MAX_AUTO_NOTIFY_PER_GOAL_PER_DAY
+
+
+# ── Gauge vs counter validation in auto-log ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_gauge_tracker_records_absolute_value_not_delta() -> None:
+    """The original bug: LLM was storing -0.2 (delta-since-previous)
+    instead of 92.8 (absolute weight). Validation should drop the
+    delta because it's implausibly far from the actual metric value."""
+    spec = {"trackers": [
+        {"id": "weight_kg", "label": "Weight", "kind": "gauge",
+         "reset": "weekly", "target": 85, "unit": "kg", "direction": "down"},
+    ]}
+    goal = {"id": 1, "title": "Lose weight", "tracker_spec": spec}
+    metric = {"metric": "weight", "unit": "kg", "value": 92.8,
+              "started_at": datetime.now(UTC)}
+    llm = MagicMock()
+    # LLM tries to return a delta — should be rejected as implausible
+    llm.chat = AsyncMock(return_value={"message": {"content": json.dumps({
+        "deltas": {"weight_kg": -0.2},
+        "ts_iso": None,
+    })}})
+    deltas, _ = await al._classify_metric(
+        llm=llm, goal=goal, metric_row=metric, classifier_model="x",
+    )
+    assert deltas == {}
+
+
+@pytest.mark.asyncio
+async def test_gauge_tracker_accepts_plausible_absolute_value() -> None:
+    """LLM returns the actual absolute reading (close to event value)
+    — accepted."""
+    spec = {"trackers": [
+        {"id": "weight_kg", "label": "Weight", "kind": "gauge",
+         "reset": "weekly", "target": 85, "unit": "kg", "direction": "down"},
+    ]}
+    goal = {"id": 1, "title": "Lose weight", "tracker_spec": spec}
+    metric = {"metric": "weight", "unit": "kg", "value": 92.8,
+              "started_at": datetime.now(UTC)}
+    llm = MagicMock()
+    llm.chat = AsyncMock(return_value={"message": {"content": json.dumps({
+        "deltas": {"weight_kg": 92.8},
+        "ts_iso": None,
+    })}})
+    deltas, _ = await al._classify_metric(
+        llm=llm, goal=goal, metric_row=metric, classifier_model="x",
+    )
+    assert deltas == {"weight_kg": 92.8}
+
+
+@pytest.mark.asyncio
+async def test_counter_tracker_rejects_negative_value() -> None:
+    """LLM tries to subtract from a counter — dropped silently."""
+    spec = {"trackers": [
+        {"id": "sessions_today", "label": "Sets", "kind": "counter",
+         "reset": "daily", "target": 5, "unit": "set", "direction": "up"},
+    ]}
+    goal = {"id": 1, "title": "Pushups", "tracker_spec": spec}
+    metric = {"metric": "strength_workout", "unit": "minutes",
+              "value": 32, "started_at": datetime.now(UTC)}
+    llm = MagicMock()
+    llm.chat = AsyncMock(return_value={"message": {"content": json.dumps({
+        "deltas": {"sessions_today": -1},
+        "ts_iso": None,
+    })}})
+    deltas, _ = await al._classify_metric(
+        llm=llm, goal=goal, metric_row=metric, classifier_model="x",
+    )
+    assert deltas == {}
+
+
+@pytest.mark.asyncio
+async def test_gauge_within_15pct_drift_accepted() -> None:
+    """Tiny LLM rounding (e.g. 92.8 → 93) is accepted."""
+    spec = {"trackers": [
+        {"id": "weight_kg", "kind": "gauge", "reset": "weekly",
+         "target": 85, "unit": "kg", "direction": "down", "label": "Weight"},
+    ]}
+    goal = {"id": 1, "title": "x", "tracker_spec": spec}
+    metric = {"metric": "weight", "unit": "kg", "value": 92.8,
+              "started_at": datetime.now(UTC)}
+    llm = MagicMock()
+    llm.chat = AsyncMock(return_value={"message": {"content": json.dumps({
+        "deltas": {"weight_kg": 93}, "ts_iso": None,
+    })}})
+    deltas, _ = await al._classify_metric(
+        llm=llm, goal=goal, metric_row=metric, classifier_model="x",
+    )
+    assert deltas == {"weight_kg": 93.0}
+
+
+# ── Notification rendering: gauge vs counter ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_notification_for_gauge_says_is_now() -> None:
+    """Gauge auto-log should read 'weight is now 92.8 kg', NOT
+    '92.8 kg weight'."""
+    spec = {"trackers": [
+        {"id": "weight_kg", "label": "Weight", "kind": "gauge",
+         "reset": "weekly", "target": 85, "unit": "kg", "direction": "down"},
+    ]}
+    goal = {"id": 1, "member_id": 2, "title": "Lose weight",
+            "tracker_spec": spec}
+    row = {"id": 1, "metric": "weight", "value": 92.8, "unit": "kg",
+           "started_at": datetime.now(UTC), "ended_at": None,
+           "member_id": 2, "source": "x", "metadata": {}}
+    redis = _fake_redis_stub()
+    pool = _conn_pool(rows=[row], chat_id=620842725)
+    await al._notify_user(
+        pool=pool, redis=redis, goal=goal, row=row,
+        deltas={"weight_kg": 92.8}, event_ts=None,
+    )
+    payload = json.loads(redis._store["_xadd:notify.outbound"][0]["payload"])
+    text = payload["text"]
+    assert "is now 92.8 kg" in text
+    # No "92.8 kg weight" awkwardness
+    assert "92.8 kg weight" not in text
+
+
+@pytest.mark.asyncio
+async def test_notification_for_counter_says_added_to() -> None:
+    spec = {"trackers": [
+        {"id": "sessions_today", "label": "Sets", "kind": "counter",
+         "reset": "daily", "target": 5, "unit": "set", "direction": "up"},
+    ]}
+    goal = {"id": 1, "member_id": 2, "title": "Pushups",
+            "tracker_spec": spec}
+    row = {"id": 1, "metric": "strength_workout", "value": 32, "unit": "min",
+           "started_at": datetime.now(UTC), "ended_at": None,
+           "member_id": 2, "source": "x", "metadata": {}}
+    redis = _fake_redis_stub()
+    pool = _conn_pool(rows=[row], chat_id=620842725)
+    await al._notify_user(
+        pool=pool, redis=redis, goal=goal, row=row,
+        deltas={"sessions_today": 1}, event_ts=None,
+    )
+    payload = json.loads(redis._store["_xadd:notify.outbound"][0]["payload"])
+    text = payload["text"]
+    assert "added 1 set" in text or "added 1 set to sets" in text

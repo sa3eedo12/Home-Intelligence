@@ -235,9 +235,11 @@ async def _classify_metric(
         # there's only one tracker and the unit roughly matches.
         return _fallback_classify(spec, metric_row)
     trackers_brief = "; ".join(
-        f"{t.get('id')} ({t.get('label')}, unit={t.get('unit')})"
+        f"{t.get('id')} (kind={t.get('kind')}, label={t.get('label')}, "
+        f"unit={t.get('unit')})"
         for t in trackers if isinstance(t, dict)
     )
+    by_id = {t.get("id"): t for t in trackers if isinstance(t, dict)}
     description = _describe_metric(metric_row)
     started = metric_row.get("started_at")
     started_iso = (
@@ -247,8 +249,21 @@ async def _classify_metric(
     system = (
         "You decide whether a health-metric event (from Apple Watch / "
         "HealthKit) satisfies any of a goal's trackers, and if so what "
-        "numeric deltas to add. Be conservative: if the metric doesn't "
-        "clearly map to a tracker, return empty deltas.\n\n"
+        "value to record per tracker. Be conservative: if the metric "
+        "doesn't clearly map to a tracker, return empty deltas.\n\n"
+        "Two kinds of trackers exist:\n"
+        "- COUNTER: the value you return is ADDED to today's running "
+        "total. Use positive numbers only (e.g. minutes of activity, "
+        "number of sessions). Never negative, never an absolute total "
+        "— just the increment this one event represents.\n"
+        "- GAUGE: the value you return REPLACES the latest reading. "
+        "Use the ABSOLUTE measurement from the event (e.g. weight "
+        "92.8, body_fat_pct 24.3). Never a delta or change-since-"
+        "previous. Never negative for measurements that can't be "
+        "negative.\n"
+        "If the metric value looks implausible for the tracker (e.g. "
+        "a weight reading of 0.5 kg, body fat of 300%), skip rather "
+        "than guess.\n\n"
         "Return ONLY a JSON object: "
         "{\"deltas\": {<tracker_id>: <number>, ...}, "
         "\"ts_iso\": ISO-8601 of when the event happened or null, "
@@ -285,15 +300,50 @@ async def _classify_metric(
     raw_deltas = parsed.get("deltas") or {}
     if not isinstance(raw_deltas, dict):
         return {}, None
-    valid_ids = {t.get("id") for t in trackers if isinstance(t, dict)}
     out: dict[str, float] = {}
     for k, v in raw_deltas.items():
-        if k not in valid_ids:
+        if k not in by_id:
             continue
         try:
-            out[k] = float(v)
+            fv = float(v)
         except (TypeError, ValueError):
             continue
+        # Per-kind validation. Generic rules — same logic for any
+        # tracker the LLM might invent.
+        tracker = by_id[k] or {}
+        kind = str(tracker.get("kind") or "counter").lower()
+        if kind == "counter":
+            # Counters only accumulate. Negative numbers are usually
+            # the LLM trying to subtract — drop them.
+            if fv < 0:
+                logger.warning("auto_log_dropped_negative_counter",
+                               tracker=k, value=fv)
+                continue
+        else:
+            # Gauges should be absolute readings. Plausibility check:
+            # the LLM's value should be in the same ballpark as the
+            # event's raw value (allow ±15% drift OR within 10 units
+            # for small-number gauges). Catches the "stored -0.2
+            # instead of 92.8" bug deterministically.
+            event_value = metric_row.get("value")
+            if event_value is not None:
+                try:
+                    ev = float(event_value)
+                except (TypeError, ValueError):
+                    ev = None
+                if ev is not None and ev != 0:
+                    # Reject if signs differ and the absolute value is
+                    # within 10 (looks like a delta).
+                    if (fv < 0 and ev > 0) or (fv > 0 and ev < 0):
+                        logger.warning("auto_log_dropped_sign_mismatch",
+                                       tracker=k, fv=fv, ev=ev)
+                        continue
+                    drift = abs(fv - ev) / abs(ev)
+                    if drift > 0.15 and abs(fv - ev) > 10:
+                        logger.warning("auto_log_dropped_implausible_gauge",
+                                       tracker=k, fv=fv, ev=ev, drift=drift)
+                        continue
+        out[k] = fv
     # Reuse the existing parser from goals_chat
     from .goals_chat import _parse_ts_hint
     ts = _parse_ts_hint(parsed.get("ts_iso"))
@@ -364,12 +414,26 @@ async def _notify_user(
     bits = []
     for tid, value in deltas.items():
         t = by_id.get(tid, {})
-        label = t.get("label") or tid
-        unit = t.get("unit") or ""
+        label = str(t.get("label") or tid)
+        unit = str(t.get("unit") or "")
+        kind = str(t.get("kind") or "counter").lower()
         v_str = f"{value:.1f}".rstrip("0").rstrip(".") if value % 1 else f"{int(value)}"
-        bits.append(f"{v_str} {unit} {str(label).lower()}".strip().replace("  ", " "))
+        if kind == "gauge":
+            # Gauges are absolute readings — phrase as "<label> is now N unit"
+            bits.append(
+                f"{label.lower()} is now {v_str} {unit}".strip().replace(
+                    "  ", " "
+                )
+            )
+        else:
+            # Counters accumulate — phrase as "added N unit to <label>"
+            bits.append(
+                f"added {v_str} {unit} to {label.lower()}".strip().replace(
+                    "  ", " "
+                )
+            )
     text = (
-        f"Auto-logged from your watch: " + ", ".join(bits) +
+        "Auto-logged from your watch: " + "; ".join(bits) +
         f" toward \"{goal.get('title')}\". "
         "Reply 'undo' if that's wrong."
     )

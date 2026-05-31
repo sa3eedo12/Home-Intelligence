@@ -353,20 +353,35 @@ async def test_nag_skipped_when_no_chat_id() -> None:
     redis.xadd.assert_not_called()
 
 
-# ── weekly_reflection (unchanged signature) ─────────────────────
+# ── weekly_reflection (now tracker-spec-driven) ─────────────────
 
 
 @pytest.mark.asyncio
 async def test_weekly_reflection_fallback_when_no_llm() -> None:
+    """With no LLM, the fallback renders one line per tracker
+    grounded in actual log data — no fabricated workout counts."""
     pool = _conn_pool(fetchval=620842725)
     redis = _redis_recorder()
+    today = datetime.now(UTC)
     store = SimpleNamespace(
         list_active=AsyncMock(return_value=[{
             "id": 1, "member_id": 2, "title": "Run more",
             "description": "Run 3x a week",
             "plan_text": "current plan",
-            "workout_budget": {"required_per_week": 3},
+            "tracker_spec": {
+                "trackers": [
+                    {"id": "runs_this_week", "label": "Runs",
+                     "kind": "counter", "reset": "weekly", "target": 3,
+                     "unit": "run", "direction": "up"},
+                ],
+            },
         }]),
+        recent_log=AsyncMock(return_value=[
+            {"ts": today - timedelta(days=2),
+             "deltas": {"runs_this_week": 1}},
+            {"ts": today - timedelta(days=1),
+             "deltas": {"runs_this_week": 1}},
+        ]),
         recent_progress=AsyncMock(return_value=[
             {"workout_completed": True}, {"workout_completed": True},
             {"workout_completed": False, "rest_day_excused": True},
@@ -379,9 +394,9 @@ async def test_weekly_reflection_fallback_when_no_llm() -> None:
     )
     assert out == {"ok": True, "reflected": 1, "skipped": 0}
     redis.xadd.assert_awaited_once()
-    raw = redis.xadd.await_args.args[1]["payload"]
-    payload = json.loads(raw)
+    payload = json.loads(redis.xadd.await_args.args[1]["payload"])
     assert "Run more" in payload["text"]
+    # Actual logged total appears (2 runs)
     assert "2 of 3" in payload["text"]
     store.update_plan.assert_not_called()
     store.log_event.assert_awaited_once()
@@ -391,12 +406,24 @@ async def test_weekly_reflection_fallback_when_no_llm() -> None:
 async def test_weekly_reflection_uses_llm_response() -> None:
     pool = _conn_pool(fetchval=620842725)
     redis = _redis_recorder()
+    today = datetime.now(UTC)
     store = SimpleNamespace(
         list_active=AsyncMock(return_value=[{
             "id": 1, "member_id": 2, "title": "Run more",
             "description": "Run 3x", "plan_text": "old plan",
-            "workout_budget": {"required_per_week": 3},
+            "tracker_spec": {
+                "trackers": [
+                    {"id": "runs_this_week", "label": "Runs",
+                     "kind": "counter", "reset": "weekly", "target": 3,
+                     "unit": "run", "direction": "up"},
+                ],
+            },
         }]),
+        recent_log=AsyncMock(return_value=[
+            {"ts": today - timedelta(days=i),
+             "deltas": {"runs_this_week": 1}}
+            for i in (1, 3, 5)
+        ]),
         recent_progress=AsyncMock(return_value=[
             {"workout_completed": True}, {"workout_completed": True},
             {"workout_completed": True},
@@ -406,7 +433,7 @@ async def test_weekly_reflection_uses_llm_response() -> None:
     )
     llm = MagicMock()
     llm.chat = AsyncMock(return_value={"message": {"content": json.dumps({
-        "reflection_text": "Solid week. Lock in the same three days next week.",
+        "reflection_text": "Solid week with 3 runs. Lock in the same days.",
         "new_plan_text": "Three runs on Tue/Thu/Sat, easy pace.",
     })}})
     out = await hg.run_weekly_reflection(
@@ -416,6 +443,49 @@ async def test_weekly_reflection_uses_llm_response() -> None:
     store.update_plan.assert_awaited_once()
     update_args = store.update_plan.await_args
     assert update_args.kwargs["plan_text"].startswith("Three runs")
+
+
+@pytest.mark.asyncio
+async def test_weekly_reflection_gauge_tracker_summary() -> None:
+    """Goal with a weight gauge produces a summary that reads
+    latest weight + change-over-week, without inventing data."""
+    pool = _conn_pool(fetchval=620842725)
+    redis = _redis_recorder()
+    today = datetime.now(UTC)
+    store = SimpleNamespace(
+        list_active=AsyncMock(return_value=[{
+            "id": 1, "member_id": 2, "title": "Lose 5kg",
+            "description": "Lose 5 kg",
+            "plan_text": "easy pace",
+            "tracker_spec": {
+                "trackers": [
+                    {"id": "weight_kg", "label": "Weight",
+                     "kind": "gauge", "reset": "weekly", "target": 85,
+                     "unit": "kg", "direction": "down"},
+                ],
+            },
+        }]),
+        recent_log=AsyncMock(return_value=[
+            {"ts": today - timedelta(days=6),
+             "deltas": {"weight_kg": 90.0}},
+            {"ts": today - timedelta(days=1),
+             "deltas": {"weight_kg": 89.3}},
+        ]),
+        recent_progress=AsyncMock(return_value=[]),
+        update_plan=AsyncMock(return_value=None),
+        log_event=AsyncMock(return_value=None),
+    )
+    out = await hg.run_weekly_reflection(
+        pool=pool, redis=redis, store=store, llm=None,
+    )
+    assert out["reflected"] == 1
+    payload = json.loads(redis.xadd.await_args.args[1]["payload"])
+    text = payload["text"]
+    # Latest weight surfaces; change is annotated
+    assert "Weight" in text
+    assert "89.3" in text
+    # No fabricated "X workouts" — only what's in the tracker summary
+    assert "workout" not in text.lower()
 
 
 # ── Per-goal nag policy (D) ─────────────────────────────────────
