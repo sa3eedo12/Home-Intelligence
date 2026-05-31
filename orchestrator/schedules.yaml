@@ -276,3 +276,21 @@ jobs:
       agent: __orchestrator__
       capability: orchestrator.goal_auto_log
       inputs: {}
+
+  - id: engagement_observe
+    description: "Weekly: scan member engagement patterns + propose quiet-hours adjustments"
+    trigger: cron
+    cron: { day_of_week: "sun", hour: 19, minute: 0 }
+    dispatch:
+      agent: __orchestrator__
+      capability: orchestrator.engagement_observe
+      inputs: {}
+
+  - id: cross_goal_insight
+    description: "Weekly: cross-goal insight for members with 2+ active goals"
+    trigger: cron
+    cron: { day_of_week: "sun", hour: 21, minute: 30 }
+    dispatch:
+      agent: __orchestrator__
+      capability: orchestrator.cross_goal_insight
+      inputs: {}

@@ -91,6 +91,7 @@ class GoalsChatHandler:
         chore_store: ChoreStore,
         nag_store: MemberNagWindowsStore,
         redis: Any | None = None,
+        engagement_store: Any | None = None,
         classifier_model: str = CLASSIFIER_MODEL_DEFAULT,
         planner_model: str = PLANNER_MODEL_DEFAULT,
     ) -> None:
@@ -99,6 +100,7 @@ class GoalsChatHandler:
         self.chores = chore_store
         self.nag = nag_store
         self.redis = redis
+        self.engagement = engagement_store
         self.classifier_model = classifier_model
         self.planner_model = planner_model
 
@@ -118,6 +120,13 @@ class GoalsChatHandler:
         if member is None or "id" not in member:
             return GoalsHandlerResult(handled=False)
         member_id = int(member["id"])
+        # Stamp first_reply_at on any pending engagement rows so the
+        # weekly window-observation job has data. Best-effort.
+        if self.engagement is not None:
+            try:
+                await self.engagement.record_inbound(member_id=member_id)
+            except Exception as exc:
+                logger.warning("engagement_inbound_failed", error=str(exc))
         # If an unfinished goal-creation draft is in flight, route the
         # new message straight to it — the user is answering our
         # clarification question, not starting a new conversation.

@@ -420,6 +420,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.chore_store = chore_store
     app.state.health_goals_store = HealthGoalsStore(pool)
     app.state.member_nag_windows_store = MemberNagWindowsStore(pool)
+    from .engagement import EngagementStore
+    app.state.engagement_store = EngagementStore(pool)
 
     bus = EventBus(redis_url)
     try:
@@ -683,7 +685,59 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             nag_store=app.state.member_nag_windows_store,
             llm=llm,
             nag_model=os.environ.get("DEFAULT_MODEL", "qwen3:8b"),
+            engagement_store=app.state.engagement_store,
         )
+
+    async def _run_engagement_observe(_inputs: dict[str, Any]) -> dict[str, Any]:
+        """Weekly: scan each member's recent nag-engagement and ask
+        the LLM whether to propose a quiet-hours adjustment."""
+        from . import engagement as eng_mod
+
+        results = []
+        async with pool.acquire() as conn:
+            members = await conn.fetch(
+                "SELECT id FROM household_members ORDER BY id"
+            )
+        for m in members:
+            try:
+                out = await eng_mod.propose_window_change(
+                    pool=pool, redis=redis,
+                    engagement_store=app.state.engagement_store,
+                    nag_windows_store=app.state.member_nag_windows_store,
+                    member_id=int(m["id"]), llm=llm,
+                    classifier_model=os.environ.get("DEFAULT_MODEL", "qwen3:8b"),
+                )
+            except Exception as exc:
+                logger.warning("engagement_observe_failed",
+                               member_id=m["id"], error=str(exc))
+                out = {"ok": False, "error": str(exc)}
+            results.append({"member_id": int(m["id"]), **out})
+        return {"ok": True, "results": results}
+
+    async def _run_cross_goal_insight(_inputs: dict[str, Any]) -> dict[str, Any]:
+        """Weekly: for each member with 2+ active goals, one reasoner
+        call returns one cross-cutting insight."""
+        from . import engagement as eng_mod
+
+        results = []
+        async with pool.acquire() as conn:
+            members = await conn.fetch(
+                "SELECT id FROM household_members ORDER BY id"
+            )
+        for m in members:
+            try:
+                out = await eng_mod.run_cross_goal_insight(
+                    pool=pool, redis=redis,
+                    goals_store=app.state.health_goals_store,
+                    member_id=int(m["id"]), llm=llm,
+                    reasoner_model=os.environ.get("REASONER_MODEL", "qwen3:14b"),
+                )
+            except Exception as exc:
+                logger.warning("cross_goal_run_failed",
+                               member_id=m["id"], error=str(exc))
+                out = {"ok": False, "error": str(exc)}
+            results.append({"member_id": int(m["id"]), **out})
+        return {"ok": True, "results": results}
 
     async def _run_weekly_reflection(_inputs: dict[str, Any]) -> dict[str, Any]:
         from . import health_goals as hg_mod
@@ -741,6 +795,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "orchestrator.health_goals_workout_nag": _run_workout_nags,
             "orchestrator.health_goals_weekly_reflection": _run_weekly_reflection,
             "orchestrator.goal_auto_log": _run_goal_auto_log,
+            "orchestrator.engagement_observe": _run_engagement_observe,
+            "orchestrator.cross_goal_insight": _run_cross_goal_insight,
         },
     )
     await scheduler.start()
@@ -756,6 +812,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         chore_store=app.state.chore_store,
         nag_store=app.state.member_nag_windows_store,
         redis=redis,
+        engagement_store=app.state.engagement_store,
     )
     app.state.goals_chat_handler = goals_chat_handler
 

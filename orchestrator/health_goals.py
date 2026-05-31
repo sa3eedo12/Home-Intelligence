@@ -233,6 +233,7 @@ async def run_workout_nags(
     nag_store: MemberNagWindowsStore,
     llm: Any | None = None,
     nag_model: str = "qwen3:8b",
+    engagement_store: Any | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Generic nag scheduler. For each active goal, ask the engine
@@ -241,7 +242,11 @@ async def run_workout_nags(
     nudge_rule.max_per_day / min_gap_minutes (defaults if absent),
     then compose a warm one-line message via the LLM (with a safe
     template fallback). The status line goes underneath so the
-    user can see actual numbers."""
+    user can see actual numbers.
+
+    When engagement_store is provided, every emitted nag is recorded
+    so the weekly window-observation job can spot low-engagement
+    periods."""
     from . import goal_engine
 
     now = now or datetime.now(UTC)
@@ -311,6 +316,17 @@ async def run_workout_nags(
         }
         await redis.xadd("notify.outbound", {"payload": json.dumps(payload)})
         await store.record_nag(int(goal["id"]), day=today)
+        if engagement_store is not None:
+            try:
+                await engagement_store.record_sent(
+                    member_id=member_id,
+                    topic=f"goal:{goal['id']}",
+                    agent="health_goals",
+                    capability="workout_nag",
+                )
+            except Exception as exc:
+                logger.warning("engagement_record_failed",
+                               goal_id=goal["id"], error=str(exc))
         emitted += 1
     return {
         "ok": True, "considered": considered, "emitted": emitted,
