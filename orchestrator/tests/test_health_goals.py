@@ -64,13 +64,37 @@ def test_label_from_pct_buckets() -> None:
     assert hg._label_from_pct(20) == "regressing"
 
 
-def test_pick_nag_text_uses_correct_tier() -> None:
-    first = hg._pick_nag_text("Get strong", 0)
-    second = hg._pick_nag_text("Get strong", 1)
-    third = hg._pick_nag_text("Get strong", 2)
-    assert any(t.format(title="Get strong") == first for t in hg._NAG_TEMPLATES_FIRST)
-    assert any(t.format(title="Get strong") == second for t in hg._NAG_TEMPLATES_SECOND)
-    assert any(t.format(title="Get strong") == third for t in hg._NAG_TEMPLATES_THIRD)
+def test_resolve_nag_policy_defaults() -> None:
+    """Goals without nudge_rule fields use the system defaults."""
+    assert hg._resolve_nag_policy({}) == (
+        hg.DEFAULT_MAX_NAGS_PER_DAY, hg.DEFAULT_MIN_NAG_GAP_MINUTES,
+    )
+    assert hg._resolve_nag_policy({"tracker_spec": None}) == (
+        hg.DEFAULT_MAX_NAGS_PER_DAY, hg.DEFAULT_MIN_NAG_GAP_MINUTES,
+    )
+
+
+def test_resolve_nag_policy_per_goal_override() -> None:
+    """nudge_rule.max_per_day / min_gap_minutes override the defaults."""
+    goal = {
+        "tracker_spec": {
+            "nudge_rule": {
+                "max_per_day": 5,
+                "min_gap_minutes": 30,
+            },
+        },
+    }
+    assert hg._resolve_nag_policy(goal) == (5, 30)
+
+
+def test_resolve_nag_policy_clamps_invalid() -> None:
+    """Bad values fall back to defaults rather than crashing."""
+    goal = {"tracker_spec": {"nudge_rule": {"max_per_day": "five"}}}
+    max_p, _ = hg._resolve_nag_policy(goal)
+    assert max_p == hg.DEFAULT_MAX_NAGS_PER_DAY
+    # Negative max_per_day → clamped to at least 1
+    goal2 = {"tracker_spec": {"nudge_rule": {"max_per_day": -2}}}
+    assert hg._resolve_nag_policy(goal2)[0] == 1
 
 
 def test_is_muted_respects_quiet_until() -> None:
@@ -249,7 +273,7 @@ async def test_nag_skipped_when_cap_reached() -> None:
     redis = _redis_recorder()
     store = _fake_store(
         active_goals=[goal], log_rows=[],
-        progress={"nags_sent_today": hg.MAX_NAGS_PER_DAY},
+        progress={"nags_sent_today": hg.DEFAULT_MAX_NAGS_PER_DAY},
     )
     nag = _fake_nag_store(allowed=True)
     out = await hg.run_workout_nags(
@@ -392,3 +416,162 @@ async def test_weekly_reflection_uses_llm_response() -> None:
     store.update_plan.assert_awaited_once()
     update_args = store.update_plan.await_args
     assert update_args.kwargs["plan_text"].startswith("Three runs")
+
+
+# ── Per-goal nag policy (D) ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_nag_respects_per_goal_max_per_day() -> None:
+    """A goal with nudge_rule.max_per_day=5 should still nag at 4
+    even though the default cap is 3."""
+    spec = {
+        "trackers": [{"id": "x", "label": "X", "kind": "counter",
+                       "reset": "daily", "target": 5, "direction": "up"}],
+        "nudge_rule": {"kind": "behind_schedule",
+                        "after_local_hour": 0, "before_local_hour": 24,
+                        "max_per_day": 5, "min_gap_minutes": 60},
+    }
+    goal = {"id": 1, "member_id": 2, "title": "g",
+            "tracker_spec": spec, "quiet_until": None}
+    pool = _conn_pool(fetchval=620842725)
+    redis = _redis_recorder()
+    store = _fake_store(
+        active_goals=[goal], log_rows=[],
+        progress={"nags_sent_today": 4},
+    )
+    nag = _fake_nag_store(allowed=True)
+    out = await hg.run_workout_nags(
+        pool=pool, redis=redis, store=store, nag_store=nag,
+        now=datetime(2026, 5, 31, 14, tzinfo=UTC),
+    )
+    # 4 < per-goal cap of 5 → fires
+    assert out["emitted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_nag_respects_per_goal_min_gap() -> None:
+    """min_gap_minutes=30 on the goal lets a nag fire even if the
+    global default would block it."""
+    spec = {
+        "trackers": [{"id": "x", "label": "X", "kind": "counter",
+                       "reset": "daily", "target": 5, "direction": "up"}],
+        "nudge_rule": {"kind": "behind_schedule",
+                        "after_local_hour": 0, "before_local_hour": 24,
+                        "min_gap_minutes": 30},
+    }
+    goal = {"id": 1, "member_id": 2, "title": "g",
+            "tracker_spec": spec, "quiet_until": None}
+    pool = _conn_pool(fetchval=620842725)
+    redis = _redis_recorder()
+    now = datetime(2026, 5, 31, 14, tzinfo=UTC)
+    store = _fake_store(
+        active_goals=[goal], log_rows=[],
+        progress={"nags_sent_today": 1,
+                  "last_nag_at": now - timedelta(minutes=45)},
+    )
+    nag = _fake_nag_store(allowed=True)
+    out = await hg.run_workout_nags(
+        pool=pool, redis=redis, store=store, nag_store=nag, now=now,
+    )
+    # 45 min > goal's 30-min gap → fires (even though default 90 would block)
+    assert out["emitted"] == 1
+
+
+# ── LLM-generated nag text (B) ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_nag_uses_llm_generated_text_when_llm_provided() -> None:
+    spec = {
+        "trackers": [{"id": "x", "label": "X", "kind": "counter",
+                       "reset": "daily", "target": 5, "direction": "up"}],
+        "nudge_rule": {"kind": "behind_schedule",
+                        "after_local_hour": 0, "before_local_hour": 24},
+    }
+    goal = {"id": 1, "member_id": 2, "title": "Pushups",
+            "tracker_spec": spec, "quiet_until": None,
+            "plan_text": "Daily after each prayer."}
+    pool = _conn_pool(fetchval=620842725)
+    redis = _redis_recorder()
+    store = _fake_store(active_goals=[goal], log_rows=[], progress=None)
+    nag = _fake_nag_store(allowed=True)
+    llm = MagicMock()
+    llm.chat = AsyncMock(return_value={"message": {
+        "content": "Soft check-in — still time today to knock out a couple sets after Asr.",
+    }})
+    out = await hg.run_workout_nags(
+        pool=pool, redis=redis, store=store, nag_store=nag, llm=llm,
+        now=datetime(2026, 5, 31, 14, tzinfo=UTC),
+    )
+    assert out["emitted"] == 1
+    payload = json.loads(redis.xadd.await_args.args[1]["payload"])
+    assert "Soft check-in" in payload["text"]
+    # Status line still appears underneath
+    assert "0 of 5" in payload["text"]
+
+
+@pytest.mark.asyncio
+async def test_nag_falls_back_to_template_when_llm_unavailable() -> None:
+    spec = {
+        "trackers": [{"id": "x", "label": "X", "kind": "counter",
+                       "reset": "daily", "target": 5, "direction": "up"}],
+        "nudge_rule": {"kind": "behind_schedule",
+                        "after_local_hour": 0, "before_local_hour": 24},
+    }
+    goal = {"id": 1, "member_id": 2, "title": "Pushups",
+            "tracker_spec": spec, "quiet_until": None}
+    pool = _conn_pool(fetchval=620842725)
+    redis = _redis_recorder()
+    store = _fake_store(active_goals=[goal], log_rows=[], progress=None)
+    nag = _fake_nag_store(allowed=True)
+    # llm=None → straight to fallback
+    out = await hg.run_workout_nags(
+        pool=pool, redis=redis, store=store, nag_store=nag, llm=None,
+        now=datetime(2026, 5, 31, 14, tzinfo=UTC),
+    )
+    assert out["emitted"] == 1
+    payload = json.loads(redis.xadd.await_args.args[1]["payload"])
+    assert "Pushups" in payload["text"]
+    # Fallback line specifically mentions the goal title
+    assert "goal still has room" in payload["text"]
+
+
+@pytest.mark.asyncio
+async def test_nag_text_trims_runaway_llm_response_to_2_sentences() -> None:
+    spec = {
+        "trackers": [{"id": "x", "label": "X", "kind": "counter",
+                       "reset": "daily", "target": 5, "direction": "up"}],
+        "nudge_rule": {"kind": "behind_schedule",
+                        "after_local_hour": 0, "before_local_hour": 24},
+    }
+    goal = {"id": 1, "member_id": 2, "title": "Pushups",
+            "tracker_spec": spec, "quiet_until": None}
+    llm = MagicMock()
+    llm.chat = AsyncMock(return_value={"message": {
+        "content": (
+            "First sentence is fine. Second is also fine. "
+            "Third one is too much. Fourth definitely is."
+        ),
+    }})
+    out = await hg._compose_nag_text(
+        llm=llm, goal=goal, status_line="0 of 5",
+        nags_today=0, recent_log=[],
+    )
+    # Only the first two sentences survived
+    assert out == "First sentence is fine. Second is also fine."
+
+
+@pytest.mark.asyncio
+async def test_nag_text_handles_llm_crash() -> None:
+    """LLM call raising must not break the nag scheduler — fall back."""
+    goal = {"id": 1, "member_id": 2, "title": "Run More",
+            "tracker_spec": {}, "quiet_until": None}
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=RuntimeError("ollama down"))
+    out = await hg._compose_nag_text(
+        llm=llm, goal=goal, status_line="0 of 5",
+        nags_today=0, recent_log=[],
+    )
+    assert "Run More" in out
+    assert "goal still has room" in out

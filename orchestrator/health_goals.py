@@ -25,7 +25,7 @@ call per active goal per week — bounded and predictable.
 from __future__ import annotations
 
 import json
-import random
+import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -41,43 +41,105 @@ from redis.asyncio import Redis
 
 logger = get_logger("orchestrator.health_goals")
 
-# How many nags we send per goal per day. Three feels like the line
-# between "playful prod" and "annoying app". After the third the
-# scheduler stays quiet until the daily compute resets the counter.
-MAX_NAGS_PER_DAY = 3
+# Defaults used when a goal's nudge_rule doesn't override them.
+# Per-goal values take precedence; these only kick in when the planner
+# didn't supply max_per_day / min_gap_minutes.
+DEFAULT_MAX_NAGS_PER_DAY = 3
+DEFAULT_MIN_NAG_GAP_MINUTES = 90
 
-# Cap how close together two nags can land. 90 minutes feels human;
-# without this, two ticks of the 30-min interval scheduler could each
-# clear the window-just-opened gate and double-nag.
-MIN_NAG_GAP_MINUTES = 90
-
-
-_NAG_TEMPLATES_FIRST = [
-    "Hey, {title} day. Want to knock out the workout before it gets late?",
-    "Just a heads up — your plan has a workout penciled in for today. Up for it?",
-    "Today's a workout day for {title}. No pressure, but the earlier you start the easier it lands.",
-    "Friendly nudge: {title} is on the schedule today. Want to get moving?",
-]
-_NAG_TEMPLATES_SECOND = [
-    "Still hoping to fit in that workout today? Even 20 minutes counts.",
-    "Round two of the nag: workout for {title} is still open.",
-    "I haven't seen a workout from you today. Want to do something short?",
-    "Quick check — workout for {title}? You've got time.",
-]
-_NAG_TEMPLATES_THIRD = [
-    "Last call from me today on the workout. Whatever you decide, I'll log it tomorrow.",
-    "Final nudge: workout day for {title}. After this I'll back off until morning.",
-    "If today's a no, just tell me and I'll mark it skipped — no shame.",
-]
+# One-line safe fallback when the LLM nag-writer is unreachable.
+# Just enough to remind the user; the engine's status line carries
+# the actual numbers.
+_FALLBACK_NAG = (
+    "Quick nudge — your {title} goal still has room today."
+)
 
 
-def _pick_nag_text(goal_title: str, nags_today: int) -> str:
-    bucket = (
-        _NAG_TEMPLATES_FIRST if nags_today == 0
-        else _NAG_TEMPLATES_SECOND if nags_today == 1
-        else _NAG_TEMPLATES_THIRD
+def _resolve_nag_policy(goal: dict[str, Any]) -> tuple[int, int]:
+    """Read max_per_day + min_gap_minutes from the goal's nudge_rule,
+    falling back to the system defaults."""
+    rule = ((goal.get("tracker_spec") or {}).get("nudge_rule") or {})
+    if not isinstance(rule, dict):
+        rule = {}
+    try:
+        max_per_day = int(rule.get("max_per_day") or DEFAULT_MAX_NAGS_PER_DAY)
+    except (TypeError, ValueError):
+        max_per_day = DEFAULT_MAX_NAGS_PER_DAY
+    try:
+        min_gap = int(rule.get("min_gap_minutes") or DEFAULT_MIN_NAG_GAP_MINUTES)
+    except (TypeError, ValueError):
+        min_gap = DEFAULT_MIN_NAG_GAP_MINUTES
+    return max(1, max_per_day), max(0, min_gap)
+
+
+async def _compose_nag_text(
+    *,
+    llm: Any | None,
+    goal: dict[str, Any],
+    status_line: str,
+    nags_today: int,
+    recent_log: list[dict[str, Any]],
+    model: str = "qwen3:8b",
+) -> str:
+    """Generate one warm, brief nag line grounded in the goal's real
+    current state. The LLM gets the goal title + plan + status line +
+    a hint about how many times we've nudged today so it can escalate
+    tone gracefully. Falls back to a single safe template on failure."""
+    title = str(goal.get("title") or "your goal")
+    if llm is None:
+        return _FALLBACK_NAG.format(title=title)
+    plan = str(goal.get("plan_text") or "")[:400]
+    recent_lines = []
+    for row in recent_log[:5]:
+        ts = row.get("ts")
+        text = row.get("raw_text") or ""
+        if isinstance(ts, datetime) and text:
+            recent_lines.append(
+                f"- {ts.strftime('%a %H:%M')}: {text[:120]}"
+            )
+    recent_block = "\n".join(recent_lines) or "(no logs yet today)"
+    tone_hint = (
+        "first nudge of the day — be warm and brief" if nags_today == 0
+        else "second nudge — keep it light, no guilt"
+        if nags_today == 1
+        else "later in the day — softer, mention this is the last one"
     )
-    return random.choice(bucket).format(title=goal_title)
+    system = (
+        "You are a calm, brief health coach checking in with one user. "
+        "Write exactly ONE sentence (max ~25 words). Warm, conversational, "
+        "no emoji-as-syntax, no markdown, no exclamation marks, no clichés "
+        "like 'crush it' or 'you got this'. Reference the actual progress "
+        "shown in the status line so the nudge feels real, not generic. "
+        f"Tone: {tone_hint}.\n\n"
+        "Return ONLY the sentence — no quotes, no preamble."
+    )
+    user = (
+        f"Goal: {title}\n"
+        f"Plan: {plan}\n"
+        f"Current state: {status_line}\n"
+        f"Recent activity:\n{recent_block}"
+    )
+    try:
+        resp = await llm.chat(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            model=model,
+            temperature=0.7,  # a touch of variation so repeats don't feel canned
+            think=False,
+        )
+    except Exception as exc:
+        logger.warning("nag_text_llm_failed", goal_id=goal.get("id"), error=str(exc))
+        return _FALLBACK_NAG.format(title=title)
+    msg = resp.get("message") or {}
+    text = (msg.get("content") if isinstance(msg, dict) else "") or ""
+    text = text.strip().strip('"').strip()
+    if not text:
+        return _FALLBACK_NAG.format(title=title)
+    # Trim runaway responses to two sentences max (LLM safety net).
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    return " ".join(sentences[:2]).strip()
 
 
 # ── Daily compute ────────────────────────────────────────────────
@@ -169,12 +231,17 @@ async def run_workout_nags(
     redis: Redis,
     store: HealthGoalsStore,
     nag_store: MemberNagWindowsStore,
+    llm: Any | None = None,
+    nag_model: str = "qwen3:8b",
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Generic nag scheduler. For each active goal, ask the engine
     whether a nudge is due based on the goal's spec + log state. If
-    so, respect the member's quiet hours + per-day cap + min gap,
-    then fire a playful message."""
+    so, respect the member's quiet hours + the goal's own
+    nudge_rule.max_per_day / min_gap_minutes (defaults if absent),
+    then compose a warm one-line message via the LLM (with a safe
+    template fallback). The status line goes underneath so the
+    user can see actual numbers."""
     from . import goal_engine
 
     now = now or datetime.now(UTC)
@@ -211,21 +278,25 @@ async def run_workout_nags(
         if progress.get("rest_day_excused"):
             skipped["engine_says_no"] += 1  # respected as a 'no'
             continue
+        # Per-goal nag policy beats the global defaults.
+        max_per_day, min_gap = _resolve_nag_policy(goal)
         nags_today = int(progress.get("nags_sent_today") or 0)
-        if nags_today >= MAX_NAGS_PER_DAY:
+        if nags_today >= max_per_day:
             skipped["cap"] += 1
             continue
         last_nag_at = progress.get("last_nag_at")
         if isinstance(last_nag_at, datetime):
             gap = (now - last_nag_at.astimezone(UTC)).total_seconds() / 60
-            if gap < MIN_NAG_GAP_MINUTES:
+            if gap < min_gap:
                 skipped["too_soon"] += 1
                 continue
-        # Compose the message using the engine's tracker state so the
-        # nag is actually meaningful ('2 of 5 sets today, three to go')
-        # instead of a generic 'still pending'.
-        progress_line = goal_engine.format_status_line(result)
-        text = _pick_nag_text(goal["title"], nags_today) + "\n\n" + progress_line
+        status_line = goal_engine.format_status_line(result)
+        nag_line = await _compose_nag_text(
+            llm=llm, goal=goal, status_line=status_line,
+            nags_today=nags_today, recent_log=log_rows,
+            model=nag_model,
+        )
+        text = f"{nag_line}\n\n{status_line}"
         chat_id = await _chat_id_for_member(pool, member_id)
         if chat_id is None:
             skipped["no_chat"] += 1

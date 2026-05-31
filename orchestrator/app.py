@@ -681,6 +681,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             pool=pool, redis=redis,
             store=app.state.health_goals_store,
             nag_store=app.state.member_nag_windows_store,
+            llm=llm,
+            nag_model=os.environ.get("DEFAULT_MODEL", "qwen3:8b"),
         )
 
     async def _run_weekly_reflection(_inputs: dict[str, Any]) -> dict[str, Any]:
