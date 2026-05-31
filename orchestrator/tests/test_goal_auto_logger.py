@@ -350,10 +350,9 @@ async def test_watermark_persists_across_polls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_notification_capped_per_goal_per_day() -> None:
+async def test_notification_batched_per_poll() -> None:
     """If HealthKit sync drops many matching rows at once, the user
-    gets at most MAX_AUTO_NOTIFY_PER_GOAL_PER_DAY notifications for
-    each (goal, day)."""
+    gets exactly ONE batched notification (was per-goal-per-day cap)."""
     goal = _pushup_goal()
     now = datetime.now(UTC)
     # 6 matching metrics on the same day
@@ -378,8 +377,12 @@ async def test_notification_capped_per_goal_per_day() -> None:
     # All 6 get logged
     assert out["logged"] == 6
     notifications = redis._store.get("_xadd:notify.outbound") or []
-    # But notifications capped at the per-goal-per-day limit
-    assert len(notifications) == al.MAX_AUTO_NOTIFY_PER_GOAL_PER_DAY
+    # ONE batched notification, not 6
+    assert len(notifications) == 1
+    # The single message summarizes the batch
+    payload = json.loads(notifications[0]["payload"])
+    assert "6 events" in payload["text"] or "6 readings" in payload["text"]
+    assert "added 6 set" in payload["text"]
 
 
 # ── Gauge vs counter validation in auto-log ─────────────────────
@@ -521,3 +524,160 @@ async def test_notification_for_counter_says_added_to() -> None:
     payload = json.loads(redis._store["_xadd:notify.outbound"][0]["payload"])
     text = payload["text"]
     assert "added 1 set" in text or "added 1 set to sets" in text
+
+
+# ── Freshness + per-member batching ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_backfill_logs_silently_no_notification() -> None:
+    """Historical rows (older than NOTIFY_FRESHNESS_HOURS) get logged
+    into health_goal_log so the engine sees them, but no Telegram
+    ping fires. This is the bug from the user re-scan after DB
+    cleanup."""
+    goal = _pushup_goal()
+    now = datetime.now(UTC)
+    rows = [{
+        "id": 100 + i, "metric": "strength_workout", "value": 10,
+        "unit": "minutes",
+        # All 7 days old → backfill, not real-time
+        "started_at": now - timedelta(days=7) + timedelta(minutes=i * 5),
+        "ended_at": None, "member_id": 2,
+        "source": "x", "metadata": {},
+    } for i in range(3)]
+    pool = _conn_pool(rows=rows, chat_id=620842725)
+    redis = _fake_redis_stub()
+    store = _fake_store(active=[goal])
+    llm = MagicMock()
+    llm.chat = AsyncMock(return_value={"message": {"content": json.dumps({
+        "deltas": {"sessions_today": 1}, "ts_iso": None,
+    })}})
+    out = await al.run_once(pool=pool, redis=redis, store=store, llm=llm)
+    # All 3 logged
+    assert out["logged"] == 3
+    # Zero notifications — they were backfill
+    notifications = redis._store.get("_xadd:notify.outbound") or []
+    assert len(notifications) == 0
+    assert out["notified"] == 0
+
+
+@pytest.mark.asyncio
+async def test_mixed_batch_only_fresh_notification() -> None:
+    """If a batch contains 2 fresh + 1 stale event, only the fresh
+    pair appears in the user-facing notification. The stale one is
+    still logged into health_goal_log."""
+    goal = _pushup_goal()
+    now = datetime.now(UTC)
+    rows = [
+        # stale (8 hours old)
+        {"id": 100, "metric": "strength_workout", "value": 10,
+         "unit": "minutes", "started_at": now - timedelta(hours=8),
+         "ended_at": None, "member_id": 2,
+         "source": "x", "metadata": {}},
+        # fresh (1 hour old)
+        {"id": 101, "metric": "strength_workout", "value": 10,
+         "unit": "minutes", "started_at": now - timedelta(hours=1),
+         "ended_at": None, "member_id": 2,
+         "source": "x", "metadata": {}},
+        # fresh (30 min old)
+        {"id": 102, "metric": "strength_workout", "value": 10,
+         "unit": "minutes", "started_at": now - timedelta(minutes=30),
+         "ended_at": None, "member_id": 2,
+         "source": "x", "metadata": {}},
+    ]
+    pool = _conn_pool(rows=rows, chat_id=620842725)
+    redis = _fake_redis_stub()
+    store = _fake_store(active=[goal])
+    llm = MagicMock()
+    llm.chat = AsyncMock(return_value={"message": {"content": json.dumps({
+        "deltas": {"sessions_today": 1}, "ts_iso": None,
+    })}})
+    out = await al.run_once(pool=pool, redis=redis, store=store, llm=llm)
+    assert out["logged"] == 3
+    # One notification summarizing the 2 fresh events
+    notifications = redis._store.get("_xadd:notify.outbound") or []
+    assert len(notifications) == 1
+    payload = json.loads(notifications[0]["payload"])
+    assert "2 events" in payload["text"]
+
+
+@pytest.mark.asyncio
+async def test_per_member_cap_across_goals() -> None:
+    """When a member has many active goals matching the same metric,
+    we cap notifications per member-per-cycle to MAX_AUTO_NOTIFY_
+    PER_MEMBER_PER_DAY."""
+    # 5 goals owned by the same member, all matching the same metric
+    goals = [
+        {**_pushup_goal(), "id": i, "title": f"Goal {i}"}
+        for i in range(1, 6)
+    ]
+    now = datetime.now(UTC)
+    # One fresh metric that matches all goals
+    rows = [{
+        "id": 100, "metric": "strength_workout", "value": 10,
+        "unit": "minutes", "started_at": now - timedelta(minutes=5),
+        "ended_at": None, "member_id": 2,
+        "source": "x", "metadata": {},
+    }]
+    pool = _conn_pool(rows=rows, chat_id=620842725)
+    redis = _fake_redis_stub()
+    store = _fake_store(active=goals)
+    llm = MagicMock()
+    llm.chat = AsyncMock(return_value={"message": {"content": json.dumps({
+        "deltas": {"sessions_today": 1}, "ts_iso": None,
+    })}})
+    out = await al.run_once(pool=pool, redis=redis, store=store, llm=llm)
+    # All 5 goals got logged (5 logs from 1 row × 5 goals)
+    assert out["logged"] == 5
+    # But notifications capped at the per-member ceiling
+    notifications = redis._store.get("_xadd:notify.outbound") or []
+    assert len(notifications) == al.MAX_AUTO_NOTIFY_PER_MEMBER_PER_DAY
+
+
+@pytest.mark.asyncio
+async def test_batched_gauge_shows_latest_value() -> None:
+    """6 weight readings in one cycle should produce ONE message
+    showing the most recent value, not 6 messages."""
+    spec = {"trackers": [{
+        "id": "weight_kg", "label": "Weight", "kind": "gauge",
+        "reset": "weekly", "target": 85, "unit": "kg", "direction": "down",
+    }]}
+    goal = {"id": 5, "member_id": 2, "title": "Lose weight",
+            "tracker_spec": spec}
+    now = datetime.now(UTC)
+    rows = [{
+        "id": 100 + i, "metric": "weight", "value": 92.0 + (i * 0.1),
+        "unit": "kg",
+        "started_at": now - timedelta(minutes=(5 - i) * 10),
+        "ended_at": None, "member_id": 2,
+        "source": "x", "metadata": {},
+    } for i in range(6)]
+    # Latest reading (i=5) lands closest to now, value 92.5
+    pool = _conn_pool(rows=rows, chat_id=620842725)
+    redis = _fake_redis_stub()
+    store = _fake_store(active=[goal])
+    llm = MagicMock()
+
+    # LLM returns the row's value as the absolute reading
+    def _chat(messages, **kw):
+        # Pull value from the user message description
+        user_msg = messages[-1]["content"]
+        # The description has the value in 'weight — 92.X kg at ...'
+        import re as _re
+        m = _re.search(r"(\d+\.\d+)", user_msg)
+        v = float(m.group(1)) if m else 92.0
+        return {"message": {"content": json.dumps({
+            "deltas": {"weight_kg": v}, "ts_iso": None,
+        })}}
+
+    llm.chat = AsyncMock(side_effect=_chat)
+    out = await al.run_once(pool=pool, redis=redis, store=store, llm=llm)
+    assert out["logged"] == 6
+    notifications = redis._store.get("_xadd:notify.outbound") or []
+    assert len(notifications) == 1
+    payload = json.loads(notifications[0]["payload"])
+    text = payload["text"]
+    assert "6 readings" in text
+    assert "92.5" in text  # latest
+    # No "is now" / "added" awkwardness when batched
+    assert "is now" not in text

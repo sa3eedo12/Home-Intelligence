@@ -41,9 +41,14 @@ MAX_ROWS_PER_POLL = 50
 # Don't auto-log if the user manually logged anything for this goal
 # in the last ~10 minutes — assume they already captured it.
 DEDUPE_MANUAL_WINDOW_MINUTES = 10
-# Don't notify more than N times per (goal, day) about auto-logs so
-# the user isn't flooded by HealthKit batch sync.
-MAX_AUTO_NOTIFY_PER_GOAL_PER_DAY = 4
+# Events whose timestamp is older than this don't get a Telegram ping
+# at all — the data still lands in health_goal_log so the engine
+# sees it, but the user isn't notified about ancient measurements.
+NOTIFY_FRESHNESS_HOURS = 4
+# Hard ceiling on Telegram pings per (member, send-day), regardless of
+# how many goals fired. Stops a single watch-sync from blasting the
+# user even if they have 5 active goals all matching the same events.
+MAX_AUTO_NOTIFY_PER_MEMBER_PER_DAY = 4
 
 
 async def run_once(
@@ -55,7 +60,12 @@ async def run_once(
     classifier_model: str = "qwen3:8b",
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """One poll cycle. Returns counters for observability."""
+    """One poll cycle. Returns counters for observability.
+
+    Notifications are batched per (goal, poll cycle): if N events
+    land for a goal during one run, the user gets ONE message
+    summarizing them, not N. Events older than NOTIFY_FRESHNESS_HOURS
+    are silently logged without a ping (backfill catch-up)."""
     now = now or datetime.now(UTC)
     watermark = await _get_watermark(redis)
     new_rows = await _fetch_new_metrics(pool, since_id=watermark)
@@ -68,7 +78,10 @@ async def run_once(
         return {"ok": True, "considered": len(new_rows), "logged": 0,
                 "skipped_no_goals": True}
     logged = 0
-    notify_counts: dict[tuple[int, str], int] = {}  # (goal_id, day_iso) → sent
+    # Per-goal batched notification accumulator. Each entry collects
+    # all the (deltas, event_ts, row) tuples that landed on this goal
+    # in this poll cycle so we can emit ONE summary message at the end.
+    batches: dict[int, dict[str, Any]] = {}
     for row in new_rows:
         member_id = row.get("member_id")
         for goal in active:
@@ -103,17 +116,52 @@ async def run_once(
                                goal_id=goal["id"], error=str(exc))
                 continue
             logged += 1
-            key = (int(goal["id"]),
-                   (event_ts or row.get("started_at") or now).strftime("%Y-%m-%d"))
-            if notify_counts.get(key, 0) < MAX_AUTO_NOTIFY_PER_GOAL_PER_DAY:
-                await _notify_user(
-                    pool=pool, redis=redis, goal=goal, row=row,
-                    deltas=deltas, event_ts=event_ts,
-                )
-                notify_counts[key] = notify_counts.get(key, 0) + 1
+            batch = batches.setdefault(int(goal["id"]), {
+                "goal": goal, "events": [], "member_id": int(goal["member_id"]),
+            })
+            batch["events"].append({
+                "deltas": deltas,
+                "event_ts": event_ts or row.get("started_at"),
+                "row": row,
+            })
     await _set_watermark(redis, new_rows[-1]["id"])
-    return {"ok": True, "considered": len(new_rows), "logged": logged,
-            "watermark": new_rows[-1]["id"]}
+    # Emit one batched notification per goal. Apply the per-member
+    # cap last so a single watch-sync can't flood a member with 5
+    # active goals.
+    member_send_counts: dict[int, int] = {}
+    notified = 0
+    for goal_id, batch in batches.items():
+        events = batch["events"]
+        if not events:
+            continue
+        # Drop stale-only batches entirely: if EVERY event in the
+        # batch is older than the freshness window, this is a
+        # backfill — silent.
+        fresh = [
+            ev for ev in events
+            if isinstance(ev.get("event_ts"), datetime)
+            and (now - ev["event_ts"].astimezone(UTC))
+            <= timedelta(hours=NOTIFY_FRESHNESS_HOURS)
+        ]
+        if not fresh:
+            logger.info("auto_log_silent_backfill",
+                        goal_id=goal_id, events=len(events))
+            continue
+        member_id = batch["member_id"]
+        sent_today = member_send_counts.get(member_id, 0)
+        if sent_today >= MAX_AUTO_NOTIFY_PER_MEMBER_PER_DAY:
+            logger.info("auto_log_member_cap_hit",
+                        member_id=member_id, goal_id=goal_id)
+            continue
+        await _notify_user_batch(
+            pool=pool, redis=redis, goal=batch["goal"], events=fresh,
+        )
+        member_send_counts[member_id] = sent_today + 1
+        notified += 1
+    return {
+        "ok": True, "considered": len(new_rows), "logged": logged,
+        "notified": notified, "watermark": new_rows[-1]["id"],
+    }
 
 
 # ── Watermark ────────────────────────────────────────────────────
@@ -396,6 +444,96 @@ async def _has_recent_manual_log(
 
 
 # ── Notification ─────────────────────────────────────────────────
+
+
+async def _notify_user_batch(
+    *, pool: asyncpg.Pool, redis: Redis,
+    goal: dict[str, Any], events: list[dict[str, Any]],
+) -> None:
+    """Send one consolidated Telegram message summarizing all
+    auto-logs that landed on this goal in the current poll cycle.
+
+    For gauges: show the latest reading + count of samples.
+    For counters: show the total added across the batch.
+    One bullet per tracker."""
+    if not events:
+        return
+    chat_id = await _chat_id_for_member(pool, int(goal["member_id"]))
+    if chat_id is None:
+        return
+    spec = goal.get("tracker_spec") or {}
+    by_id = {t.get("id"): t for t in (spec.get("trackers") or [])
+             if isinstance(t, dict)}
+    # Group event values by tracker_id, preserving time order
+    per_tracker: dict[str, list[tuple[datetime | None, float]]] = {}
+    for ev in events:
+        deltas = ev.get("deltas") or {}
+        ts = ev.get("event_ts")
+        for tid, value in deltas.items():
+            try:
+                fv = float(value)
+            except (TypeError, ValueError):
+                continue
+            per_tracker.setdefault(tid, []).append((ts, fv))
+    bits = []
+    for tid, values in per_tracker.items():
+        t = by_id.get(tid, {})
+        label = str(t.get("label") or tid)
+        unit = str(t.get("unit") or "")
+        kind = str(t.get("kind") or "counter").lower()
+        if kind == "gauge":
+            # Latest value wins for a gauge
+            with_ts = [(ts, v) for ts, v in values if isinstance(ts, datetime)]
+            with_ts.sort(key=lambda p: p[0])
+            latest = with_ts[-1][1] if with_ts else values[-1][1]
+            v_str = _fmt_num(latest)
+            if len(values) == 1:
+                bits.append(
+                    f"{label.lower()} is now {v_str} {unit}".strip().replace(
+                        "  ", " "
+                    )
+                )
+            else:
+                bits.append(
+                    f"{label.lower()}: {len(values)} readings, latest "
+                    f"{v_str} {unit}".strip().replace("  ", " ")
+                )
+        else:
+            total = sum(v for _, v in values)
+            v_str = _fmt_num(total)
+            if len(values) == 1:
+                bits.append(
+                    f"added {v_str} {unit} to {label.lower()}".strip().replace(
+                        "  ", " "
+                    )
+                )
+            else:
+                bits.append(
+                    f"added {v_str} {unit} to {label.lower()} "
+                    f"({len(values)} events)".strip().replace("  ", " ")
+                )
+    text = (
+        "Auto-logged from your watch: " + "; ".join(bits) +
+        f" toward \"{goal.get('title')}\". "
+        "Reply 'undo' if any of that's wrong."
+    )
+    payload = {
+        "chat_id": chat_id, "text": text, "severity": "info",
+        "topic": f"goal:{goal['id']}:auto",
+        "agent": "goal_auto_logger",
+        "capability": "metric_observed",
+    }
+    try:
+        await redis.xadd("notify.outbound", {"payload": json.dumps(payload)})
+    except Exception as exc:
+        logger.warning("auto_log_notify_failed",
+                       goal_id=goal["id"], error=str(exc))
+
+
+def _fmt_num(value: float) -> str:
+    if abs(value - round(value)) < 1e-9:
+        return str(int(round(value)))
+    return f"{value:.1f}".rstrip("0").rstrip(".")
 
 
 async def _notify_user(
