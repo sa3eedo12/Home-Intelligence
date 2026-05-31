@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -929,3 +929,144 @@ def test_classifier_prompt_mentions_refine_in_context_block() -> None:
     # "I was thinking instead..." is refine, not create.
     assert "refine_goal" in prompt["system"]
     assert "different outcome" in prompt["system"]
+
+
+# ── Time-aware log classification ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_log_workout_resolves_ts_iso_from_classifier() -> None:
+    """When the LLM returns a ts_iso for 'after Dhuhr earlier today',
+    the log row is written with that timestamp instead of now()."""
+    classify = {"intent": "log_workout"}
+    # Today's Dhuhr in Dubai is ~12:30 local. Pick a fixed valid past ts.
+    past_ts_local = (datetime.now(UTC) - timedelta(hours=4)).isoformat()
+    log_response = {
+        "deltas": {"sessions_today": 1, "pushups_today": 12},
+        "ts_iso": past_ts_local,
+        "reasoning_brief": "after Dhuhr ~4h ago",
+    }
+    llm = _llm_returning(classify, log_response)
+    spec = {
+        "trackers": [
+            {"id": "sessions_today", "label": "Sets", "kind": "counter",
+             "reset": "daily", "target": 5, "unit": "set", "direction": "up"},
+            {"id": "pushups_today", "label": "Pushups", "kind": "counter",
+             "reset": "daily", "target": 100, "unit": "pushup",
+             "direction": "up"},
+        ],
+    }
+    goals = _fake_goals_store(active=[
+        {"id": 4, "member_id": 2, "title": "Pushups", "tracker_spec": spec},
+    ])
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle(
+        "did 12 pushups earlier today after Dhuhr prayer", member=MEMBER,
+    )
+    assert r.handled is True
+    goals.record_log_event.assert_awaited_once()
+    call = goals.record_log_event.await_args
+    # ts was forwarded, not None
+    assert call.kwargs["ts"] is not None
+    assert abs(
+        (call.kwargs["ts"].astimezone(UTC) -
+         datetime.fromisoformat(past_ts_local).astimezone(UTC)).total_seconds()
+    ) < 5
+    # Confirmation message acknowledges the time
+    assert "earlier today" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_log_workout_defaults_to_now_when_no_ts_signal() -> None:
+    """When the LLM returns ts_iso=null (no temporal hint), the store
+    gets ts=None and defaults to now()."""
+    classify = {"intent": "log_workout"}
+    log_response = {
+        "deltas": {"sessions_today": 1},
+        "ts_iso": None,
+        "reasoning_brief": "none",
+    }
+    llm = _llm_returning(classify, log_response)
+    spec = {
+        "trackers": [
+            {"id": "sessions_today", "label": "Sets", "kind": "counter",
+             "reset": "daily", "target": 5, "unit": "set", "direction": "up"},
+        ],
+    }
+    goals = _fake_goals_store(active=[
+        {"id": 1, "member_id": 2, "title": "g", "tracker_spec": spec},
+    ])
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("just did a set", member=MEMBER)
+    assert r.handled is True
+    assert goals.record_log_event.await_args.kwargs["ts"] is None
+    assert "earlier today" not in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_log_workout_supports_legacy_bare_delta_shape() -> None:
+    """Older prompt returned bare {tracker_id: n}. The parser should
+    still accept that for forward-compatibility with model drift."""
+    classify = {"intent": "log_workout"}
+    # No 'deltas' wrapper, just the raw tracker mapping
+    log_response = {"sessions_today": 2}
+    llm = _llm_returning(classify, log_response)
+    spec = {
+        "trackers": [
+            {"id": "sessions_today", "label": "Sets", "kind": "counter",
+             "reset": "daily", "target": 5, "unit": "set", "direction": "up"},
+        ],
+    }
+    goals = _fake_goals_store(active=[
+        {"id": 1, "member_id": 2, "title": "g", "tracker_spec": spec},
+    ])
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("did 2 sets", member=MEMBER)
+    assert r.handled is True
+    assert goals.record_log_event.await_args.kwargs["deltas"] == {
+        "sessions_today": 2.0
+    }
+
+
+# ── _parse_ts_hint guardrails ───────────────────────────────────
+
+
+def test_parse_ts_hint_accepts_valid_recent_iso() -> None:
+    from orchestrator.goals_chat import _parse_ts_hint
+    ts_str = (datetime.now(UTC) - timedelta(hours=3)).isoformat()
+    out = _parse_ts_hint(ts_str)
+    assert out is not None
+    assert out.tzinfo is not None
+
+
+def test_parse_ts_hint_rejects_future_dates() -> None:
+    """The LLM occasionally hallucinates future timestamps. Drop them
+    rather than store nonsense."""
+    from orchestrator.goals_chat import _parse_ts_hint
+    future = (datetime.now(UTC) + timedelta(days=2)).isoformat()
+    assert _parse_ts_hint(future) is None
+
+
+def test_parse_ts_hint_rejects_ancient_dates() -> None:
+    from orchestrator.goals_chat import _parse_ts_hint
+    ancient = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+    assert _parse_ts_hint(ancient) is None
+
+
+def test_parse_ts_hint_handles_naive_datetime() -> None:
+    """If the LLM forgets the tz offset, assume Dubai-local."""
+    from orchestrator.goals_chat import _parse_ts_hint
+    from zoneinfo import ZoneInfo
+    naive = (datetime.now(ZoneInfo("Asia/Dubai")) - timedelta(hours=1)
+             ).replace(tzinfo=None).isoformat()
+    out = _parse_ts_hint(naive)
+    assert out is not None
+    assert out.tzinfo is not None
+
+
+def test_parse_ts_hint_safe_on_garbage() -> None:
+    from orchestrator.goals_chat import _parse_ts_hint
+    assert _parse_ts_hint(None) is None
+    assert _parse_ts_hint("") is None
+    assert _parse_ts_hint("not a date") is None
+    assert _parse_ts_hint(42) is None

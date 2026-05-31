@@ -27,6 +27,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from home_agents_sdk.chore_store import ChoreStore
@@ -272,7 +273,8 @@ class GoalsChatHandler:
             "USER: 'just vacuumed the living room'\n"
             "{\"intent\": \"complete_chore\", \"name\": \"vacuum\"}\n\n"
             "USER: 'whats the weather'\n"
-            "{\"intent\": \"general_chat\"}\n"
+            "{\"intent\": \"general_chat\"}\n\n"
+            + _now_context_line()
             + context_block
         )
         return {"system": system, "user": text.strip()}
@@ -515,8 +517,7 @@ class GoalsChatHandler:
             "sleep_minutes gauge reset daily with target 420. "
             "Always include log_hints with the words you expect the user "
             "to use so the log classifier can map their messages to deltas.\n\n"
-            "Today is " + date.today().isoformat() + ". The user is in "
-            "Asia/Dubai timezone.\n"
+            f"{_now_context_line()}\n"
             "Return ONLY the JSON object."
         )
         user = f"Title: {title}\nDescription: {description}"
@@ -790,12 +791,13 @@ class GoalsChatHandler:
                 ), int(target["id"])
         raw_text = (args.get("note") or text or "").strip() or "logged via chat"
         try:
-            deltas = await self._classify_log_deltas(
+            deltas, event_ts = await self._classify_log_deltas(
                 spec=spec, goal_title=target["title"], raw_text=raw_text,
             )
         except Exception as exc:
             logger.warning("goals_chat_log_classify_failed", error=str(exc))
             deltas = _fallback_deltas_from_hints(spec, raw_text)
+            event_ts = None
         if not deltas:
             return (
                 "I heard you, but I couldn't map that to anything I'm "
@@ -807,39 +809,56 @@ class GoalsChatHandler:
             raw_text=raw_text,
             member_id=member_id,
             source="telegram",
+            ts=event_ts,  # None → store defaults to now()
         )
         # Re-evaluate so the confirmation is grounded in real state.
         log_rows = await self.goals.recent_log(int(target["id"]), limit=200)
         eval_result = goal_engine.evaluate(goal=target, log_rows=log_rows)
-        bits = [_humanize_log_delta(deltas, spec)]
+        bits = [_humanize_log_delta(deltas, spec, event_ts=event_ts)]
         bits.append(goal_engine.format_status_line(eval_result))
         return " ".join(b for b in bits if b), int(target["id"])
 
     async def _classify_log_deltas(
         self, *, spec: dict[str, Any], goal_title: str, raw_text: str,
-    ) -> dict[str, float]:
-        """Small LLM call: map free-text into {tracker_id: delta}.
+    ) -> tuple[dict[str, float], datetime | None]:
+        """Small LLM call: map free-text into per-tracker deltas AND
+        deduce when the event happened.
 
-        Uses qwen3:8b for cost; the spec's trackers + log_hints go in
-        the prompt as guardrails. Returns {} if the model produces
-        nothing usable."""
+        Returns (deltas, ts_or_none). The LLM is given the current
+        local time + timezone so it can resolve phrasings like
+        'earlier today', 'yesterday after maghrib', 'this morning' to
+        a concrete ISO timestamp. If no time signal is present, the
+        ts comes back None and the caller defaults to now()."""
         trackers_brief = "; ".join(
             f"{t['id']} ({t['label']}, {t.get('unit') or 'unit'})"
             for t in spec["trackers"]
         )
         hints = spec.get("log_hints") or []
         hints_text = json.dumps(hints[:6]) if hints else "(none)"
+        now_ctx = _now_context_line()
         system = (
             "You convert a user's free-text report of something they did "
-            "into per-tracker numeric deltas for one goal. Be conservative: "
-            "only count what the user actually said. Return ONLY a JSON "
-            "object: {<tracker_id>: <number>, ...}. Unknown trackers or "
+            "into per-tracker numeric deltas for one goal, AND deduce when "
+            "the event happened. Be conservative: only count what the "
+            "user actually said.\n\n"
+            "Return ONLY a JSON object with these keys:\n"
+            "- deltas: {<tracker_id>: <number>, ...}. Unknown trackers or "
             "ambiguous quantities → omit them. Numbers must be positive "
             "for counters (additions). For gauges, return the latest "
-            "reported absolute value."
-            f"\n\nGoal: {goal_title}"
-            f"\nTrackers available: {trackers_brief}"
-            f"\nLog hints: {hints_text}"
+            "reported absolute value.\n"
+            "- ts_iso: ISO-8601 datetime with timezone (e.g. "
+            "'2026-05-31T13:30:00+04:00') if the user gave a time signal "
+            "you can resolve (e.g. 'earlier today', 'yesterday morning', "
+            "'after Dhuhr', 'right after I woke up', 'last Friday'). "
+            "Use your knowledge of approximate Islamic prayer times for "
+            "the given location and date when relevant. Use null when "
+            "there's no temporal hint — the caller will default to now.\n"
+            "- reasoning_brief: 1 short sentence on how you interpreted "
+            "the time signal (or 'none').\n\n"
+            f"{now_ctx}\n"
+            f"Goal: {goal_title}\n"
+            f"Trackers available: {trackers_brief}\n"
+            f"Log hints: {hints_text}"
         )
         try:
             resp = await self.llm.chat(
@@ -854,19 +873,29 @@ class GoalsChatHandler:
             )
         except Exception as exc:
             logger.warning("goals_chat_log_llm_failed", error=str(exc))
-            return _fallback_deltas_from_hints(spec, raw_text)
+            return _fallback_deltas_from_hints(spec, raw_text), None
         content = _extract_chat_content(resp)
         parsed = _parse_json_blob(content) or {}
         valid_ids = {t["id"] for t in spec["trackers"]}
+        # Backwards-compat: older prompt returned bare {tracker_id: n}.
+        # New shape is {deltas: {...}, ts_iso: ...}.
+        if "deltas" in parsed and isinstance(parsed["deltas"], dict):
+            deltas_raw = parsed["deltas"]
+            ts_iso = parsed.get("ts_iso")
+        else:
+            deltas_raw = {k: v for k, v in parsed.items()
+                          if k not in {"ts_iso", "reasoning_brief"}}
+            ts_iso = parsed.get("ts_iso")
         out: dict[str, float] = {}
-        for k, v in parsed.items():
+        for k, v in deltas_raw.items():
             if k not in valid_ids:
                 continue
             try:
                 out[k] = float(v)
             except (TypeError, ValueError):
                 continue
-        return out
+        ts = _parse_ts_hint(ts_iso)
+        return out, ts
 
     # ── Goal state ───────────────────────────────────────────────
 
@@ -1144,8 +1173,14 @@ def _humanize_list(items: list[str]) -> str:
 
 def _humanize_log_delta(
     deltas: dict[str, float], spec: dict[str, Any],
+    *,
+    event_ts: datetime | None = None,
 ) -> str:
-    """Render the LLM's parsed deltas as a single confirmation sentence."""
+    """Render the LLM's parsed deltas as a single confirmation sentence.
+
+    When event_ts is provided and meaningfully different from 'now'
+    (more than ~10 min off), include a phrase showing we understood
+    the time signal — so the user can trust we logged it correctly."""
     if not deltas:
         return "Logged."
     by_id = {t["id"]: t for t in (spec.get("trackers") or [])}
@@ -1156,7 +1191,61 @@ def _humanize_log_delta(
         unit = t.get("unit") or ""
         v_str = f"{value:.1f}".rstrip("0").rstrip(".") if value % 1 else str(int(value))
         bits.append(f"{v_str} {unit} {label.lower()}".strip().replace("  ", " "))
-    return "Logged: " + ", ".join(bits) + "."
+    when_phrase = ""
+    if event_ts is not None:
+        now = datetime.now(UTC)
+        if abs((now - event_ts.astimezone(UTC)).total_seconds()) > 600:
+            local = event_ts.astimezone(ZoneInfo("Asia/Dubai"))
+            today_local = datetime.now(ZoneInfo("Asia/Dubai")).date()
+            if local.date() == today_local:
+                when_phrase = f" earlier today at {local.strftime('%H:%M')}"
+            elif (today_local - local.date()).days == 1:
+                when_phrase = f" yesterday at {local.strftime('%H:%M')}"
+            else:
+                when_phrase = f" on {local.strftime('%a %d %b at %H:%M')}"
+    return f"Logged{when_phrase}: " + ", ".join(bits) + "."
+
+
+def _now_context_line() -> str:
+    """One-line current-time context for any LLM system prompt.
+    Helps the model resolve 'earlier today', 'yesterday', 'after dhuhr',
+    'this morning', and pick reasonable due dates."""
+    tz = ZoneInfo("Asia/Dubai")
+    local = datetime.now(tz)
+    return (
+        f"It is currently {local.strftime('%A, %d %B %Y, %H:%M')} "
+        f"in Asia/Dubai. The user is in the UAE."
+    )
+
+
+def _parse_ts_hint(raw: Any) -> datetime | None:
+    """Validate an LLM-supplied ISO timestamp. Rejects anything in the
+    future or more than 14 days in the past — those are almost always
+    hallucinations. Returns a tz-aware datetime or None."""
+    if not raw or not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    # Tolerate trailing 'Z'
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        ts = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        # Assume Dubai-local if the LLM forgot the offset
+        ts = ts.replace(tzinfo=ZoneInfo("Asia/Dubai"))
+    now = datetime.now(UTC)
+    ts_utc = ts.astimezone(UTC)
+    # Reject hallucinated futures (allow up to 5 min clock skew)
+    if ts_utc > now + timedelta(minutes=5):
+        return None
+    # Reject anything older than 14 days
+    if ts_utc < now - timedelta(days=14):
+        return None
+    return ts
 
 
 def _fallback_deltas_from_hints(
