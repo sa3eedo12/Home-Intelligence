@@ -1429,3 +1429,270 @@ async def test_no_draft_no_redis_short_circuits_safely() -> None:
     assert r.handled is True
     assert "?" in r.text
     goals.create.assert_not_called()
+
+
+# ── Renderer: counter vs gauge phrasing ─────────────────────────
+
+
+def test_format_tracker_line_counter_per_day() -> None:
+    from orchestrator.goals_chat import _format_tracker_line
+    line = _format_tracker_line({
+        "id": "sessions_today", "label": "Pushup sets",
+        "kind": "counter", "reset": "daily",
+        "target": 5, "unit": "set", "direction": "up",
+    })
+    assert line == "Pushup sets: 5 set per day"
+
+
+def test_format_tracker_line_gauge_checked_weekly_with_arrow() -> None:
+    """Gauges must read 'checked weekly', NOT 'per weekly'."""
+    from orchestrator.goals_chat import _format_tracker_line
+    line = _format_tracker_line({
+        "id": "weight_kg", "label": "Weight",
+        "kind": "gauge", "reset": "weekly",
+        "target": 85, "unit": "kg", "direction": "down",
+    })
+    assert line == "Weight: ≤ 85 kg (checked weekly)"
+    # No 'per weekly' anywhere
+    assert "per weekly" not in line
+
+
+def test_format_tracker_line_gauge_up_direction() -> None:
+    from orchestrator.goals_chat import _format_tracker_line
+    line = _format_tracker_line({
+        "id": "hrv", "label": "HRV",
+        "kind": "gauge", "reset": "daily",
+        "target": 60, "unit": "ms", "direction": "up",
+    })
+    assert line == "HRV: ≥ 60 ms (checked daily)"
+
+
+def test_format_tracker_line_no_target_returns_label() -> None:
+    from orchestrator.goals_chat import _format_tracker_line
+    line = _format_tracker_line({
+        "id": "x", "label": "Mood", "kind": "gauge",
+        "reset": "daily", "target": None, "direction": "up",
+    })
+    assert line == "Mood"
+
+
+def test_format_tracker_line_handles_missing_fields() -> None:
+    from orchestrator.goals_chat import _format_tracker_line
+    line = _format_tracker_line({"id": "x", "target": 3})
+    # Falls back to defaults: counter, daily, up direction
+    assert "x: 3" in line
+    assert "per day" in line
+
+
+# ── Boilerplate removed from create/explain replies ─────────────
+
+
+@pytest.mark.asyncio
+async def test_create_reply_no_workout_boilerplate() -> None:
+    """The 'did 20 pushups after maghrib' / 'shift to Tue/Thu/Sat'
+    canned copy must not appear in the create reply."""
+    classify = {"intent": "create_goal", "title": "Lose 5kg",
+                "description": "I want to lose 5 kg in 12 weeks"}
+    plan = {
+        "ready": True,
+        "plan_text": "Aim for ~0.4 kg per week — sustainable and safe.",
+        "tracker_spec": {
+            "trackers": [
+                {"id": "weight_kg", "label": "Weight", "kind": "gauge",
+                 "reset": "weekly", "target": 85, "unit": "kg",
+                 "direction": "down"},
+            ],
+        },
+        "milestones": [],
+    }
+    llm = _llm_returning(classify, plan)
+    goals = _fake_goals_store()
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle(
+        "I want to lose 5 kg in 12 weeks", member=MEMBER,
+    )
+    assert r.handled is True
+    assert "did 20 pushups" not in r.text.lower()
+    assert "shift to tue/thu/sat" not in r.text.lower()
+    assert "maghrib" not in r.text.lower()
+    # And gauge phrasing is right
+    assert "checked weekly" in r.text
+    assert "per weekly" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_explain_plan_no_cadence_boilerplate() -> None:
+    """explain_plan must not append the 'If the cadence doesn't fit...'
+    workout copy."""
+    llm = _llm_returning({"intent": "explain_plan"})
+    goal = {
+        "id": 1, "member_id": 2, "title": "Lose 5kg",
+        "description": "x", "plan_text": "Easy pace.",
+        "tracker_spec": {
+            "trackers": [{
+                "id": "weight_kg", "label": "Weight", "kind": "gauge",
+                "reset": "weekly", "target": 85, "unit": "kg",
+                "direction": "down",
+            }],
+        },
+        "status": "active",
+    }
+    goals = _fake_goals_store_with_get(goal)
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("what's the plan?", member=MEMBER)
+    assert r.handled is True
+    assert "cadence doesn't fit" not in r.text
+    assert "shift to Tue/Thu/Sat" not in r.text
+    assert "checked weekly" in r.text
+
+
+# ── Planner data-lookup tool-loop ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_planner_resolves_needs_data_inline_before_commit() -> None:
+    """Planner round 1: ready=false + needs_data. Handler resolves the
+    lookup, calls planner again, gets ready=true. No question asked
+    of the user."""
+    classify = {
+        "intent": "create_goal",
+        "title": "Lose weight",
+        "description": "I want to lose 5kg; check body fat from HealthKit",
+    }
+    needs_data_response = {
+        "ready": False,
+        "needs_data": [
+            {"kind": "latest_health_metric", "metric": "body_fat_pct",
+             "note": "user said to check HealthKit"},
+        ],
+    }
+    final_plan = {
+        "ready": True,
+        "plan_text": ("Aim for ~0.4 kg/week — safe rate. Starting body "
+                      "fat 26%, target ~21%."),
+        "tracker_spec": {
+            "trackers": [
+                {"id": "weight_kg", "label": "Weight", "kind": "gauge",
+                 "reset": "weekly", "target": 85, "unit": "kg",
+                 "direction": "down"},
+                {"id": "body_fat_pct", "label": "Body fat", "kind": "gauge",
+                 "reset": "weekly", "target": 21, "unit": "%",
+                 "direction": "down"},
+            ],
+        },
+        "milestones": [],
+    }
+    llm = _llm_returning(classify, needs_data_response, final_plan)
+    goals = _fake_goals_store()
+    # Stub the lookup directly so we don't need a real pool
+    h = _build(llm=llm, goals_store=goals)
+    h._lookup_latest_health_metric = AsyncMock(return_value={
+        "metric": "body_fat_pct", "value": 26.0, "unit": "%",
+        "as_of": "2026-05-30",
+    })
+    r = await h.try_handle(
+        "I want to lose 5 kg, check body fat from HealthKit",
+        member=MEMBER,
+    )
+    assert r.handled is True
+    assert r.intent == "create_goal"
+    # The lookup was called for the metric the planner requested
+    h._lookup_latest_health_metric.assert_awaited_once()
+    assert h._lookup_latest_health_metric.await_args.kwargs == {
+        "metric": "body_fat_pct", "member_id": 2,
+    }
+    # Goal committed in one turn (no draft persisted)
+    goals.create.assert_awaited_once()
+    # The looked-up value made it into the description so refine sees it
+    desc = goals.create.await_args.kwargs["description"]
+    assert "body_fat_pct: 26.0" in desc or "body_fat_pct: 26" in desc
+    # User reply mentions we used their data
+    assert "Used your latest data" in r.text
+
+
+@pytest.mark.asyncio
+async def test_planner_lookup_loop_caps_at_two_rounds() -> None:
+    """If the planner keeps requesting more lookups, the loop caps
+    so we don't spin forever."""
+    classify = {"intent": "create_goal", "title": "X", "description": "X"}
+    keep_asking = {
+        "ready": False,
+        "needs_data": [{"kind": "latest_health_metric", "metric": "weight"}],
+    }
+    # Loop should commit on the 3rd planner call after 2 lookups
+    final = {
+        "ready": True, "plan_text": "ok",
+        "tracker_spec": {"trackers": [{
+            "id": "x", "kind": "counter", "reset": "daily",
+            "target": 1, "direction": "up", "unit": "x", "label": "X",
+        }]},
+    }
+    llm = _llm_returning(classify, keep_asking, keep_asking, final)
+    goals = _fake_goals_store()
+    h = _build(llm=llm, goals_store=goals)
+    h._lookup_latest_health_metric = AsyncMock(return_value={
+        "metric": "weight", "value": 80, "unit": "kg", "as_of": "x",
+    })
+    r = await h.try_handle("X", member=MEMBER)
+    assert r.handled is True
+    # 2 lookup rounds + 1 final commit
+    assert h._lookup_latest_health_metric.await_count == 2
+    goals.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_planner_lookup_with_no_value_doesnt_block_commit() -> None:
+    """If the lookup returns no data (value=None), the planner gets
+    the empty result and can decide to commit anyway or ask the user."""
+    classify = {"intent": "create_goal", "title": "Sleep",
+                "description": "Sleep better; check my average"}
+    needs_lookup = {
+        "ready": False,
+        "needs_data": [
+            {"kind": "latest_health_metric", "metric": "sleep_asleep"},
+        ],
+    }
+    commit_anyway = {
+        "ready": True,
+        "plan_text": "Aim for 7-8h nightly.",
+        "tracker_spec": {"trackers": [{
+            "id": "sleep_minutes", "label": "Sleep", "kind": "gauge",
+            "reset": "daily", "target": 420, "unit": "min", "direction": "up",
+        }]},
+    }
+    llm = _llm_returning(classify, needs_lookup, commit_anyway)
+    goals = _fake_goals_store()
+    h = _build(llm=llm, goals_store=goals)
+    h._lookup_latest_health_metric = AsyncMock(return_value={
+        "metric": "sleep_asleep", "value": None, "unit": None, "as_of": None,
+    })
+    r = await h.try_handle("sleep better, check my average", member=MEMBER)
+    assert r.handled is True
+    goals.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_planner_rejects_unknown_needs_data_kinds() -> None:
+    """Planner can't ask us to fetch arbitrary things — only kinds
+    we explicitly support pass through."""
+    classify = {"intent": "create_goal", "title": "X", "description": "X"}
+    weird = {
+        "ready": False,
+        "needs_data": [
+            {"kind": "fetch_facebook_posts", "metric": "x"},
+            {"kind": "exec_shell", "metric": "rm -rf /"},
+        ],
+    }
+    llm = _llm_returning(classify, weird)
+    goals = _fake_goals_store()
+    h = _build(llm=llm, goals_store=goals)
+    # The planner returns no usable needs + no question → handler
+    # would normally commit, but the plan has no tracker_spec, so we
+    # fall through to the fail-open commit. Either way: no lookup
+    # ever executes for the disallowed kinds.
+    h._lookup_latest_health_metric = AsyncMock()
+    h._lookup_latest_health_metric.return_value = {}
+    r = await h.try_handle("X", member=MEMBER)
+    # The forbidden lookups never ran
+    h._lookup_latest_health_metric.assert_not_called()
+    assert r.handled is True

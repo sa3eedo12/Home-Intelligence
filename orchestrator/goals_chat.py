@@ -378,8 +378,9 @@ class GoalsChatHandler:
         title = str(args.get("title") or text[:80]).strip()
         description = str(args.get("description") or text).strip()
         try:
-            plan = await self._generate_plan(
+            plan, lookups = await self._planner_with_lookups(
                 title=title, description=description,
+                member_id=member_id,
             )
         except Exception as exc:
             logger.warning("goals_chat_planner_failed", error=str(exc))
@@ -393,6 +394,7 @@ class GoalsChatHandler:
                 "tracker_spec": None,
                 "milestones": [],
             }
+            lookups = []
         if not plan.get("ready") and plan.get("clarification_question"):
             # Stash the draft and ask the question. The next user
             # message will route through _handle_create_goal_draft.
@@ -400,6 +402,7 @@ class GoalsChatHandler:
                 "title": title,
                 "description": description,
                 "answers": [],
+                "lookups": lookups,
                 "pending_question": plan["clarification_question"],
             })
             return (
@@ -409,22 +412,58 @@ class GoalsChatHandler:
         return await self._commit_goal(
             title=title, description=description,
             plan=plan, member_id=member_id,
+            prior_lookups=lookups,
         )
+
+    async def _planner_with_lookups(
+        self, *, title: str, description: str, member_id: int,
+        prior_answers: list[dict[str, str]] | None = None,
+        prior_lookups: list[dict[str, Any]] | None = None,
+        max_lookup_rounds: int = 2,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Call the planner; if it requests data-lookups, resolve them
+        and call again with the values inlined. Caps the loop at
+        max_lookup_rounds so a chatty model can't lookup-forever.
+        Returns (final_plan, accumulated_lookups)."""
+        lookups: list[dict[str, Any]] = list(prior_lookups or [])
+        plan = await self._generate_plan(
+            title=title, description=description,
+            prior_answers=prior_answers, prior_lookups=lookups,
+        )
+        for _ in range(max_lookup_rounds):
+            needs = plan.get("needs_data") or []
+            if plan.get("ready") or not needs:
+                break
+            resolved = await self._resolve_needs_data(
+                needs_data=needs, member_id=member_id,
+            )
+            if not resolved:
+                # Nothing new to add; let the next layer ask the user
+                # directly or commit on its own.
+                break
+            lookups.extend(resolved)
+            plan = await self._generate_plan(
+                title=title, description=description,
+                prior_answers=prior_answers, prior_lookups=lookups,
+            )
+        return plan, lookups
 
     async def _handle_create_goal_draft(
         self, *, draft: dict[str, Any], answer: str, member_id: int,
     ) -> tuple[str, int | None]:
         """User sent a follow-up message while a goal-creation draft
         was pending. Append their answer, re-ask the planner, either
-        commit or ask one more question."""
+        commit or ask one more question (or run another lookup round)."""
         title = str(draft.get("title") or "").strip() or "(untitled)"
         description = str(draft.get("description") or "").strip()
         answers = list(draft.get("answers") or [])
         pending_q = str(draft.get("pending_question") or "").strip()
+        prior_lookups = list(draft.get("lookups") or [])
         answers.append({"q": pending_q, "a": answer.strip()})
         try:
-            plan = await self._generate_plan(
-                title=title, description=description, prior_answers=answers,
+            plan, lookups = await self._planner_with_lookups(
+                title=title, description=description, member_id=member_id,
+                prior_answers=answers, prior_lookups=prior_lookups,
             )
         except Exception as exc:
             logger.warning("goals_chat_draft_planner_failed", error=str(exc))
@@ -438,6 +477,7 @@ class GoalsChatHandler:
                 "title": title,
                 "description": description,
                 "answers": answers,
+                "lookups": lookups,
                 "pending_question": plan["clarification_question"],
             })
             return (
@@ -449,16 +489,19 @@ class GoalsChatHandler:
             title=title, description=description,
             plan=plan, member_id=member_id,
             prior_answers=answers,
+            prior_lookups=lookups,
         )
 
     async def _commit_goal(
         self, *, title: str, description: str, plan: dict[str, Any],
         member_id: int, prior_answers: list[dict[str, str]] | None = None,
+        prior_lookups: list[dict[str, Any]] | None = None,
     ) -> tuple[str, int | None]:
         """Persist the goal + render the user-facing confirmation.
         Shared by both single-shot create and post-clarification commit."""
-        # Fold any clarification answers into the persisted description
-        # so future refine_goal calls have the full picture.
+        # Fold any clarification answers AND looked-up values into the
+        # persisted description so future refine_goal calls have the
+        # full picture.
         full_description = description
         if prior_answers:
             qa_block = "\n\n" + "\n".join(
@@ -466,7 +509,27 @@ class GoalsChatHandler:
                 for qa in prior_answers
                 if qa.get("q") or qa.get("a")
             )
-            full_description = description + qa_block
+            full_description = full_description + qa_block
+        if prior_lookups:
+            lookup_lines = []
+            for lk in prior_lookups:
+                if not isinstance(lk, dict):
+                    continue
+                metric = lk.get("metric")
+                value = lk.get("value")
+                if value is None:
+                    continue
+                unit = lk.get("unit") or ""
+                as_of = lk.get("as_of") or ""
+                line = f"- {metric}: {value} {unit}".strip()
+                if as_of:
+                    line += f" (as of {as_of})"
+                lookup_lines.append(line)
+            if lookup_lines:
+                full_description += (
+                    "\n\nLooked-up values used to build this plan:\n"
+                    + "\n".join(lookup_lines)
+                )
         goal_id = await self.goals.create(
             member_id=member_id,
             title=title,
@@ -490,27 +553,16 @@ class GoalsChatHandler:
         spec = plan.get("tracker_spec") or {}
         trackers = spec.get("trackers") or []
         if trackers:
-            tracker_lines = []
-            for t in trackers[:4]:
-                target = t.get("target")
-                unit = t.get("unit") or ""
-                label = t.get("label") or t.get("id") or "tracker"
-                reset = t.get("reset") or "daily"
-                if target is not None:
-                    tracker_lines.append(
-                        f"{label}: target {target} {unit} per {reset[:-2] if reset.endswith('ly') else reset}".replace(
-                            "  ", " "
-                        ).strip()
-                    )
-                else:
-                    tracker_lines.append(label)
+            tracker_lines = [_format_tracker_line(t) for t in trackers[:4]]
             bits.append("I'll track: " + "; ".join(tracker_lines) + ".")
-        bits.append(
-            "Tell me how it goes (e.g. \"did 20 pushups after maghrib\") "
-            "and I'll log it. Ask \"how am I doing\" any time. Say "
-            "\"mute it\" to stop nags, or describe a change and I'll "
-            "rework the plan."
-        )
+        if prior_lookups:
+            used = [
+                f"{lk.get('metric')} = {lk.get('value')} {lk.get('unit') or ''}".strip()
+                for lk in prior_lookups
+                if isinstance(lk, dict) and lk.get("value") is not None
+            ]
+            if used:
+                bits.append("Used your latest data: " + "; ".join(used) + ".")
         return "\n\n".join(b for b in bits if b), goal_id
 
     # ── Refine an existing goal in conversational context ────────
@@ -574,38 +626,29 @@ class GoalsChatHandler:
         spec = plan.get("tracker_spec") or {}
         trackers = spec.get("trackers") or []
         if trackers:
-            tracker_lines = []
-            for t in trackers[:4]:
-                target_v = t.get("target")
-                unit = t.get("unit") or ""
-                label = t.get("label") or t.get("id") or "tracker"
-                reset = t.get("reset") or "daily"
-                if target_v is not None:
-                    tracker_lines.append(
-                        f"{label}: target {target_v} {unit} per {reset[:-2] if reset.endswith('ly') else reset}".replace(
-                            "  ", " "
-                        ).strip()
-                    )
-            if tracker_lines:
-                bits.append("New tracking: " + "; ".join(tracker_lines) + ".")
-        bits.append(
-            "Say the word and I'll keep refining it — or \"explain the "
-            "plan\" any time you want the full breakdown."
-        )
+            tracker_lines = [_format_tracker_line(t) for t in trackers[:4]]
+            bits.append("New tracking: " + "; ".join(tracker_lines) + ".")
         return "\n\n".join(b for b in bits if b), int(target["id"])
 
     async def _generate_plan(
         self, *, title: str, description: str,
         prior_answers: list[dict[str, str]] | None = None,
+        prior_lookups: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """One 14b call. Returns plan_text + tracker_spec + milestones
         — OR a clarification question if the goal description is too
-        thin to commit a plan responsibly.
+        thin — OR a list of data-lookup requests when the user said
+        the system can fetch values for them.
 
         prior_answers carries the rolling Q&A so far in this draft,
         e.g. [{"q": "Over what timeframe?", "a": "12 weeks"}]. After
         a couple of rounds the planner should commit even with gaps;
-        we cap it via the caller's draft-rounds counter."""
+        we cap it via the caller's draft-rounds counter.
+
+        prior_lookups carries data we already fetched in earlier
+        rounds, e.g. [{"metric": "body_fat_pct", "value": 24.3,
+        "unit": "%", "as_of": "2026-05-30"}]. The planner sees these
+        as facts so it doesn't re-request them."""
         prior_block = ""
         if prior_answers:
             lines = []
@@ -621,22 +664,55 @@ class GoalsChatHandler:
                     "\n\nPrior follow-up Q&A in this draft (already "
                     "answered — don't ask these again):\n" + "\n".join(lines)
                 )
+        if prior_lookups:
+            lookup_lines = []
+            for lk in prior_lookups:
+                if not isinstance(lk, dict):
+                    continue
+                metric = lk.get("metric")
+                value = lk.get("value")
+                unit = lk.get("unit") or ""
+                as_of = lk.get("as_of") or ""
+                lookup_lines.append(
+                    f"- {metric}: {value} {unit}".strip()
+                    + (f" (as of {as_of})" if as_of else "")
+                )
+            if lookup_lines:
+                prior_block += (
+                    "\n\nLooked-up values you previously requested "
+                    "(use these as facts, don't re-request):\n"
+                    + "\n".join(lookup_lines)
+                )
         system = (
             "You are a calm, practical health coach. The user told you a "
-            "goal in plain English. You can either commit a plan now OR "
-            "ask ONE short follow-up question if the description is too "
-            "thin to commit responsibly.\n\n"
+            "goal in plain English. You have three options each turn:\n"
+            "  (a) commit a plan now (ready=true)\n"
+            "  (b) ask ONE short follow-up question (ready=false +\n"
+            "      clarification_question)\n"
+            "  (c) request data the system can look up for you\n"
+            "      (ready=false + needs_data) when the user implied or\n"
+            "      stated that a value can be fetched (e.g. 'check my\n"
+            "      latest weight', 'pull body fat from HealthKit',\n"
+            "      'use the sleep data from last week').\n\n"
             "Output a JSON object with these keys:\n"
-            "- ready: true|false. true means commit. false means ask "
-            "ONE follow-up.\n"
-            "- clarification_question: required when ready=false. ONE "
-            "specific question (max ~20 words). Examples of good "
-            "questions: 'What's your current max pushups in a single "
-            "set?', 'Over what timeframe?', 'Any days you definitely "
-            "can't train?', 'Have you tried losing weight before, and "
-            "what worked or didn't?'.\n"
+            "- ready: true|false.\n"
+            "- clarification_question: required ONLY when ready=false AND "
+            "needs_data is empty/missing. ONE specific question, ~20 "
+            "words max. Good examples: 'What's your current max pushups "
+            "in a single set?', 'Over what timeframe?'.\n"
+            "- needs_data: optional array. Each entry is "
+            "{\"kind\": \"latest_health_metric\", \"metric\": <name>, "
+            "\"note\": <why you want it>}. Allowed metric names match "
+            "what's in the health_metrics table: weight, body_fat_pct, "
+            "heart_rate, resting_heart_rate, hrv, steps, sleep_asleep, "
+            "active_energy, workout. Use ONLY when the user signaled "
+            "the system can look it up. Never fabricate a value because "
+            "you can't fetch it — request the lookup instead.\n"
             "- plan_text: required when ready=true. 2 to 4 sentences. "
-            "Friendly and concrete. Avoid fitness clichés.\n"
+            "Friendly and concrete. Explain the cadence/rate you chose "
+            "and why it's safe and realistic for THIS goal's category "
+            "(e.g. 0.5-1 kg/week for weight loss; 7-9 hours nightly for "
+            "sleep; gradual increments for strength). Avoid clichés.\n"
             "- tracker_spec: required when ready=true. Object with:\n"
             "    - trackers: JSON array. Each entry is "
             "{id, label, kind, reset, target, unit, direction}.\n"
@@ -646,7 +722,7 @@ class GoalsChatHandler:
             "or 'gauge' (most recent reported value).\n"
             "      reset: 'daily' | 'weekly' | 'monthly' | 'never'.\n"
             "      target: number to reach (or stay under for direction=down).\n"
-            "      unit: short string like 'set', 'rep', 'kg', 'min'.\n"
+            "      unit: short string like 'set', 'rep', 'kg', 'min', '%'.\n"
             "      direction: 'up' (more is better) | 'down' (less is better).\n"
             "    - completion_rule: optional. {kind: 'all_targets_met', "
             "trackers: [tracker_id, ...]} declares when today counts as "
@@ -656,33 +732,48 @@ class GoalsChatHandler:
             "max_per_day: 3, min_gap_minutes: 90}. Use kind: 'none' to opt "
             "out of nags. Pick max_per_day + min_gap_minutes to match the "
             "goal's pace: a daily-water-intake goal might want 5 per day "
-            "with 90-min gaps; a once-a-week run goal might want 1 per "
-            "day with 240-min gaps. Defaults are 3 and 90 if omitted.\n"
+            "with 90-min gaps; a once-a-week weigh-in goal might want 1 "
+            "per day with 240-min gaps. Defaults are 3 and 90 if omitted.\n"
             "    - log_hints: optional array helping the log classifier. "
             "Each entry: {if_mentions: [keywords], increment: {tracker_id: number}}.\n"
             "- milestones: optional when ready=true. 1 to 3 entries, each "
             "{due_date: YYYY-MM-DD, target_description: str}.\n\n"
-            "When to ask vs commit:\n"
-            "- Ask when the goal needs a numeric anchor you don't have "
-            "('lose weight' without a target, 'get stronger' without a "
-            "metric, 'sleep better' without a baseline).\n"
-            "- Ask when timeframe is ambiguous and matters for milestones.\n"
-            "- Commit when the description is concrete enough to write "
-            "sensible defaults (any timeframe, any cadence, any target "
-            "you can infer reasonably). It's fine to commit with "
-            "reasonable assumptions and let the user refine later.\n"
+            "Tracker design rules:\n"
+            "- A GAUGE is already the check. Don't add a sibling counter "
+            "to track 'did you weigh in' — the gauge entry IS the weigh-in.\n"
+            "- Counters accumulate per period (5 sets per day). Gauges "
+            "are sampled at any time and you compare the latest value to "
+            "the target.\n"
+            "- Don't create two trackers measuring the same thing.\n\n"
+            "Self-consistency (CRITICAL):\n"
+            "- Before returning, cross-check that your tracker targets, "
+            "milestone numbers, and plan_text all agree numerically and "
+            "on the same timeline. Example failure: tracker says ≤85 kg, "
+            "milestone says 'lose 10 kg', plan_text says '4 weeks' — "
+            "these contradict. Pick one set of numbers and use them "
+            "consistently.\n"
+            "- If you can't reconcile because the user gave conflicting "
+            "info, ask a clarification_question instead of committing.\n\n"
+            "When to ask vs lookup vs commit:\n"
+            "- LOOKUP (needs_data) when the user said 'check X' / 'pull "
+            "X' / 'use the latest X' and X is a metric we already track.\n"
+            "- ASK (clarification_question) when the goal needs a numeric "
+            "anchor you can't get from data and the user didn't supply "
+            "it; or when timeframe is ambiguous.\n"
+            "- COMMIT when the description (plus any prior answers or "
+            "looked-up values) is enough to write safe defaults.\n"
             "- Never ask more than one question in a single turn.\n"
-            "- After 2 rounds of Q&A, commit no matter what — don't "
-            "burn the user's patience.\n\n"
+            "- After 2 rounds of clarification, commit no matter what — "
+            "don't burn the user's patience.\n\n"
             "Pick trackers that match HOW the user described the goal. "
-            "For 'pushups after every prayer', model both sessions_today "
-            "(counter, daily, target 5) and pushups_today (counter, daily, "
-            "target should match an early-week starting volume the user "
-            "can grow from). For 'lose 5 kg', use a weight gauge plus a "
-            "weekly weigh-in counter. For 'sleep 7 hours nightly', a "
-            "sleep_minutes gauge reset daily with target 420. "
-            "Always include log_hints with the words you expect the user "
-            "to use so the log classifier can map their messages to deltas.\n\n"
+            "For 'pushups after every prayer', model sessions_today "
+            "(counter, daily, target 5) and pushups_today (counter, "
+            "daily, target = an early-week starting volume the user can "
+            "grow from). For 'lose 5 kg', use a single weight gauge "
+            "(reset=weekly, direction=down). For 'sleep 7 hours nightly', "
+            "a sleep_minutes gauge reset daily with target 420. Always "
+            "include log_hints so the log classifier can map user "
+            "messages to deltas.\n\n"
             f"{_now_context_line()}\n"
             "Return ONLY the JSON object."
         )
@@ -712,13 +803,101 @@ class GoalsChatHandler:
         if not isinstance(milestones, list):
             milestones = []
         question = str(parsed.get("clarification_question") or "").strip()
+        # Parse + sanitize needs_data. Only allowed when ready=false;
+        # the resolver only handles the kinds we explicitly support so
+        # the planner can't ask us to fetch arbitrary things.
+        needs_data: list[dict[str, Any]] = []
+        raw_needs = parsed.get("needs_data") or []
+        if not ready and isinstance(raw_needs, list):
+            for item in raw_needs:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(item.get("kind") or "").strip()
+                if kind not in {"latest_health_metric"}:
+                    continue
+                metric = str(item.get("metric") or "").strip()
+                if not metric:
+                    continue
+                needs_data.append({
+                    "kind": kind, "metric": metric,
+                    "note": str(item.get("note") or "")[:200],
+                })
         return {
             "ready": ready,
             "clarification_question": question if not ready else None,
+            "needs_data": needs_data if not ready else [],
             "plan_text": plan_text,
             "tracker_spec": tracker_spec,
             "milestones": milestones,
         }
+
+    async def _resolve_needs_data(
+        self, *, needs_data: list[dict[str, Any]], member_id: int,
+    ) -> list[dict[str, Any]]:
+        """Generic resolver for planner data-lookup requests.
+
+        Each entry's `kind` chooses the handler; the handler returns
+        a {metric, value, unit, as_of} dict that gets fed back into
+        the planner on the next round. New kinds slot in here without
+        touching the planner prompt or the draft flow.
+
+        Currently supports kind='latest_health_metric'. Failures
+        (no data, bad request) return a row with value=None so the
+        planner sees we tried and can either ask the user directly
+        or proceed without it."""
+        if not needs_data:
+            return []
+        resolved: list[dict[str, Any]] = []
+        for req in needs_data:
+            if not isinstance(req, dict):
+                continue
+            kind = str(req.get("kind") or "")
+            if kind == "latest_health_metric":
+                row = await self._lookup_latest_health_metric(
+                    metric=str(req.get("metric") or ""),
+                    member_id=member_id,
+                )
+                resolved.append(row)
+            # Add other kinds here as they're needed — e.g.
+            # latest_sleep_summary, recent_workouts_count, etc.
+        return resolved
+
+    async def _lookup_latest_health_metric(
+        self, *, metric: str, member_id: int,
+    ) -> dict[str, Any]:
+        """Most-recent value for one metric on the member's
+        health_metrics rows. Returns {metric, value, unit, as_of} —
+        value is None when no data."""
+        out = {"metric": metric, "value": None, "unit": None, "as_of": None}
+        if not metric or self.goals.pool is None:
+            return out
+        try:
+            async with self.goals.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT value, unit, started_at
+                    FROM health_metrics
+                    WHERE metric = $1
+                      AND (member_id = $2 OR member_id IS NULL)
+                    ORDER BY started_at DESC
+                    LIMIT 1
+                    """,
+                    metric, int(member_id),
+                )
+        except Exception as exc:
+            logger.warning("planner_lookup_failed",
+                           metric=metric, error=str(exc))
+            return out
+        if row is None:
+            return out
+        out["value"] = float(row["value"]) if row["value"] is not None else None
+        out["unit"] = row["unit"]
+        ts = row.get("started_at")
+        if isinstance(ts, datetime):
+            out["as_of"] = ts.astimezone(ZoneInfo("Asia/Dubai")).strftime(
+                "%Y-%m-%d"
+            )
+        return out
 
     # ── Read intents ─────────────────────────────────────────────
 
@@ -812,18 +991,7 @@ class GoalsChatHandler:
         if spec["trackers"]:
             tracker_lines = ["What I'm tracking:"]
             for t in spec["trackers"]:
-                target_v = t.get("target")
-                unit = t.get("unit") or ""
-                label = t.get("label") or t.get("id") or "tracker"
-                reset = t.get("reset") or "daily"
-                direction_word = "≤" if t.get("direction") == "down" else "≥"
-                if target_v is not None:
-                    tracker_lines.append(
-                        f"- {label}: {direction_word} {goal_engine._format_value(float(target_v))} "
-                        f"{unit} per {reset}".replace("  ", " ").strip()
-                    )
-                else:
-                    tracker_lines.append(f"- {label}")
+                tracker_lines.append("- " + _format_tracker_line(t))
             bits.append("\n".join(tracker_lines))
             # Also show current state if we have any logs
             log_rows = await self.goals.recent_log(int(target["id"]), limit=400)
@@ -839,10 +1007,6 @@ class GoalsChatHandler:
                     f"- {due_str}: {ms.get('target_description', '')}"
                 )
             bits.append("\n".join(ms_lines))
-        bits.append(
-            "If the cadence doesn't fit, just say so — \"make it 2 days a "
-            "week\" or \"shift to Tue/Thu/Sat\" — and I'll rework it."
-        )
         return "\n\n".join(b for b in bits if b), int(target["id"])
 
     # ── Workout actions ──────────────────────────────────────────
@@ -1527,6 +1691,51 @@ def _humanize_list(items: list[str]) -> str:
     if len(items) == 2:
         return f"{items[0]} and {items[1]}"
     return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+_RESET_PER_PERIOD = {
+    "daily": "per day",
+    "weekly": "per week",
+    "monthly": "per month",
+    "never": "total",
+}
+_RESET_CHECK_CADENCE = {
+    "daily": "checked daily",
+    "weekly": "checked weekly",
+    "monthly": "checked monthly",
+    "never": "not periodic",
+}
+
+
+def _format_tracker_line(tracker: dict[str, Any]) -> str:
+    """Render one tracker for a user-facing message.
+
+    Counters say 'N <unit> per <period>' because they accumulate.
+    Gauges say '<dir> <target> <unit> (checked <period>)' because the
+    value doesn't accumulate — it's sampled and compared to a target.
+    Falls back to a bare label when no target is set."""
+    from . import goal_engine
+
+    label = str(tracker.get("label") or tracker.get("id") or "tracker")
+    unit = str(tracker.get("unit") or "").strip()
+    reset = str(tracker.get("reset") or "daily").lower()
+    kind = str(tracker.get("kind") or "counter").lower()
+    direction = str(tracker.get("direction") or "up").lower()
+    target = tracker.get("target")
+    if target is None:
+        return label
+    target_str = goal_engine._format_value(float(target))
+    if kind == "gauge":
+        arrow = "≤" if direction == "down" else "≥"
+        cadence = _RESET_CHECK_CADENCE.get(reset, f"checked {reset}")
+        return f"{label}: {arrow} {target_str} {unit} ({cadence})".replace(
+            "  ", " "
+        ).strip()
+    # counter
+    period = _RESET_PER_PERIOD.get(reset, f"per {reset}")
+    return f"{label}: {target_str} {unit} {period}".replace(
+        "  ", " "
+    ).strip()
 
 
 def _humanize_log_delta(
