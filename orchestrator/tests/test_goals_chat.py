@@ -287,10 +287,59 @@ async def test_log_workout_classifies_text_to_tracker_deltas() -> None:
 
 
 @pytest.mark.asyncio
-async def test_log_workout_when_goal_has_no_trackers() -> None:
-    llm = _llm_returning({"intent": "log_workout"})
+async def test_log_workout_autoheals_spec_when_missing_then_logs() -> None:
+    """The original bug: a goal created under the old engine had no
+    tracker_spec. User says "did 12 pushups" and gets a dead-end
+    "tell me how to measure it" reply. Fix: synthesize the spec
+    on the fly via the planner, persist it, then proceed with logging."""
+    classify = {"intent": "log_workout"}
+    generated_plan = {
+        "plan_text": "Daily pushups after each prayer.",
+        "tracker_spec": {
+            "trackers": [
+                {"id": "sessions_today", "label": "Sets",
+                 "kind": "counter", "reset": "daily", "target": 5,
+                 "unit": "set", "direction": "up"},
+            ],
+        },
+        "milestones": [],
+    }
+    log_deltas = {"sessions_today": 1}
+    llm = _llm_returning(classify, generated_plan, log_deltas)
     goals = _fake_goals_store(active=[
-        {"id": 1, "member_id": 2, "title": "Old goal", "tracker_spec": None},
+        {"id": 4, "member_id": 2, "title": "Max Pushups After Prayer Daily",
+         "description": "I want to do as many pushups as I can after every prayer daily.",
+         "tracker_spec": None},
+    ])
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("did 12 pushups after dhuhr", member=MEMBER)
+    assert r.handled is True
+    # Spec was auto-generated and persisted before the log
+    goals.update_plan.assert_awaited_once()
+    persisted_spec = goals.update_plan.await_args.kwargs["tracker_spec"]
+    assert persisted_spec["trackers"][0]["id"] == "sessions_today"
+    # Log went through against the freshly-installed spec
+    goals.record_log_event.assert_awaited_once()
+    assert goals.record_log_event.await_args.kwargs["deltas"] == {
+        "sessions_today": 1.0
+    }
+    assert "Logged" in r.text
+
+
+@pytest.mark.asyncio
+async def test_log_workout_when_autoheal_also_fails() -> None:
+    """If the planner LLM is unreachable, the autoheal can't write a
+    spec — fall through to the helpful 'tell me how to measure it'
+    message rather than crashing."""
+    classify = {"intent": "log_workout"}
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=[
+        {"message": {"content": json.dumps(classify)}},
+        RuntimeError("planner down"),
+    ])
+    goals = _fake_goals_store(active=[
+        {"id": 1, "member_id": 2, "title": "Old goal",
+         "description": "an old goal", "tracker_spec": None},
     ])
     h = _build(llm=llm, goals_store=goals)
     r = await h.try_handle("did pushups", member=MEMBER)

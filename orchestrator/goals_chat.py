@@ -753,10 +753,41 @@ class GoalsChatHandler:
             target = goals[0]
         spec = goal_engine.normalize_spec(target.get("tracker_spec"))
         if not spec["trackers"]:
-            return (
-                f"\"{target['title']}\" doesn't have any trackers set up "
-                "yet. Tell me how you'd like me to measure it."
-            ), int(target["id"])
+            # Self-heal: goals created under the old engine (or where
+            # the planner LLM failed at creation) have no trackers.
+            # Generate one on the fly rather than telling the user to
+            # set it up — they're trying to log activity, not configure
+            # software.
+            try:
+                generated = await self._generate_plan(
+                    title=target["title"],
+                    description=target.get("description") or target["title"],
+                )
+            except Exception as exc:
+                logger.warning("goals_chat_autoheal_planner_failed",
+                               goal_id=target["id"], error=str(exc))
+                generated = None
+            new_spec = (generated or {}).get("tracker_spec")
+            if new_spec and isinstance(new_spec, dict):
+                try:
+                    await self.goals.update_plan(
+                        int(target["id"]),
+                        plan_text=(generated.get("plan_text")
+                                    or target.get("plan_text") or ""),
+                        tracker_spec=new_spec,
+                    )
+                    # Re-fetch with the new spec inline so the rest of
+                    # this call works against it.
+                    target = {**target, "tracker_spec": new_spec}
+                    spec = goal_engine.normalize_spec(new_spec)
+                except Exception as exc:
+                    logger.warning("goals_chat_autoheal_persist_failed",
+                                   goal_id=target["id"], error=str(exc))
+            if not spec["trackers"]:
+                return (
+                    f"\"{target['title']}\" doesn't have any trackers set up "
+                    "yet. Tell me how you'd like me to measure it."
+                ), int(target["id"])
         raw_text = (args.get("note") or text or "").strip() or "logged via chat"
         try:
             deltas = await self._classify_log_deltas(
