@@ -233,14 +233,17 @@ class GoalsChatHandler:
             "- log_workout: user reports they just worked out. "
             "args: {\"note\": str|null}.\n"
             "- mute_goal: stop nagging me about a goal for some time. "
-            "args: {\"duration_hours\": int, \"which\": str|null}.\n"
+            "args: {\"phrase\": str, \"which\": str|null}. Pass the user's "
+            "raw time phrase verbatim ('until Monday', 'for 3 days', "
+            "'this weekend', 'until I get back from travel'); a separate "
+            "resolver call turns it into a concrete timestamp.\n"
             "- unmute_goal / pause_goal / resume_goal / abandon_goal: "
             "state change on a goal. args: {\"which\": str|null}.\n"
             "- set_nag_windows: user changes when they can be nagged. "
-            "args: {\"weekday_start_hour\": int|null, "
-            "\"weekday_end_hour\": int|null, "
-            "\"weekend_start_hour\": int|null, "
-            "\"weekend_end_hour\": int|null}.\n"
+            "args: {\"phrase\": str}. Pass the user's raw description "
+            "('weekdays only', 'no nags before 6pm', '9-5 quiet', "
+            "'Friday afternoons only'); a separate resolver turns it "
+            "into concrete weekday/weekend windows.\n"
             "- complete_chore: user reports finishing a chore. "
             "args: {\"name\": str}.\n"
             "- list_chores: 'what chores are overdue / due today'.\n"
@@ -269,7 +272,13 @@ class GoalsChatHandler:
             "{\"intent\": \"skip_workout\", \"reason\": \"sick\"}\n\n"
             "USER: 'dont nag me before 6pm on weekdays'\n"
             "{\"intent\": \"set_nag_windows\", "
-            "\"weekday_start_hour\": 18}\n\n"
+            "\"phrase\": \"don't nag me before 6pm on weekdays\"}\n\n"
+            "USER: 'mute pushups until Monday'\n"
+            "{\"intent\": \"mute_goal\", "
+            "\"phrase\": \"until Monday\", \"which\": \"pushups\"}\n\n"
+            "USER: 'mute this for the rest of the week'\n"
+            "{\"intent\": \"mute_goal\", "
+            "\"phrase\": \"for the rest of the week\"}\n\n"
             "USER: 'just vacuumed the living room'\n"
             "{\"intent\": \"complete_chore\", \"name\": \"vacuum\"}\n\n"
             "USER: 'whats the weather'\n"
@@ -934,42 +943,116 @@ class GoalsChatHandler:
                 "we can pick a different one whenever."
             ), gid
         if intent == "mute_goal":
-            hours = args.get("duration_hours")
-            try:
-                hours_int = int(hours)
-            except (TypeError, ValueError):
-                hours_int = 24
-            until = datetime.now(UTC) + timedelta(hours=hours_int)
+            phrase = str(args.get("phrase") or "").strip()
+            # Backward-compat: older classifier responses used duration_hours.
+            duration_hours = args.get("duration_hours")
+            until: datetime | None = None
+            if phrase:
+                try:
+                    until = await self._resolve_mute_phrase(
+                        phrase=phrase, goal_title=title,
+                    )
+                except Exception as exc:
+                    logger.warning("goals_chat_mute_resolve_failed",
+                                   error=str(exc))
+            if until is None and duration_hours is not None:
+                try:
+                    until = datetime.now(UTC) + timedelta(
+                        hours=int(duration_hours)
+                    )
+                except (TypeError, ValueError):
+                    until = None
+            if until is None:
+                # Safe fallback: 1 day
+                until = datetime.now(UTC) + timedelta(hours=24)
             await self.goals.set_quiet_until(gid, until=until)
-            return (
-                f"Muted \"{title}\" for {hours_int} hour" +
-                ("" if hours_int == 1 else "s") + "."
-            ), gid
+            local = until.astimezone(ZoneInfo("Asia/Dubai"))
+            today_local = datetime.now(ZoneInfo("Asia/Dubai")).date()
+            if local.date() == today_local:
+                when_str = f"until {local.strftime('%H:%M')} today"
+            elif (local.date() - today_local).days == 1:
+                when_str = f"until {local.strftime('%H:%M')} tomorrow"
+            elif (local.date() - today_local).days < 7:
+                when_str = f"until {local.strftime('%A %H:%M')}"
+            else:
+                when_str = f"until {local.strftime('%a %d %b %H:%M')}"
+            return f"Muted \"{title}\" {when_str}.", gid
         if intent == "unmute_goal":
             await self.goals.set_quiet_until(gid, until=None)
             return f"Unmuted \"{title}\".", gid
         return "Done.", gid
+
+    async def _resolve_mute_phrase(
+        self, *, phrase: str, goal_title: str,
+    ) -> datetime | None:
+        """LLM-resolve a free-text mute window into a quiet_until
+        timestamp. Same pattern as the log-event ts_iso resolver:
+        give the model the current local time, ask for an ISO
+        timestamp, validate the result."""
+        system = (
+            "You convert a user's free-text request to mute notifications "
+            "for a health goal into a concrete end timestamp. Examples:\n"
+            "- 'until Monday' → next Monday 00:00 local\n"
+            "- 'for the rest of the week' → next Saturday 00:00 local "
+            "(week ends Friday in UAE — Sat is the next week's start)\n"
+            "- 'for 3 days' → now + 3 days\n"
+            "- 'this weekend' → next Sunday 00:00 local (weekend ends Sat)\n"
+            "- 'until I get back from travel' → unresolvable, return null\n\n"
+            "Return ONLY a JSON object: "
+            "{\"until_iso\": ISO-8601 with offset, or null}.\n\n"
+            f"{_now_context_line()}\n"
+            f"Goal being muted: {goal_title}"
+        )
+        try:
+            resp = await self.llm.chat(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": phrase},
+                ],
+                model=self.classifier_model,
+                temperature=0.0,
+                response_format="json",
+                think=False,
+            )
+        except Exception as exc:
+            logger.warning("mute_resolve_llm_failed", error=str(exc))
+            return None
+        parsed = _parse_json_blob(_extract_chat_content(resp)) or {}
+        return _parse_until_iso(parsed.get("until_iso"))
 
     # ── Nag windows ──────────────────────────────────────────────
 
     async def _handle_set_nag_windows(
         self, args: dict[str, Any], member_id: int,
     ) -> str:
+        # Prefer the new natural-language phrase. Fall back to the
+        # older explicit-int args if the classifier returned them
+        # (e.g. an older prompt build is in the rolling release).
+        phrase = str(args.get("phrase") or "").strip()
         kwargs: dict[str, int] = {}
-        for key in ("weekday_start_hour", "weekday_end_hour",
-                    "weekend_start_hour", "weekend_end_hour"):
-            v = args.get(key)
-            if v is None:
-                continue
+        if phrase:
             try:
-                kwargs[key] = int(v)
-            except (TypeError, ValueError):
-                continue
+                kwargs = await self._resolve_nag_window_phrase(
+                    phrase=phrase, member_id=member_id,
+                )
+            except Exception as exc:
+                logger.warning("nag_window_resolve_failed", error=str(exc))
+                kwargs = {}
+        if not kwargs:
+            for key in ("weekday_start_hour", "weekday_end_hour",
+                        "weekend_start_hour", "weekend_end_hour"):
+                v = args.get(key)
+                if v is None:
+                    continue
+                try:
+                    kwargs[key] = int(v)
+                except (TypeError, ValueError):
+                    continue
         if not kwargs:
             return (
                 "I picked up a notification-window change but couldn't tell "
-                "what to update. Try something like 'don't nag me before "
-                "6pm on weekdays'."
+                "what to update. Try something like \"don't nag me before "
+                "6pm on weekdays\" or \"weekends only\"."
             )
         try:
             updated = await self.nag.set(member_id, **kwargs)
@@ -982,6 +1065,71 @@ class GoalsChatHandler:
             f"{updated['weekend_start_hour']:02d}:00 to "
             f"{updated['weekend_end_hour']:02d}:00."
         )
+
+    async def _resolve_nag_window_phrase(
+        self, *, phrase: str, member_id: int,
+    ) -> dict[str, int]:
+        """LLM-resolve free-text quiet-hours requests into the
+        member_nag_windows schema (weekday/weekend start+end hours
+        as ints 0-24).
+
+        Only includes keys the user explicitly changed — partial
+        updates merge with existing prefs in the store layer."""
+        current = await self.nag.get(member_id)
+        system = (
+            "You convert a user's free-text notification-window request "
+            "into concrete hour boundaries. Return ONLY a JSON object "
+            "with any subset of these keys (omit ones the user didn't "
+            "change):\n"
+            "  - weekday_start_hour: int 0-23\n"
+            "  - weekday_end_hour: int 1-24 (must be > start)\n"
+            "  - weekend_start_hour: int 0-23\n"
+            "  - weekend_end_hour: int 1-24 (must be > start)\n\n"
+            "Interpret 'quiet' / 'don't nag' as the OPPOSITE of the "
+            "allowed window. e.g. 'no nags before 6pm weekdays' means "
+            "weekday_start_hour=18. 'weekends only' means set BOTH "
+            "weekday_start_hour and weekday_end_hour to the same value "
+            "(no weekday window). 'Friday afternoons only' isn't "
+            "supported in this schema — omit conflicting keys and we'll "
+            "ask the user to rephrase.\n\n"
+            "In the UAE the week runs Sat-Fri, but the 'weekday' fields "
+            "here cover Mon-Fri and 'weekend' covers Sat-Sun (python "
+            "weekday()).\n\n"
+            f"Current windows: weekdays "
+            f"{current.get('weekday_start_hour', 14):02d}:00-"
+            f"{current.get('weekday_end_hour', 21):02d}:00, weekends "
+            f"{current.get('weekend_start_hour', 10):02d}:00-"
+            f"{current.get('weekend_end_hour', 21):02d}:00.\n"
+            f"{_now_context_line()}"
+        )
+        try:
+            resp = await self.llm.chat(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": phrase},
+                ],
+                model=self.classifier_model,
+                temperature=0.0,
+                response_format="json",
+                think=False,
+            )
+        except Exception as exc:
+            logger.warning("nag_window_llm_failed", error=str(exc))
+            return {}
+        parsed = _parse_json_blob(_extract_chat_content(resp)) or {}
+        out: dict[str, int] = {}
+        for key in ("weekday_start_hour", "weekday_end_hour",
+                    "weekend_start_hour", "weekend_end_hour"):
+            v = parsed.get(key)
+            if v is None:
+                continue
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= iv <= 24:
+                out[key] = iv
+        return out
 
     # ── Chores ───────────────────────────────────────────────────
 
@@ -1248,6 +1396,36 @@ def _parse_ts_hint(raw: Any) -> datetime | None:
         return None
     # Reject anything older than 14 days
     if ts_utc < now - timedelta(days=14):
+        return None
+    return ts
+
+
+def _parse_until_iso(raw: Any) -> datetime | None:
+    """Like _parse_ts_hint but for FUTURE timestamps (mute / snooze
+    end times). Accepts 'now → +365 days' to give the LLM room to
+    interpret 'until next year's holidays' style requests without
+    being open-ended forever. Past timestamps are rejected (a mute
+    that ended already would be a no-op)."""
+    if not raw or not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        ts = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=ZoneInfo("Asia/Dubai"))
+    now = datetime.now(UTC)
+    ts_utc = ts.astimezone(UTC)
+    # Reject anything in the past (we won't mute retroactively)
+    if ts_utc < now - timedelta(minutes=5):
+        return None
+    # Cap at +365 days; LLM hallucinations of 'until 2030' get clamped
+    if ts_utc > now + timedelta(days=365):
         return None
     return ts
 

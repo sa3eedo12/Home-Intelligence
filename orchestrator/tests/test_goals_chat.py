@@ -1070,3 +1070,147 @@ def test_parse_ts_hint_safe_on_garbage() -> None:
     assert _parse_ts_hint("") is None
     assert _parse_ts_hint("not a date") is None
     assert _parse_ts_hint(42) is None
+
+
+# ── Natural-language mute / snooze (G) ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_mute_goal_resolves_until_phrase_via_llm() -> None:
+    """User says 'mute pushups until Monday'. LLM resolves to an ISO
+    timestamp; store gets it as quiet_until."""
+    classify = {"intent": "mute_goal", "phrase": "until Monday",
+                "which": "pushups"}
+    # 5 days from now is a Monday-ish target
+    until_iso = (datetime.now(UTC) + timedelta(days=5)).isoformat()
+    resolver = {"until_iso": until_iso}
+    llm = _llm_returning(classify, resolver)
+    goals = _fake_goals_store(active=[
+        {"id": 1, "member_id": 2, "title": "Pushups"},
+    ])
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("mute pushups until monday", member=MEMBER)
+    assert r.handled is True
+    goals.set_quiet_until.assert_awaited_once()
+    call = goals.set_quiet_until.await_args
+    assert call.args == (1,)
+    # The resolved tz-aware datetime was passed through
+    assert isinstance(call.kwargs["until"], datetime)
+    assert call.kwargs["until"].tzinfo is not None
+    # Reply mentions a future date
+    assert "Muted" in r.text
+    assert "Pushups" in r.text
+
+
+@pytest.mark.asyncio
+async def test_mute_goal_falls_back_to_24h_when_resolver_returns_null() -> None:
+    """If the LLM can't resolve the phrase ('until I get back from travel'),
+    fall back to a safe 24-hour mute."""
+    classify = {"intent": "mute_goal",
+                "phrase": "until I get back from travel"}
+    resolver = {"until_iso": None}
+    llm = _llm_returning(classify, resolver)
+    goals = _fake_goals_store(active=[
+        {"id": 1, "member_id": 2, "title": "Pushups"},
+    ])
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("mute until I'm back", member=MEMBER)
+    assert r.handled is True
+    goals.set_quiet_until.assert_awaited_once()
+    until = goals.set_quiet_until.await_args.kwargs["until"]
+    # Default fallback is ~24h from now
+    delta = (until - datetime.now(UTC)).total_seconds() / 3600
+    assert 23 < delta < 25
+
+
+@pytest.mark.asyncio
+async def test_mute_goal_backward_compat_with_duration_hours() -> None:
+    """Older classifier responses returned duration_hours instead of
+    phrase. Path still works so a stale model deployment doesn't break."""
+    classify = {"intent": "mute_goal", "duration_hours": 48}
+    llm = _llm_returning(classify)  # only one response — no resolver call
+    goals = _fake_goals_store(active=[
+        {"id": 1, "member_id": 2, "title": "Pushups"},
+    ])
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("mute for 2 days", member=MEMBER)
+    assert r.handled is True
+    goals.set_quiet_until.assert_awaited_once()
+    until = goals.set_quiet_until.await_args.kwargs["until"]
+    delta = (until - datetime.now(UTC)).total_seconds() / 3600
+    assert 47 < delta < 49
+
+
+@pytest.mark.asyncio
+async def test_set_nag_windows_resolves_phrase_via_llm() -> None:
+    classify = {"intent": "set_nag_windows",
+                "phrase": "don't nag me before 6pm on weekdays"}
+    resolver = {"weekday_start_hour": 18}
+    llm = _llm_returning(classify, resolver)
+    nag = _fake_nag_store()
+    h = _build(llm=llm, nag_store=nag)
+    r = await h.try_handle(
+        "don't nag me before 6pm on weekdays", member=MEMBER,
+    )
+    assert r.handled is True
+    nag.set.assert_awaited_once()
+    # The resolver's int landed in the store call
+    assert nag.set.await_args.kwargs == {"weekday_start_hour": 18}
+
+
+@pytest.mark.asyncio
+async def test_set_nag_windows_falls_back_to_legacy_int_args() -> None:
+    """If the classifier hands back the older explicit-int shape
+    instead of a phrase, the handler still applies them."""
+    classify = {"intent": "set_nag_windows",
+                "weekday_start_hour": 18, "weekday_end_hour": 22}
+    llm = _llm_returning(classify)  # only one response, no resolver call
+    nag = _fake_nag_store()
+    h = _build(llm=llm, nag_store=nag)
+    r = await h.try_handle("change weekday window", member=MEMBER)
+    assert r.handled is True
+    nag.set.assert_awaited_once()
+    assert nag.set.await_args.kwargs == {
+        "weekday_start_hour": 18, "weekday_end_hour": 22,
+    }
+
+
+@pytest.mark.asyncio
+async def test_set_nag_windows_apologizes_when_unresolvable() -> None:
+    classify = {"intent": "set_nag_windows", "phrase": "be smarter"}
+    resolver = {}  # LLM returned no usable hour fields
+    llm = _llm_returning(classify, resolver)
+    nag = _fake_nag_store()
+    h = _build(llm=llm, nag_store=nag)
+    r = await h.try_handle("be smarter about it", member=MEMBER)
+    assert r.handled is True
+    assert "couldn't tell" in r.text
+    nag.set.assert_not_called()
+
+
+# ── _parse_until_iso guardrails ─────────────────────────────────
+
+
+def test_parse_until_iso_accepts_near_future() -> None:
+    from orchestrator.goals_chat import _parse_until_iso
+    future = (datetime.now(UTC) + timedelta(days=3)).isoformat()
+    assert _parse_until_iso(future) is not None
+
+
+def test_parse_until_iso_rejects_past() -> None:
+    from orchestrator.goals_chat import _parse_until_iso
+    past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    assert _parse_until_iso(past) is None
+
+
+def test_parse_until_iso_clamps_far_future() -> None:
+    from orchestrator.goals_chat import _parse_until_iso
+    very_far = (datetime.now(UTC) + timedelta(days=400)).isoformat()
+    assert _parse_until_iso(very_far) is None
+
+
+def test_parse_until_iso_handles_garbage() -> None:
+    from orchestrator.goals_chat import _parse_until_iso
+    assert _parse_until_iso(None) is None
+    assert _parse_until_iso("") is None
+    assert _parse_until_iso("never") is None
