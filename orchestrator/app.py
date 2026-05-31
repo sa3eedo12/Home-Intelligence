@@ -695,6 +695,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             reasoner_model=os.environ.get("REASONER_MODEL", "qwen3:14b"),
         )
 
+    async def _run_goal_auto_log(_inputs: dict[str, Any]) -> dict[str, Any]:
+        from . import goal_auto_logger as al_mod
+
+        return await al_mod.run_once(
+            pool=pool, redis=redis,
+            store=app.state.health_goals_store,
+            llm=llm,
+            classifier_model=os.environ.get("DEFAULT_MODEL", "qwen3:8b"),
+        )
+
     async def _run_pre_bedtime_scan(_inputs: dict[str, Any]) -> dict[str, Any]:
         from .pre_bedtime import scan_pre_bedtime
 
@@ -730,6 +740,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "orchestrator.health_goals_compute": _run_health_goals_compute,
             "orchestrator.health_goals_workout_nag": _run_workout_nags,
             "orchestrator.health_goals_weekly_reflection": _run_weekly_reflection,
+            "orchestrator.goal_auto_log": _run_goal_auto_log,
         },
     )
     await scheduler.start()

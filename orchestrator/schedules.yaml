@@ -267,3 +267,12 @@ jobs:
       agent: __orchestrator__
       capability: orchestrator.health_goals_weekly_reflection
       inputs: {}
+
+  - id: goal_auto_log
+    description: "Auto-log HealthKit + appliance events against active health goals"
+    trigger: interval
+    interval: { minutes: 10 }
+    dispatch:
+      agent: __orchestrator__
+      capability: orchestrator.goal_auto_log
+      inputs: {}
