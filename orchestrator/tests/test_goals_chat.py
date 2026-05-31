@@ -45,6 +45,9 @@ def _fake_goals_store(**handlers):
         upsert_progress=AsyncMock(return_value=None),
         excuses_this_week=AsyncMock(return_value=handlers.get("excuses_used", 0)),
         excuse_today=AsyncMock(return_value=None),
+        recent_log=AsyncMock(return_value=handlers.get("log_rows", [])),
+        record_log_event=AsyncMock(return_value=handlers.get("log_id", 1)),
+        list_milestones=AsyncMock(return_value=handlers.get("milestones", [])),
     )
 
 
@@ -162,10 +165,13 @@ async def test_create_goal_writes_goal_and_returns_reply() -> None:
     }
     plan = {
         "plan_text": "Stay consistent — four short sessions across the week.",
-        "metric_links": [{"metric": "workout", "target_per_week": 4}],
-        "workout_budget": {"required_per_week": 4,
-                            "flexible_rest_per_week": 2,
-                            "days_preferred": ["sun", "tue", "thu", "sat"]},
+        "tracker_spec": {
+            "trackers": [
+                {"id": "workouts_this_week", "label": "Workouts",
+                 "kind": "counter", "reset": "weekly",
+                 "target": 4, "unit": "workout", "direction": "up"},
+            ],
+        },
         "milestones": [{"due_date": "2026-07-01",
                         "target_description": "Hit 4 weeks in a row"}],
     }
@@ -176,12 +182,14 @@ async def test_create_goal_writes_goal_and_returns_reply() -> None:
     assert r.handled is True
     assert r.intent == "create_goal"
     assert "Work out 4x a week" in r.text
-    assert "4 workouts a week" in r.text
+    # Reply mentions the tracker we'll be tracking
+    assert "Workouts" in r.text
+    assert "4 workout per week" in r.text or "4 workout" in r.text
     goals.create.assert_awaited_once()
     create_kwargs = goals.create.await_args.kwargs
     assert create_kwargs["member_id"] == 2
     assert create_kwargs["title"] == "Work out 4x a week"
-    assert create_kwargs["workout_budget"]["required_per_week"] == 4
+    assert create_kwargs["tracker_spec"]["trackers"][0]["id"] == "workouts_this_week"
     # Milestones were persisted via update_plan
     goals.update_plan.assert_awaited_once()
 
@@ -198,36 +206,43 @@ async def test_create_goal_falls_back_on_planner_failure() -> None:
     h = _build(llm=llm, goals_store=goals)
     r = await h.try_handle("D", member=MEMBER)
     assert r.handled is True
-    # Goal still created with the fallback plan
+    # Goal still created with the fallback plan (no tracker_spec on failure)
     goals.create.assert_awaited_once()
     args = goals.create.await_args.kwargs
-    assert "I will check in" in (args.get("plan_text") or "")
+    assert args.get("tracker_spec") is None
+    assert "check in" in (args.get("plan_text") or "").lower()
 
 
 # ── check_progress ──────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_check_progress_returns_humanized_line() -> None:
+async def test_check_progress_returns_engine_status_line() -> None:
+    """check_progress now runs the engine against recent_log."""
+    today = datetime.now(UTC)
+    spec = {
+        "trackers": [
+            {"id": "workouts_this_week", "label": "Workouts",
+             "kind": "counter", "reset": "weekly", "target": 4,
+             "unit": "workout", "direction": "up"},
+        ],
+    }
     llm = _llm_returning({"intent": "check_progress"})
     goals = _fake_goals_store(
         active=[{
             "id": 1, "member_id": 2, "title": "Strong",
-            "workout_budget": {"required_per_week": 4},
+            "tracker_spec": spec,
         }],
-        progress={
-            "on_track_label": "on_track",
-            "metric_snapshots": {"workouts_this_week": 3},
-            "workout_required": True,
-            "workout_completed": False,
-            "rest_day_excused": False,
-        },
+        log_rows=[
+            {"ts": today, "deltas": {"workouts_this_week": 1}},
+            {"ts": today, "deltas": {"workouts_this_week": 1}},
+            {"ts": today, "deltas": {"workouts_this_week": 1}},
+        ],
     )
     h = _build(llm=llm, goals_store=goals)
     r = await h.try_handle("how am I doing", member=MEMBER)
     assert r.handled is True
     assert "Strong" in r.text
-    assert "on track" in r.text
     assert "3 of 4" in r.text
 
 
@@ -241,25 +256,77 @@ async def test_check_progress_no_active_goals() -> None:
     assert "don't have any active goals" in r.text
 
 
-# ── log_workout ─────────────────────────────────────────────────
+# ── log_workout (generic log_event) ─────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_log_workout_marks_progress_completed_for_each_goal() -> None:
-    llm = _llm_returning({"intent": "log_workout", "note": "leg day"})
+async def test_log_workout_classifies_text_to_tracker_deltas() -> None:
+    """log_workout now writes a health_goal_log row with LLM-parsed
+    deltas, not a blanket workout_completed=True on every goal."""
+    classify = {"intent": "log_workout", "note": None}
+    log_deltas = {"sessions_today": 1, "reps_today": 30}
+    llm = _llm_returning(classify, log_deltas)
+    spec = {
+        "trackers": [
+            {"id": "sessions_today", "label": "Sets", "kind": "counter",
+             "reset": "daily", "target": 5, "unit": "set", "direction": "up"},
+            {"id": "reps_today", "label": "Reps", "kind": "counter",
+             "reset": "daily", "target": 150, "unit": "rep", "direction": "up"},
+        ],
+    }
     goals = _fake_goals_store(active=[
-        {"id": 1, "member_id": 2, "title": "G1",
-         "workout_budget": {"required_per_week": 4}},
-        {"id": 2, "member_id": 2, "title": "G2",
-         "workout_budget": {"required_per_week": 3}},
+        {"id": 1, "member_id": 2, "title": "Pushups", "tracker_spec": spec},
     ])
     h = _build(llm=llm, goals_store=goals)
-    r = await h.try_handle("just did a workout", member=MEMBER)
+    r = await h.try_handle("did 30 pushups after maghrib", member=MEMBER)
     assert r.handled is True
-    assert "2 goals" in r.text
-    assert goals.upsert_progress.await_count == 2
-    for call in goals.upsert_progress.await_args_list:
-        assert call.kwargs["workout_completed"] is True
+    goals.record_log_event.assert_awaited_once()
+    deltas = goals.record_log_event.await_args.kwargs["deltas"]
+    assert deltas == {"sessions_today": 1.0, "reps_today": 30.0}
+    assert "Logged" in r.text
+
+
+@pytest.mark.asyncio
+async def test_log_workout_when_goal_has_no_trackers() -> None:
+    llm = _llm_returning({"intent": "log_workout"})
+    goals = _fake_goals_store(active=[
+        {"id": 1, "member_id": 2, "title": "Old goal", "tracker_spec": None},
+    ])
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("did pushups", member=MEMBER)
+    assert r.handled is True
+    assert "doesn't have any trackers" in r.text
+    goals.record_log_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_log_workout_uses_keyword_fallback_when_llm_fails() -> None:
+    """If the LLM delta-classifier raises, the deterministic
+    log_hints keyword mapper takes over so the user still gets logged."""
+    classify = {"intent": "log_workout"}
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=[
+        {"message": {"content": json.dumps(classify)}},
+        RuntimeError("llm down"),
+    ])
+    spec = {
+        "trackers": [
+            {"id": "sessions_today", "label": "Sets", "kind": "counter",
+             "reset": "daily", "target": 5, "unit": "set", "direction": "up"},
+        ],
+        "log_hints": [
+            {"if_mentions": ["pushup"], "increment": {"sessions_today": 1}},
+        ],
+    }
+    goals = _fake_goals_store(active=[
+        {"id": 1, "member_id": 2, "title": "Pushups", "tracker_spec": spec},
+    ])
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("just did 20 pushups", member=MEMBER)
+    assert r.handled is True
+    goals.record_log_event.assert_awaited_once()
+    deltas = goals.record_log_event.await_args.kwargs["deltas"]
+    assert deltas == {"sessions_today": 1.0}
 
 
 # ── skip_workout ────────────────────────────────────────────────
@@ -506,9 +573,16 @@ async def test_explain_plan_renders_full_plan_card() -> None:
         "description": "Train 4x to double max pushup count",
         "plan_text": "Greasing the groove: 5 short sets across each "
                      "training day, finishing with one max-effort set.",
-        "workout_budget": {"required_per_week": 4,
-                            "flexible_rest_per_week": 1,
-                            "days_preferred": ["mon", "wed", "fri", "sun"]},
+        "tracker_spec": {
+            "trackers": [
+                {"id": "sessions_today", "label": "Pushup sets",
+                 "kind": "counter", "reset": "daily", "target": 5,
+                 "unit": "set", "direction": "up"},
+                {"id": "reps_today", "label": "Pushup reps",
+                 "kind": "counter", "reset": "daily", "target": 50,
+                 "unit": "rep", "direction": "up"},
+            ],
+        },
         "status": "active",
     }
     goals = _fake_goals_store_with_get(goal)
@@ -524,9 +598,10 @@ async def test_explain_plan_renders_full_plan_card() -> None:
     assert r.intent == "explain_plan"
     assert "Double pushups in 2 weeks" in r.text
     assert "Greasing the groove" in r.text
-    assert "4 workouts per week" in r.text
+    # tracker labels + targets render in the plan card
+    assert "Pushup sets" in r.text
+    assert "5 set" in r.text
     assert "Hit 1.5× starting max" in r.text
-    assert "1.5× starting max" in r.text
 
 
 @pytest.mark.asyncio
@@ -693,11 +768,13 @@ async def test_refine_goal_updates_existing_plan_not_creates_new() -> None:
                 "refinement": "do pushups after every prayer, daily"}
     new_plan = {
         "plan_text": "Daily after each prayer: as many as you can.",
-        "metric_links": [{"metric": "workout", "target_per_week": 7}],
-        "workout_budget": {"required_per_week": 7,
-                            "flexible_rest_per_week": 0,
-                            "days_preferred": ["mon", "tue", "wed",
-                                                "thu", "fri", "sat", "sun"]},
+        "tracker_spec": {
+            "trackers": [
+                {"id": "sessions_today", "label": "Pushup sets",
+                 "kind": "counter", "reset": "daily", "target": 5,
+                 "unit": "set", "direction": "up"},
+            ],
+        },
         "milestones": [],
     }
     llm = _llm_returning(classify, new_plan)
@@ -705,7 +782,13 @@ async def test_refine_goal_updates_existing_plan_not_creates_new() -> None:
         "id": 5, "member_id": 2, "title": "Double Pushups in 2 Weeks",
         "description": "Double pushup max in 14 days",
         "plan_text": "Old plan: 3-4x/week",
-        "workout_budget": {"required_per_week": 3},
+        "tracker_spec": {
+            "trackers": [
+                {"id": "workouts_this_week", "label": "Workouts",
+                 "kind": "counter", "reset": "weekly", "target": 3,
+                 "unit": "workout", "direction": "up"},
+            ],
+        },
         "status": "active",
     }
     goals = _fake_goals_store_with_get(goal_row)
@@ -724,7 +807,8 @@ async def test_refine_goal_updates_existing_plan_not_creates_new() -> None:
     update_call = goals.update_plan.await_args
     assert update_call.args == (5,)
     assert "Daily after each prayer" in update_call.kwargs["plan_text"]
-    assert update_call.kwargs["workout_budget"]["required_per_week"] == 7
+    # Tracker spec was rewritten to the new shape
+    assert update_call.kwargs["tracker_spec"]["trackers"][0]["id"] == "sessions_today"
 
 
 @pytest.mark.asyncio
@@ -744,9 +828,12 @@ async def test_refine_goal_uses_context_when_no_which_arg() -> None:
     recently touched goal (from Redis context)."""
     classify = {"intent": "refine_goal", "refinement": "Tue/Thu/Sat"}
     plan = {
-        "plan_text": "Updated.", "metric_links": [],
-        "workout_budget": {"required_per_week": 3,
-                            "days_preferred": ["tue", "thu", "sat"]},
+        "plan_text": "Updated.",
+        "tracker_spec": {"trackers": [
+            {"id": "workouts_this_week", "label": "Workouts",
+             "kind": "counter", "reset": "weekly", "target": 3,
+             "unit": "workout", "direction": "up"},
+        ]},
         "milestones": [],
     }
     llm = _llm_returning(classify, plan)

@@ -74,12 +74,16 @@ class HealthGoalsStore:
         description: str,
         metric_links: list[dict[str, Any]] | None = None,
         workout_budget: dict[str, Any] | None = None,
+        tracker_spec: dict[str, Any] | None = None,
         plan_text: str | None = None,
         target_date: date | None = None,
         start_date: date | None = None,
     ) -> int | None:
         """Insert a new active goal. Returns the new id, or None when
-        the pool is unavailable."""
+        the pool is unavailable.
+
+        tracker_spec is the generic spec that drives the goal engine.
+        See orchestrator/goal_engine.py for the canonical shape."""
         if not self._ready or self.pool is None:
             return None
         async with self.pool.acquire() as conn:
@@ -87,19 +91,20 @@ class HealthGoalsStore:
                 """
                 INSERT INTO health_goals(
                     member_id, title, description, metric_links,
-                    workout_budget, plan_text, plan_generated_at,
-                    start_date, target_date
+                    workout_budget, tracker_spec, plan_text,
+                    plan_generated_at, start_date, target_date
                 )
                 VALUES (
-                    $1, $2, $3, $4::jsonb, $5::jsonb, $6::text,
-                    CASE WHEN $6::text IS NOT NULL THEN now() ELSE NULL END,
-                    COALESCE($7::date, CURRENT_DATE), $8::date
+                    $1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::text,
+                    CASE WHEN $7::text IS NOT NULL THEN now() ELSE NULL END,
+                    COALESCE($8::date, CURRENT_DATE), $9::date
                 )
                 RETURNING id
                 """,
                 int(member_id), title, description,
                 json.dumps(metric_links or [], default=str),
                 json.dumps(workout_budget, default=str) if workout_budget else None,
+                json.dumps(tracker_spec, default=str) if tracker_spec else None,
                 plan_text, start_date, target_date,
             )
             goal_id = int(row["id"]) if row else None
@@ -120,9 +125,9 @@ class HealthGoalsStore:
             row = await conn.fetchrow(
                 """
                 SELECT id, member_id, title, description, metric_links,
-                       workout_budget, plan_text, plan_generated_at,
-                       start_date, target_date, status, quiet_until,
-                       created_at, updated_at
+                       workout_budget, tracker_spec, plan_text,
+                       plan_generated_at, start_date, target_date,
+                       status, quiet_until, created_at, updated_at
                 FROM health_goals WHERE id = $1
                 """,
                 int(goal_id),
@@ -142,9 +147,9 @@ class HealthGoalsStore:
             rows = await conn.fetch(
                 f"""
                 SELECT id, member_id, title, description, metric_links,
-                       workout_budget, plan_text, plan_generated_at,
-                       start_date, target_date, status, quiet_until,
-                       created_at, updated_at
+                       workout_budget, tracker_spec, plan_text,
+                       plan_generated_at, start_date, target_date,
+                       status, quiet_until, created_at, updated_at
                 FROM health_goals
                 WHERE {' AND '.join(clauses)}
                 ORDER BY created_at DESC
@@ -168,9 +173,9 @@ class HealthGoalsStore:
             rows = await conn.fetch(
                 f"""
                 SELECT id, member_id, title, description, metric_links,
-                       workout_budget, plan_text, plan_generated_at,
-                       start_date, target_date, status, quiet_until,
-                       created_at, updated_at
+                       workout_budget, tracker_spec, plan_text,
+                       plan_generated_at, start_date, target_date,
+                       status, quiet_until, created_at, updated_at
                 FROM health_goals
                 WHERE {' AND '.join(clauses)}
                 ORDER BY
@@ -189,6 +194,7 @@ class HealthGoalsStore:
         plan_text: str,
         metric_links: list[dict[str, Any]] | None = None,
         workout_budget: dict[str, Any] | None = None,
+        tracker_spec: dict[str, Any] | None = None,
         milestones: list[dict[str, Any]] | None = None,
     ) -> None:
         """Refresh the plan narrative + optionally the structured fields.
@@ -207,6 +213,9 @@ class HealthGoalsStore:
                 if workout_budget is not None:
                     params.append(json.dumps(workout_budget, default=str))
                     sets.append(f"workout_budget = ${len(params)}::jsonb")
+                if tracker_spec is not None:
+                    params.append(json.dumps(tracker_spec, default=str))
+                    sets.append(f"tracker_spec = ${len(params)}::jsonb")
                 await conn.execute(
                     f"UPDATE health_goals SET {', '.join(sets)} WHERE id = $1",
                     *params,
@@ -486,6 +495,84 @@ class HealthGoalsStore:
                     int(goal_id),
                 )
 
+    # ── Generic log of user-reported events ─────────────────────
+
+    async def record_log_event(
+        self,
+        goal_id: int,
+        *,
+        deltas: dict[str, Any],
+        raw_text: str | None = None,
+        member_id: int | None = None,
+        source: str = "telegram",
+        note: str | None = None,
+        ts: datetime | None = None,
+    ) -> int | None:
+        """Insert one row into health_goal_log. Returns the new id.
+
+        deltas is the per-tracker increment dict the LLM (or the
+        deterministic mapper) produced from the user's message.
+        Example: {"sessions_today": 1, "reps_today": 30}."""
+        if not self._ready or self.pool is None:
+            return None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO health_goal_log(
+                    goal_id, member_id, ts, raw_text, deltas, source, note
+                )
+                VALUES (
+                    $1, $2, COALESCE($3, now()), $4, $5::jsonb, $6, $7
+                )
+                RETURNING id
+                """,
+                int(goal_id), member_id, ts, raw_text,
+                json.dumps(deltas or {}, default=str), source, note,
+            )
+        return int(row["id"]) if row else None
+
+    async def recent_log(
+        self,
+        goal_id: int,
+        *,
+        since: datetime | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Pull recent log entries for a goal. The compute engine uses
+        this to evaluate trackers over windowed periods."""
+        if not self._ready or self.pool is None:
+            return []
+        clauses = ["goal_id = $1"]
+        params: list[Any] = [int(goal_id)]
+        if since is not None:
+            params.append(since)
+            clauses.append(f"ts >= ${len(params)}")
+        params.append(int(limit))
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT id, goal_id, member_id, ts, raw_text, deltas,
+                       source, note
+                FROM health_goal_log
+                WHERE {' AND '.join(clauses)}
+                ORDER BY ts DESC LIMIT ${len(params)}
+                """,
+                *params,
+            )
+        out = []
+        for r in rows:
+            row_dict = dict(r)
+            d = row_dict.get("deltas")
+            if isinstance(d, str):
+                try:
+                    row_dict["deltas"] = json.loads(d)
+                except json.JSONDecodeError:
+                    row_dict["deltas"] = {}
+            elif d is None:
+                row_dict["deltas"] = {}
+            out.append(row_dict)
+        return out
+
     # ── Events / audit ───────────────────────────────────────────
 
     async def log_event(
@@ -552,13 +639,13 @@ def _decode_goal_row(row: Any) -> dict[str, Any] | None:
     if row is None:
         return None
     out = dict(row)
-    for k in ("metric_links", "workout_budget"):
+    for k in ("metric_links", "workout_budget", "tracker_spec"):
         v = out.get(k)
         if isinstance(v, str):
             try:
                 out[k] = json.loads(v)
             except json.JSONDecodeError:
-                out[k] = None if k == "workout_budget" else []
+                out[k] = [] if k == "metric_links" else None
         elif v is None and k == "metric_links":
             out[k] = []
     return out

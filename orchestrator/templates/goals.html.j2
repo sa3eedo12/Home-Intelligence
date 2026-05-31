@@ -73,16 +73,23 @@
             </div>
           {% endif %}
 
-          {% if g.workout_budget %}
-            <p class="muted">
-              Target {{ g.workout_budget.get('required_per_week', '?') }} workouts a week
-              {% if g.workout_budget.get('flexible_rest_per_week') %}
-                · up to {{ g.workout_budget.flexible_rest_per_week }} flex rest day{{ '' if g.workout_budget.flexible_rest_per_week == 1 else 's' }}
-              {% endif %}
-              {% if g.workout_budget.get('days_preferred') %}
-                · prefers {{ g.workout_budget.days_preferred|join(', ') }}
-              {% endif %}
-            </p>
+          {% if g.tracker_spec and g.tracker_spec.get('trackers') %}
+            <div class="goal-trackers">
+              <h3>What I'm tracking</h3>
+              <ul>
+                {% for t in g.tracker_spec.trackers %}
+                  <li>
+                    <strong>{{ t.label or t.id }}</strong>:
+                    {% if t.target is not none %}
+                      {% if t.direction == 'down' %}≤{% else %}≥{% endif %}
+                      {{ t.target }} {{ t.unit }} per {{ t.reset }}
+                    {% else %}
+                      tracked per {{ t.reset }}
+                    {% endif %}
+                  </li>
+                {% endfor %}
+              </ul>
+            </div>
           {% endif %}
 
           {% if g.milestones %}

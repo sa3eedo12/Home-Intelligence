@@ -300,7 +300,9 @@ class GoalsChatHandler:
         if intent == "skip_workout":
             return await self._handle_skip_workout(args, member_id)
         if intent == "log_workout":
-            return await self._handle_log_workout(args, member_id)
+            return await self._handle_log_workout(
+                args, member_id, text=text, context=context,
+            )
         if intent in {"mute_goal", "unmute_goal", "pause_goal", "resume_goal",
                        "abandon_goal"}:
             return await self._handle_goal_state(intent, args, member_id, context)
@@ -330,20 +332,18 @@ class GoalsChatHandler:
             logger.warning("goals_chat_planner_failed", error=str(exc))
             plan = {
                 "plan_text": (
-                    "I will check in daily and nudge you when a workout "
-                    "is due. We can refine the plan as we learn what "
-                    "works for you."
+                    "I'll check in and nudge you as we go. Tell me how "
+                    "you'd like me to measure this and I'll set up the "
+                    "tracking."
                 ),
-                "metric_links": [],
-                "workout_budget": None,
+                "tracker_spec": None,
                 "milestones": [],
             }
         goal_id = await self.goals.create(
             member_id=member_id,
             title=title,
             description=description,
-            metric_links=plan.get("metric_links") or [],
-            workout_budget=plan.get("workout_budget"),
+            tracker_spec=plan.get("tracker_spec"),
             plan_text=plan.get("plan_text"),
         )
         if goal_id is not None and plan.get("milestones"):
@@ -355,21 +355,33 @@ class GoalsChatHandler:
             except Exception as exc:
                 logger.warning("goals_chat_milestone_save_failed",
                                error=str(exc))
-        budget = plan.get("workout_budget") or {}
-        per_week = budget.get("required_per_week")
         bits = [
             f"Got it — your new goal is \"{title}\".",
             plan.get("plan_text") or "",
         ]
-        if per_week:
-            bits.append(
-                f"I'll expect about {per_week} workouts a week and check in "
-                f"on the day if you haven't logged one yet."
-            )
+        spec = plan.get("tracker_spec") or {}
+        trackers = spec.get("trackers") or []
+        if trackers:
+            tracker_lines = []
+            for t in trackers[:4]:
+                target = t.get("target")
+                unit = t.get("unit") or ""
+                label = t.get("label") or t.get("id") or "tracker"
+                reset = t.get("reset") or "daily"
+                if target is not None:
+                    tracker_lines.append(
+                        f"{label}: target {target} {unit} per {reset[:-2] if reset.endswith('ly') else reset}".replace(
+                            "  ", " "
+                        ).strip()
+                    )
+                else:
+                    tracker_lines.append(label)
+            bits.append("I'll track: " + "; ".join(tracker_lines) + ".")
         bits.append(
-            "Want the full plan with milestones? Just ask — say \"what "
-            "does the plan look like\". Skip a day anytime by saying so; "
-            "to silence nags on this goal say \"mute it\"."
+            "Tell me how it goes (e.g. \"did 20 pushups after maghrib\") "
+            "and I'll log it. Ask \"how am I doing\" any time. Say "
+            "\"mute it\" to stop nags, or describe a change and I'll "
+            "rework the plan."
         )
         return "\n\n".join(b for b in bits if b), goal_id
 
@@ -418,8 +430,7 @@ class GoalsChatHandler:
             await self.goals.update_plan(
                 int(target["id"]),
                 plan_text=plan.get("plan_text") or "",
-                metric_links=plan.get("metric_links"),
-                workout_budget=plan.get("workout_budget"),
+                tracker_spec=plan.get("tracker_spec"),
                 milestones=plan.get("milestones") or None,
             )
         except Exception as exc:
@@ -428,20 +439,27 @@ class GoalsChatHandler:
                 "I drafted an updated plan but couldn't save it. "
                 f"Here's what I had:\n\n{plan.get('plan_text') or ''}"
             ), int(target["id"])
-        budget = plan.get("workout_budget") or {}
-        per_week = budget.get("required_per_week")
-        days = budget.get("days_preferred") or []
         bits = [
             f"Updated \"{target['title']}\". Here's the revised plan:",
             plan.get("plan_text") or "",
         ]
-        cadence = []
-        if per_week:
-            cadence.append(f"{per_week} workouts per week")
-        if days:
-            cadence.append("on " + _humanize_list([str(d) for d in days]))
-        if cadence:
-            bits.append("Cadence: " + ", ".join(cadence) + ".")
+        spec = plan.get("tracker_spec") or {}
+        trackers = spec.get("trackers") or []
+        if trackers:
+            tracker_lines = []
+            for t in trackers[:4]:
+                target_v = t.get("target")
+                unit = t.get("unit") or ""
+                label = t.get("label") or t.get("id") or "tracker"
+                reset = t.get("reset") or "daily"
+                if target_v is not None:
+                    tracker_lines.append(
+                        f"{label}: target {target_v} {unit} per {reset[:-2] if reset.endswith('ly') else reset}".replace(
+                            "  ", " "
+                        ).strip()
+                    )
+            if tracker_lines:
+                bits.append("New tracking: " + "; ".join(tracker_lines) + ".")
         bits.append(
             "Say the word and I'll keep refining it — or \"explain the "
             "plan\" any time you want the full breakdown."
@@ -451,24 +469,52 @@ class GoalsChatHandler:
     async def _generate_plan(
         self, *, title: str, description: str,
     ) -> dict[str, Any]:
-        """One 14b call. Returns plan_text + metric_links + workout_budget
-        + milestones. Falls back to an empty plan if parsing fails."""
+        """One 14b call. Returns plan_text + tracker_spec + milestones.
+
+        The tracker_spec is the generic structure that the goal_engine
+        runtime evaluates against the user's logs. Trackers can be
+        counter (sum of deltas in a window) or gauge (most recent
+        reported value). Reset windows are daily / weekly / monthly /
+        never. New goal shapes — sessions per day, reps per session,
+        weight gauges, calorie deficits, water intake, anything — fit
+        this shape without code changes."""
         system = (
             "You are a calm, practical health coach. The user told you a "
-            "goal in plain English. Write a short personal plan and "
-            "decide what to track.\n\n"
+            "goal in plain English. Write a short personal plan and a "
+            "structured tracker spec that the runtime will evaluate.\n\n"
             "Output a JSON object with these keys:\n"
             "- plan_text: 2 to 4 sentences. Friendly and concrete. Avoid "
             "fitness clichés. Avoid commands like 'do X every day'.\n"
-            "- metric_links: a JSON array. Each entry is "
-            "{metric, direction, target_per_week?, target?, days_preferred?}.\n"
-            "  Allowed metric names: workout, weight, steps, hrv, "
-            "resting_heart_rate, sleep_asleep.\n"
-            "- workout_budget: object if the goal needs workouts, else null. "
-            "Keys: required_per_week:int, flexible_rest_per_week:int, "
-            "days_preferred: list of 3-letter day names like 'mon','wed','fri'.\n"
+            "- tracker_spec: object with these keys:\n"
+            "    - trackers: JSON array. Each entry is "
+            "{id, label, kind, reset, target, unit, direction}.\n"
+            "      id: short snake_case key unique within this goal.\n"
+            "      label: human-readable string for messages.\n"
+            "      kind: 'counter' (sum of logged deltas in window) "
+            "or 'gauge' (most recent reported value).\n"
+            "      reset: 'daily' | 'weekly' | 'monthly' | 'never'.\n"
+            "      target: number to reach (or stay under for direction=down).\n"
+            "      unit: short string like 'set', 'rep', 'kg', 'min'.\n"
+            "      direction: 'up' (more is better) | 'down' (less is better).\n"
+            "    - completion_rule: optional. {kind: 'all_targets_met', "
+            "trackers: [tracker_id, ...]} declares when today counts as "
+            "done. Omit for a sensible default (all daily up-trackers met).\n"
+            "    - nudge_rule: optional. {kind: 'behind_schedule', "
+            "tracker: <id>, after_local_hour: 14, before_local_hour: 22}. "
+            "Use kind: 'none' to opt out of nags.\n"
+            "    - log_hints: optional array helping the log classifier. "
+            "Each entry: {if_mentions: [keywords], increment: {tracker_id: number}}.\n"
             "- milestones: 1 to 3 entries, each "
             "{due_date: YYYY-MM-DD, target_description: str}.\n\n"
+            "Pick trackers that match HOW the user described the goal. "
+            "For 'pushups after every prayer', model both sessions_today "
+            "(counter, daily, target 5) and pushups_today (counter, daily, "
+            "target should match an early-week starting volume the user "
+            "can grow from). For 'lose 5 kg', use a weight gauge plus a "
+            "weekly weigh-in counter. For 'sleep 7 hours nightly', a "
+            "sleep_minutes gauge reset daily with target 420. "
+            "Always include log_hints with the words you expect the user "
+            "to use so the log classifier can map their messages to deltas.\n\n"
             "Today is " + date.today().isoformat() + ". The user is in "
             "Asia/Dubai timezone.\n"
             "Return ONLY the JSON object."
@@ -488,19 +534,15 @@ class GoalsChatHandler:
         content = _extract_chat_content(resp)
         parsed = _parse_json_blob(content) or {}
         plan_text = str(parsed.get("plan_text") or "").strip()
-        metric_links = parsed.get("metric_links") or []
-        if not isinstance(metric_links, list):
-            metric_links = []
-        budget = parsed.get("workout_budget")
-        if not isinstance(budget, dict):
-            budget = None
+        tracker_spec = parsed.get("tracker_spec")
+        if not isinstance(tracker_spec, dict):
+            tracker_spec = None
         milestones = parsed.get("milestones") or []
         if not isinstance(milestones, list):
             milestones = []
         return {
             "plan_text": plan_text,
-            "metric_links": metric_links,
-            "workout_budget": budget,
+            "tracker_spec": tracker_spec,
             "milestones": milestones,
         }
 
@@ -510,6 +552,8 @@ class GoalsChatHandler:
         self, args: dict[str, Any], member_id: int,
         context: dict[str, Any] | None = None,
     ) -> tuple[str, int | None]:
+        from . import goal_engine
+
         goals = await self.goals.list_active(member_id=member_id)
         if not goals:
             return (
@@ -525,8 +569,23 @@ class GoalsChatHandler:
             )
         if target_goal is None:
             target_goal = goals[0]
-        prog = await self.goals.get_progress(int(target_goal["id"])) or {}
-        return _format_progress_line(target_goal, prog), int(target_goal["id"])
+        # Run the generic engine over recent log entries; this is the
+        # source of truth, not the cached progress row (which is just
+        # a nightly snapshot).
+        log_rows = await self.goals.recent_log(int(target_goal["id"]), limit=400)
+        if log_rows or target_goal.get("tracker_spec"):
+            eval_result = goal_engine.evaluate(
+                goal=target_goal, log_rows=log_rows,
+            )
+            line = goal_engine.format_status_line(eval_result)
+            return (
+                f"\"{target_goal['title']}\" — {line}",
+                int(target_goal["id"]),
+            )
+        return (
+            f"\"{target_goal['title']}\" is active but I don't have any "
+            "logs yet. Tell me what you've done and I'll start tracking."
+        ), int(target_goal["id"])
 
     async def _handle_list_goals(self, member_id: int) -> str:
         goals = await self.goals.list_all_for_member(
@@ -544,10 +603,12 @@ class GoalsChatHandler:
         self, args: dict[str, Any], member_id: int,
         context: dict[str, Any] | None = None,
     ) -> tuple[str, int | None]:
-        """Explain the plan for a specific goal: plan_text, weekly
-        cadence, milestones. Resolves the goal from explicit 'which'
-        first, then conversational context, then the most-recent
-        active goal."""
+        """Explain the plan for a specific goal: plan_text, trackers,
+        milestones. Resolves the goal from explicit 'which' first,
+        then conversational context, then the most-recent active
+        goal."""
+        from . import goal_engine
+
         goals = await self.goals.list_active(member_id=member_id)
         if not goals:
             return (
@@ -573,27 +634,28 @@ class GoalsChatHandler:
                 "I haven't written a detailed plan yet. Tell me a bit more "
                 "about how you'd like to approach it and I'll fill it in."
             )
-        budget = target.get("workout_budget") or {}
-        if isinstance(budget, dict) and budget:
-            cadence_bits = []
-            if budget.get("required_per_week"):
-                cadence_bits.append(
-                    f"{budget['required_per_week']} workouts per week"
-                )
-            if budget.get("flexible_rest_per_week"):
-                cadence_bits.append(
-                    f"up to {budget['flexible_rest_per_week']} flexible "
-                    "rest day" +
-                    ("" if budget["flexible_rest_per_week"] == 1 else "s")
-                )
-            if budget.get("days_preferred"):
-                cadence_bits.append(
-                    "leaning toward " + _humanize_list(
-                        [str(d) for d in budget["days_preferred"]]
+        spec = goal_engine.normalize_spec(target.get("tracker_spec"))
+        if spec["trackers"]:
+            tracker_lines = ["What I'm tracking:"]
+            for t in spec["trackers"]:
+                target_v = t.get("target")
+                unit = t.get("unit") or ""
+                label = t.get("label") or t.get("id") or "tracker"
+                reset = t.get("reset") or "daily"
+                direction_word = "≤" if t.get("direction") == "down" else "≥"
+                if target_v is not None:
+                    tracker_lines.append(
+                        f"- {label}: {direction_word} {goal_engine._format_value(float(target_v))} "
+                        f"{unit} per {reset}".replace("  ", " ").strip()
                     )
-                )
-            if cadence_bits:
-                bits.append("Cadence: " + ", ".join(cadence_bits) + ".")
+                else:
+                    tracker_lines.append(f"- {label}")
+            bits.append("\n".join(tracker_lines))
+            # Also show current state if we have any logs
+            log_rows = await self.goals.recent_log(int(target["id"]), limit=400)
+            if log_rows:
+                ev = goal_engine.evaluate(goal=target, log_rows=log_rows)
+                bits.append("Current state: " + goal_engine.format_status_line(ev))
         if milestones:
             ms_lines = ["Milestones:"]
             for ms in milestones[:5]:
@@ -666,40 +728,114 @@ class GoalsChatHandler:
 
     async def _handle_log_workout(
         self, args: dict[str, Any], member_id: int,
+        text: str = "",
+        context: dict[str, Any] | None = None,
     ) -> tuple[str, int | None]:
-        # We log against the chore_log table as a "Laundry load"-style
-        # entry? No — workouts are tracked in health_metrics. The user's
-        # Apple Watch / HealthKit Auto Export populates that. For now,
-        # just acknowledge so the user doesn't feel ignored, and update
-        # today's progress as workout_completed=True so the nag stops.
+        """Generic event logging — the user reports something they did
+        ('30 pushups after maghrib', 'ran 5k', 'weighed in 88kg today')
+        and a small LLM call maps it to tracker deltas using the
+        target goal's spec. Inserts one health_goal_log row, then
+        evaluates the goal so we can confirm with the new tracker
+        state (e.g. '2 of 5 sets today, three to go')."""
+        from . import goal_engine
+
         goals = await self.goals.list_active(member_id=member_id)
-        marked = 0
-        last_touched = None
-        for g in goals:
-            if not (g.get("workout_budget") or {}):
-                continue
-            today = date.today()
-            existing = await self.goals.get_progress(int(g["id"]), day=today) or {}
-            snapshot = existing.get("metric_snapshots") or {}
-            await self.goals.upsert_progress(
-                int(g["id"]), day=today,
-                metric_snapshots=snapshot,
-                on_track_score=existing.get("on_track_score"),
-                on_track_label=existing.get("on_track_label"),
-                workout_required=bool(existing.get("workout_required") or True),
-                workout_completed=True,
-                rest_day_excused=bool(existing.get("rest_day_excused") or False),
-                note=str(args.get("note") or "logged via chat") or None,
+        if not goals:
+            return ("Nice. I don't have an active goal on file, but "
+                    "I'll remember you did something good today."), None
+        target = None
+        if context and context.get("last_goal_id"):
+            target = next(
+                (g for g in goals if int(g["id"]) == context["last_goal_id"]),
+                None,
             )
-            marked += 1
-            last_touched = int(g["id"])
-        if marked == 0:
-            return ("Nice. I don't have an active workout goal on file, but "
-                    "I'll remember you trained today."), None
-        return (
-            f"Nice — logged today's workout against {marked} goal" +
-            ("" if marked == 1 else "s") + ". I'll back off the nags."
-        ), last_touched
+        if target is None:
+            target = goals[0]
+        spec = goal_engine.normalize_spec(target.get("tracker_spec"))
+        if not spec["trackers"]:
+            return (
+                f"\"{target['title']}\" doesn't have any trackers set up "
+                "yet. Tell me how you'd like me to measure it."
+            ), int(target["id"])
+        raw_text = (args.get("note") or text or "").strip() or "logged via chat"
+        try:
+            deltas = await self._classify_log_deltas(
+                spec=spec, goal_title=target["title"], raw_text=raw_text,
+            )
+        except Exception as exc:
+            logger.warning("goals_chat_log_classify_failed", error=str(exc))
+            deltas = _fallback_deltas_from_hints(spec, raw_text)
+        if not deltas:
+            return (
+                "I heard you, but I couldn't map that to anything I'm "
+                "tracking. Try naming the action (e.g. 'did 20 pushups')."
+            ), int(target["id"])
+        await self.goals.record_log_event(
+            int(target["id"]),
+            deltas=deltas,
+            raw_text=raw_text,
+            member_id=member_id,
+            source="telegram",
+        )
+        # Re-evaluate so the confirmation is grounded in real state.
+        log_rows = await self.goals.recent_log(int(target["id"]), limit=200)
+        eval_result = goal_engine.evaluate(goal=target, log_rows=log_rows)
+        bits = [_humanize_log_delta(deltas, spec)]
+        bits.append(goal_engine.format_status_line(eval_result))
+        return " ".join(b for b in bits if b), int(target["id"])
+
+    async def _classify_log_deltas(
+        self, *, spec: dict[str, Any], goal_title: str, raw_text: str,
+    ) -> dict[str, float]:
+        """Small LLM call: map free-text into {tracker_id: delta}.
+
+        Uses qwen3:8b for cost; the spec's trackers + log_hints go in
+        the prompt as guardrails. Returns {} if the model produces
+        nothing usable."""
+        trackers_brief = "; ".join(
+            f"{t['id']} ({t['label']}, {t.get('unit') or 'unit'})"
+            for t in spec["trackers"]
+        )
+        hints = spec.get("log_hints") or []
+        hints_text = json.dumps(hints[:6]) if hints else "(none)"
+        system = (
+            "You convert a user's free-text report of something they did "
+            "into per-tracker numeric deltas for one goal. Be conservative: "
+            "only count what the user actually said. Return ONLY a JSON "
+            "object: {<tracker_id>: <number>, ...}. Unknown trackers or "
+            "ambiguous quantities → omit them. Numbers must be positive "
+            "for counters (additions). For gauges, return the latest "
+            "reported absolute value."
+            f"\n\nGoal: {goal_title}"
+            f"\nTrackers available: {trackers_brief}"
+            f"\nLog hints: {hints_text}"
+        )
+        try:
+            resp = await self.llm.chat(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": raw_text},
+                ],
+                model=self.classifier_model,
+                temperature=0.0,
+                response_format="json",
+                think=False,
+            )
+        except Exception as exc:
+            logger.warning("goals_chat_log_llm_failed", error=str(exc))
+            return _fallback_deltas_from_hints(spec, raw_text)
+        content = _extract_chat_content(resp)
+        parsed = _parse_json_blob(content) or {}
+        valid_ids = {t["id"] for t in spec["trackers"]}
+        out: dict[str, float] = {}
+        for k, v in parsed.items():
+            if k not in valid_ids:
+                continue
+            try:
+                out[k] = float(v)
+            except (TypeError, ValueError):
+                continue
+        return out
 
     # ── Goal state ───────────────────────────────────────────────
 
@@ -973,6 +1109,47 @@ def _humanize_list(items: list[str]) -> str:
     if len(items) == 2:
         return f"{items[0]} and {items[1]}"
     return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+def _humanize_log_delta(
+    deltas: dict[str, float], spec: dict[str, Any],
+) -> str:
+    """Render the LLM's parsed deltas as a single confirmation sentence."""
+    if not deltas:
+        return "Logged."
+    by_id = {t["id"]: t for t in (spec.get("trackers") or [])}
+    bits = []
+    for tid, value in deltas.items():
+        t = by_id.get(tid, {})
+        label = t.get("label") or tid
+        unit = t.get("unit") or ""
+        v_str = f"{value:.1f}".rstrip("0").rstrip(".") if value % 1 else str(int(value))
+        bits.append(f"{v_str} {unit} {label.lower()}".strip().replace("  ", " "))
+    return "Logged: " + ", ".join(bits) + "."
+
+
+def _fallback_deltas_from_hints(
+    spec: dict[str, Any], raw_text: str,
+) -> dict[str, float]:
+    """Cheap fallback when the LLM call fails: scan log_hints for
+    keyword matches and apply their increments (numeric only)."""
+    text_low = raw_text.lower()
+    out: dict[str, float] = {}
+    for hint in spec.get("log_hints") or []:
+        if not isinstance(hint, dict):
+            continue
+        triggers = hint.get("if_mentions") or []
+        if not any(isinstance(t, str) and t.lower() in text_low for t in triggers):
+            continue
+        increments = hint.get("increment") or {}
+        if not isinstance(increments, dict):
+            continue
+        for tid, val in increments.items():
+            try:
+                out[tid] = out.get(tid, 0.0) + float(val)
+            except (TypeError, ValueError):
+                continue
+    return out
 
 
 def _format_progress_line(

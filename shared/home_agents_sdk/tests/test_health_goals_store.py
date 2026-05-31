@@ -391,3 +391,104 @@ async def test_create_sql_round_trip_against_real_pg() -> None:
             )
     finally:
         await pool.close()
+
+
+# ── Generic log of user-reported events ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_record_log_event_inserts_with_deltas() -> None:
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value={"id": 7})
+    store = HealthGoalsStore(_pool_with(conn))
+    log_id = await store.record_log_event(
+        1, deltas={"sessions_today": 1, "reps_today": 30},
+        raw_text="did 30 pushups after maghrib",
+        member_id=2, source="telegram",
+    )
+    assert log_id == 7
+    args = conn.fetchrow.await_args.args
+    assert args[1] == 1   # goal_id
+    assert args[2] == 2   # member_id
+    # deltas serialized to JSON
+    assert json.loads(args[5]) == {"sessions_today": 1, "reps_today": 30}
+
+
+@pytest.mark.asyncio
+async def test_record_log_event_safe_when_no_pool() -> None:
+    store = HealthGoalsStore(pool=None)
+    log_id = await store.record_log_event(1, deltas={"x": 1})
+    assert log_id is None
+
+
+@pytest.mark.asyncio
+async def test_recent_log_returns_decoded_deltas() -> None:
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[
+        {
+            "id": 1, "goal_id": 7, "member_id": 2,
+            "ts": datetime(2026, 5, 31, 14, tzinfo=UTC),
+            "raw_text": "30 pushups",
+            "deltas": '{"sessions_today": 1, "reps_today": 30}',
+            "source": "telegram", "note": None,
+        }
+    ])
+    store = HealthGoalsStore(_pool_with(conn))
+    rows = await store.recent_log(7)
+    assert len(rows) == 1
+    assert rows[0]["deltas"] == {"sessions_today": 1, "reps_today": 30}
+
+
+@pytest.mark.asyncio
+async def test_recent_log_handles_invalid_json() -> None:
+    """If deltas somehow got stored as malformed text, return {}
+    rather than crashing the engine."""
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=[
+        {"id": 1, "goal_id": 7, "member_id": 2,
+         "ts": datetime.now(UTC), "raw_text": "x",
+         "deltas": "not json at all",
+         "source": "telegram", "note": None},
+    ])
+    store = HealthGoalsStore(_pool_with(conn))
+    rows = await store.recent_log(7)
+    assert rows[0]["deltas"] == {}
+
+
+@pytest.mark.asyncio
+async def test_create_persists_tracker_spec() -> None:
+    """create() must serialize tracker_spec as jsonb so the engine
+    can read it back unchanged."""
+    conn = _txn_conn()
+    conn.fetchrow = AsyncMock(return_value={"id": 99})
+    store = HealthGoalsStore(_pool_with(conn))
+    spec = {
+        "trackers": [
+            {"id": "sessions_today", "kind": "counter",
+             "reset": "daily", "target": 5},
+        ],
+    }
+    gid = await store.create(
+        member_id=2, title="Pushups",
+        description="Do pushups after every prayer",
+        tracker_spec=spec,
+    )
+    assert gid == 99
+    args = conn.fetchrow.await_args.args
+    # member, title, description, metric_links_json, workout_budget_json,
+    # tracker_spec_json, plan_text, start_date, target_date
+    assert json.loads(args[6])["trackers"][0]["id"] == "sessions_today"
+
+
+def test_decode_goal_row_parses_tracker_spec_string() -> None:
+    row = {
+        "id": 1, "member_id": 2, "title": "x", "description": "y",
+        "metric_links": "[]", "workout_budget": None,
+        "tracker_spec": '{"trackers": [{"id": "a"}]}',
+        "plan_text": None, "plan_generated_at": None,
+        "start_date": date.today(), "target_date": None,
+        "status": "active", "quiet_until": None,
+        "created_at": None, "updated_at": None,
+    }
+    out = _decode_goal_row(row)
+    assert out["tracker_spec"] == {"trackers": [{"id": "a"}]}

@@ -1026,8 +1026,7 @@ async def _prep_goal(
         "plan_generated_at": _format_dt(goal.get("plan_generated_at")),
         "start_date": goal["start_date"].isoformat() if goal.get("start_date") else None,
         "target_date": goal["target_date"].isoformat() if goal.get("target_date") else None,
-        "metric_links": goal.get("metric_links") or [],
-        "workout_budget": goal.get("workout_budget") or {},
+        "tracker_spec": goal.get("tracker_spec") or {"trackers": []},
         "today_progress": today_progress,
         "milestones": [
             {

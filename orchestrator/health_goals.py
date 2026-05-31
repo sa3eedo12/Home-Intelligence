@@ -89,46 +89,53 @@ async def compute_today(
     store: HealthGoalsStore,
     today: date | None = None,
 ) -> dict[str, Any]:
-    """Walk every active goal and write today's progress row.
+    """Walk every active goal, ask the engine to evaluate it against
+    its log entries, and snapshot the result into health_goal_progress.
 
-    For workout-frequency goals the snapshot just counts workouts logged
-    today + this week. For other metrics we pull the latest value from
-    health_metrics. The progress label is a coarse on_track/slipping/
-    regressing/achieved bucket; the dashboard renders this verbatim
-    and the weekly reflection job uses it as context.
-    """
+    This is just a read-side cache so the dashboard / weekly reflection
+    don't have to re-walk the log every render. The engine itself runs
+    against fresh logs whenever a user asks 'how am I doing'."""
+    from . import goal_engine
+
     today = today or date.today()
-    week_start = today - timedelta(days=today.weekday())  # Monday
     active = await store.list_active()
     processed = 0
-    nags_emitted = 0  # not used here, included so the schedule notify
-                      # payload looks consistent with run_workout_nags
     for goal in active:
         try:
-            snapshot, score, label, completed = await _snapshot_for_goal(
-                pool=pool, goal=goal, today=today, week_start=week_start,
-            )
+            log_rows = await store.recent_log(int(goal["id"]), limit=500)
+            result = goal_engine.evaluate(goal=goal, log_rows=log_rows)
         except Exception as exc:
             logger.warning(
                 "health_goal_compute_failed", goal_id=goal["id"], error=str(exc)
             )
             continue
-        required = workout_required_today(goal, today=today)
+        label = _label_from_pct(result.overall_pct)
         await store.upsert_progress(
             int(goal["id"]),
             day=today,
-            metric_snapshots=snapshot,
-            on_track_score=score,
+            metric_snapshots=result.state_blob,
+            on_track_score=int(round(result.overall_pct)) if result.overall_pct is not None else None,
             on_track_label=label,
-            workout_required=required,
-            workout_completed=completed,
-            rest_day_excused=False,  # honored by excuse_today path, not here
+            workout_required=any(
+                t.reset == "daily" for t in result.trackers
+            ),
+            workout_completed=result.today_complete,
+            rest_day_excused=False,  # honored by excuse_today path
         )
         processed += 1
     return {
         "ok": True, "processed": processed, "day": today.isoformat(),
-        "nags_emitted": nags_emitted,
     }
+
+
+def _label_from_pct(pct: float | None) -> str | None:
+    if pct is None:
+        return None
+    if pct >= 80:
+        return "on_track"
+    if pct >= 50:
+        return "slipping"
+    return "regressing"
 
 
 async def _snapshot_for_goal(
@@ -138,121 +145,19 @@ async def _snapshot_for_goal(
     today: date,
     week_start: date,
 ) -> tuple[dict[str, Any], int | None, str | None, bool]:
-    """Return (metric_snapshot, on_track_score, on_track_label, workout_completed)."""
-    snapshot: dict[str, Any] = {}
-    member_id = int(goal["member_id"])
-    metric_links = goal.get("metric_links") or []
-    workout_completed = False
-    workout_count_week = 0
-    weight_actual: float | None = None
-    weight_target: float | None = None
+    """Legacy helper kept for tests that pin the older behavior. The
+    new pipeline routes everything through goal_engine.evaluate() in
+    compute_today(). Returns (snapshot, score, label, completed)."""
+    from . import goal_engine
 
-    async with pool.acquire() as conn:
-        for link in metric_links:
-            if not isinstance(link, dict):
-                continue
-            metric = str(link.get("metric") or "").strip()
-            if not metric:
-                continue
-            if metric == "workout":
-                row = await conn.fetchrow(
-                    """
-                    SELECT
-                        count(*) FILTER (
-                            WHERE ts::date = $2 AND member_id = $1
-                        )::int AS today_count,
-                        count(*) FILTER (
-                            WHERE ts::date >= $3 AND member_id = $1
-                        )::int AS week_count
-                    FROM health_metrics
-                    WHERE metric = 'workout'
-                      AND ts >= ($3::date - INTERVAL '1 day')
-                    """,
-                    member_id, today, week_start,
-                )
-                today_count = int((row or {}).get("today_count") or 0)
-                week_count = int((row or {}).get("week_count") or 0)
-                workout_completed = workout_completed or (today_count > 0)
-                workout_count_week = max(workout_count_week, week_count)
-                snapshot["workouts_today"] = today_count
-                snapshot["workouts_this_week"] = week_count
-                snapshot["workouts_target_per_week"] = link.get("target_per_week")
-            else:
-                # Generic latest-value pull. Works for weight, hrv, rhr,
-                # steps, etc. Sleep gets its own path below.
-                latest = await conn.fetchval(
-                    """
-                    SELECT value FROM health_metrics
-                    WHERE metric = $1 AND member_id = $2
-                    ORDER BY ts DESC LIMIT 1
-                    """,
-                    metric, member_id,
-                )
-                if latest is not None:
-                    snapshot[metric] = float(latest)
-                    if metric == "weight":
-                        weight_actual = float(latest)
-                        try:
-                            weight_target = float(link.get("target") or 0) or None
-                        except (TypeError, ValueError):
-                            weight_target = None
-
-    # Score: simple weighted blend so the dashboard has a number even
-    # when only one metric matters.
-    score = _score_from_snapshot(
-        workout_count_week=workout_count_week,
-        workout_target=_workout_target(goal),
-        weight_actual=weight_actual,
-        weight_target=weight_target,
-    )
-    label = _label_from_score(score)
-    return snapshot, score, label, workout_completed
-
-
-def _workout_target(goal: dict[str, Any]) -> int | None:
-    budget = goal.get("workout_budget") or {}
-    if not isinstance(budget, dict):
-        return None
-    raw = budget.get("required_per_week")
-    try:
-        return int(raw) if raw is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _score_from_snapshot(
-    *,
-    workout_count_week: int,
-    workout_target: int | None,
-    weight_actual: float | None,
-    weight_target: float | None,
-) -> int | None:
-    """Roll the available metrics into a 0–100 number. Missing signal
-    just contributes nothing rather than penalizing the user."""
-    parts: list[float] = []
-    if workout_target and workout_target > 0:
-        ratio = min(workout_count_week / workout_target, 1.0)
-        parts.append(100.0 * ratio)
-    if weight_actual is not None and weight_target is not None:
-        # Distance from target as a fraction of the starting gap;
-        # we don't know the start, so just give credit for being
-        # within 2 kg of target.
-        diff = abs(weight_actual - weight_target)
-        weight_score = max(0.0, min(100.0, 100.0 - 50.0 * diff))
-        parts.append(weight_score)
-    if not parts:
-        return None
-    return int(round(sum(parts) / len(parts)))
-
-
-def _label_from_score(score: int | None) -> str | None:
-    if score is None:
-        return None
-    if score >= 80:
-        return "on_track"
-    if score >= 50:
-        return "slipping"
-    return "regressing"
+    log_rows: list[dict[str, Any]] = []
+    # If the goal has a tracker_spec but no log rows yet, the engine
+    # will produce zeros — perfectly correct behavior.
+    result = goal_engine.evaluate(goal=goal, log_rows=log_rows)
+    label = _label_from_pct(result.overall_pct)
+    return result.state_blob, (
+        int(round(result.overall_pct)) if result.overall_pct is not None else None
+    ), label, result.today_complete
 
 
 # ── Workout nags ─────────────────────────────────────────────────
@@ -266,25 +171,36 @@ async def run_workout_nags(
     nag_store: MemberNagWindowsStore,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """For each active workout-frequency goal: if today is a workout
-    day, the workout isn't done, the user hasn't excused today, the
-    nag window allows it, and the cap hasn't been hit — fire a nag."""
+    """Generic nag scheduler. For each active goal, ask the engine
+    whether a nudge is due based on the goal's spec + log state. If
+    so, respect the member's quiet hours + per-day cap + min gap,
+    then fire a playful message."""
+    from . import goal_engine
+
     now = now or datetime.now(UTC)
     today = now.astimezone(UTC).date()
     active = await store.list_active()
     emitted = 0
     considered = 0
     skipped: dict[str, int] = {
-        "outside_window": 0, "muted": 0, "not_required": 0,
-        "already_done": 0, "excused": 0, "cap": 0, "too_soon": 0,
+        "outside_window": 0, "muted": 0, "engine_says_no": 0,
+        "cap": 0, "too_soon": 0, "no_chat": 0,
     }
     for goal in active:
-        if not workout_required_today(goal, today=today):
-            skipped["not_required"] += 1
-            continue
-        # Goal-level mute beats everything
         if _is_muted(goal, now):
             skipped["muted"] += 1
+            continue
+        try:
+            log_rows = await store.recent_log(int(goal["id"]), limit=500)
+            result = goal_engine.evaluate(
+                goal=goal, log_rows=log_rows, now=now,
+            )
+        except Exception as exc:
+            logger.warning("nag_eval_failed", goal_id=goal["id"],
+                           error=str(exc))
+            continue
+        if not result.nudge_due:
+            skipped["engine_says_no"] += 1
             continue
         considered += 1
         member_id = int(goal["member_id"])
@@ -292,11 +208,8 @@ async def run_workout_nags(
             skipped["outside_window"] += 1
             continue
         progress = await store.get_progress(int(goal["id"]), day=today) or {}
-        if progress.get("workout_completed"):
-            skipped["already_done"] += 1
-            continue
         if progress.get("rest_day_excused"):
-            skipped["excused"] += 1
+            skipped["engine_says_no"] += 1  # respected as a 'no'
             continue
         nags_today = int(progress.get("nags_sent_today") or 0)
         if nags_today >= MAX_NAGS_PER_DAY:
@@ -308,10 +221,14 @@ async def run_workout_nags(
             if gap < MIN_NAG_GAP_MINUTES:
                 skipped["too_soon"] += 1
                 continue
-        text = _pick_nag_text(goal["title"], nags_today)
+        # Compose the message using the engine's tracker state so the
+        # nag is actually meaningful ('2 of 5 sets today, three to go')
+        # instead of a generic 'still pending'.
+        progress_line = goal_engine.format_status_line(result)
+        text = _pick_nag_text(goal["title"], nags_today) + "\n\n" + progress_line
         chat_id = await _chat_id_for_member(pool, member_id)
         if chat_id is None:
-            logger.warning("nag_skipped_no_chat", member_id=member_id)
+            skipped["no_chat"] += 1
             continue
         payload = {
             "chat_id": chat_id,
