@@ -49,6 +49,12 @@ PLANNER_MODEL_DEFAULT = "qwen3:14b"
 CONTEXT_TTL_SECONDS = 30 * 60
 CONTEXT_KEY_PREFIX = "goals_chat:context:"
 
+# A goal-creation draft survives this long while we Q&A with the user.
+# Shorter than CONTEXT_TTL because a stale draft is more annoying:
+# the next thing the user types would get pulled into the wrong goal.
+DRAFT_TTL_SECONDS = 15 * 60
+DRAFT_KEY_PREFIX = "goals_chat:draft:"
+
 # Intents the classifier may return. "general_chat" means "not a goals
 # topic — pass through to the regular router". The order matters: when
 # the LLM is unsure between create_goal and check_progress, we tip
@@ -112,6 +118,31 @@ class GoalsChatHandler:
         if member is None or "id" not in member:
             return GoalsHandlerResult(handled=False)
         member_id = int(member["id"])
+        # If an unfinished goal-creation draft is in flight, route the
+        # new message straight to it — the user is answering our
+        # clarification question, not starting a new conversation.
+        draft = await self._load_draft(member_id)
+        if draft:
+            try:
+                reply, touched_goal_id = await self._handle_create_goal_draft(
+                    draft=draft, answer=text, member_id=member_id,
+                )
+            except Exception as exc:
+                logger.warning("goals_chat_draft_failed", error=str(exc))
+                await self._clear_draft(member_id)
+                return GoalsHandlerResult(
+                    handled=True, intent="create_goal",
+                    text=("I lost track of the goal we were setting up. "
+                          "Could you start over?"),
+                )
+            if touched_goal_id is not None:
+                await self._save_context(
+                    member_id, last_goal_id=touched_goal_id,
+                    last_intent="create_goal",
+                )
+            return GoalsHandlerResult(
+                handled=True, intent="create_goal", text=reply,
+            )
         context = await self._load_context(member_id)
         intent_info = await self._classify(text, context=context)
         intent = intent_info.get("intent", "general_chat")
@@ -330,7 +361,7 @@ class GoalsChatHandler:
             "handle that specific request yet."
         ), None
 
-    # ── create_goal: LLM plan generation ─────────────────────────
+    # ── create_goal: LLM plan generation w/ multi-turn clarification ──
 
     async def _handle_create_goal(
         self, args: dict[str, Any], text: str, member_id: int,
@@ -338,10 +369,13 @@ class GoalsChatHandler:
         title = str(args.get("title") or text[:80]).strip()
         description = str(args.get("description") or text).strip()
         try:
-            plan = await self._generate_plan(title=title, description=description)
+            plan = await self._generate_plan(
+                title=title, description=description,
+            )
         except Exception as exc:
             logger.warning("goals_chat_planner_failed", error=str(exc))
             plan = {
+                "ready": True,  # fail-open: commit something rather than dead-loop
                 "plan_text": (
                     "I'll check in and nudge you as we go. Tell me how "
                     "you'd like me to measure this and I'll set up the "
@@ -350,10 +384,84 @@ class GoalsChatHandler:
                 "tracker_spec": None,
                 "milestones": [],
             }
+        if not plan.get("ready") and plan.get("clarification_question"):
+            # Stash the draft and ask the question. The next user
+            # message will route through _handle_create_goal_draft.
+            await self._save_draft(member_id, {
+                "title": title,
+                "description": description,
+                "answers": [],
+                "pending_question": plan["clarification_question"],
+            })
+            return (
+                f"Before I commit a plan for \"{title}\" — "
+                f"{plan['clarification_question']}"
+            ), None
+        return await self._commit_goal(
+            title=title, description=description,
+            plan=plan, member_id=member_id,
+        )
+
+    async def _handle_create_goal_draft(
+        self, *, draft: dict[str, Any], answer: str, member_id: int,
+    ) -> tuple[str, int | None]:
+        """User sent a follow-up message while a goal-creation draft
+        was pending. Append their answer, re-ask the planner, either
+        commit or ask one more question."""
+        title = str(draft.get("title") or "").strip() or "(untitled)"
+        description = str(draft.get("description") or "").strip()
+        answers = list(draft.get("answers") or [])
+        pending_q = str(draft.get("pending_question") or "").strip()
+        answers.append({"q": pending_q, "a": answer.strip()})
+        try:
+            plan = await self._generate_plan(
+                title=title, description=description, prior_answers=answers,
+            )
+        except Exception as exc:
+            logger.warning("goals_chat_draft_planner_failed", error=str(exc))
+            await self._clear_draft(member_id)
+            return (
+                "I couldn't finish writing your plan. Try saying the "
+                "goal again from scratch."
+            ), None
+        if not plan.get("ready") and plan.get("clarification_question"):
+            await self._save_draft(member_id, {
+                "title": title,
+                "description": description,
+                "answers": answers,
+                "pending_question": plan["clarification_question"],
+            })
+            return (
+                f"One more thing — {plan['clarification_question']}"
+            ), None
+        # Ready (or forced after 2 rounds). Commit + drop the draft.
+        await self._clear_draft(member_id)
+        return await self._commit_goal(
+            title=title, description=description,
+            plan=plan, member_id=member_id,
+            prior_answers=answers,
+        )
+
+    async def _commit_goal(
+        self, *, title: str, description: str, plan: dict[str, Any],
+        member_id: int, prior_answers: list[dict[str, str]] | None = None,
+    ) -> tuple[str, int | None]:
+        """Persist the goal + render the user-facing confirmation.
+        Shared by both single-shot create and post-clarification commit."""
+        # Fold any clarification answers into the persisted description
+        # so future refine_goal calls have the full picture.
+        full_description = description
+        if prior_answers:
+            qa_block = "\n\n" + "\n".join(
+                f"Q: {qa['q']}\nA: {qa['a']}"
+                for qa in prior_answers
+                if qa.get("q") or qa.get("a")
+            )
+            full_description = description + qa_block
         goal_id = await self.goals.create(
             member_id=member_id,
             title=title,
-            description=description,
+            description=full_description,
             tracker_spec=plan.get("tracker_spec"),
             plan_text=plan.get("plan_text"),
         )
@@ -479,24 +587,48 @@ class GoalsChatHandler:
 
     async def _generate_plan(
         self, *, title: str, description: str,
+        prior_answers: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
-        """One 14b call. Returns plan_text + tracker_spec + milestones.
+        """One 14b call. Returns plan_text + tracker_spec + milestones
+        — OR a clarification question if the goal description is too
+        thin to commit a plan responsibly.
 
-        The tracker_spec is the generic structure that the goal_engine
-        runtime evaluates against the user's logs. Trackers can be
-        counter (sum of deltas in a window) or gauge (most recent
-        reported value). Reset windows are daily / weekly / monthly /
-        never. New goal shapes — sessions per day, reps per session,
-        weight gauges, calorie deficits, water intake, anything — fit
-        this shape without code changes."""
+        prior_answers carries the rolling Q&A so far in this draft,
+        e.g. [{"q": "Over what timeframe?", "a": "12 weeks"}]. After
+        a couple of rounds the planner should commit even with gaps;
+        we cap it via the caller's draft-rounds counter."""
+        prior_block = ""
+        if prior_answers:
+            lines = []
+            for qa in prior_answers:
+                if not isinstance(qa, dict):
+                    continue
+                q = (qa.get("q") or "").strip()
+                a = (qa.get("a") or "").strip()
+                if q or a:
+                    lines.append(f"Q: {q}\nA: {a}")
+            if lines:
+                prior_block = (
+                    "\n\nPrior follow-up Q&A in this draft (already "
+                    "answered — don't ask these again):\n" + "\n".join(lines)
+                )
         system = (
             "You are a calm, practical health coach. The user told you a "
-            "goal in plain English. Write a short personal plan and a "
-            "structured tracker spec that the runtime will evaluate.\n\n"
+            "goal in plain English. You can either commit a plan now OR "
+            "ask ONE short follow-up question if the description is too "
+            "thin to commit responsibly.\n\n"
             "Output a JSON object with these keys:\n"
-            "- plan_text: 2 to 4 sentences. Friendly and concrete. Avoid "
-            "fitness clichés. Avoid commands like 'do X every day'.\n"
-            "- tracker_spec: object with these keys:\n"
+            "- ready: true|false. true means commit. false means ask "
+            "ONE follow-up.\n"
+            "- clarification_question: required when ready=false. ONE "
+            "specific question (max ~20 words). Examples of good "
+            "questions: 'What's your current max pushups in a single "
+            "set?', 'Over what timeframe?', 'Any days you definitely "
+            "can't train?', 'Have you tried losing weight before, and "
+            "what worked or didn't?'.\n"
+            "- plan_text: required when ready=true. 2 to 4 sentences. "
+            "Friendly and concrete. Avoid fitness clichés.\n"
+            "- tracker_spec: required when ready=true. Object with:\n"
             "    - trackers: JSON array. Each entry is "
             "{id, label, kind, reset, target, unit, direction}.\n"
             "      id: short snake_case key unique within this goal.\n"
@@ -519,8 +651,20 @@ class GoalsChatHandler:
             "day with 240-min gaps. Defaults are 3 and 90 if omitted.\n"
             "    - log_hints: optional array helping the log classifier. "
             "Each entry: {if_mentions: [keywords], increment: {tracker_id: number}}.\n"
-            "- milestones: 1 to 3 entries, each "
+            "- milestones: optional when ready=true. 1 to 3 entries, each "
             "{due_date: YYYY-MM-DD, target_description: str}.\n\n"
+            "When to ask vs commit:\n"
+            "- Ask when the goal needs a numeric anchor you don't have "
+            "('lose weight' without a target, 'get stronger' without a "
+            "metric, 'sleep better' without a baseline).\n"
+            "- Ask when timeframe is ambiguous and matters for milestones.\n"
+            "- Commit when the description is concrete enough to write "
+            "sensible defaults (any timeframe, any cadence, any target "
+            "you can infer reasonably). It's fine to commit with "
+            "reasonable assumptions and let the user refine later.\n"
+            "- Never ask more than one question in a single turn.\n"
+            "- After 2 rounds of Q&A, commit no matter what — don't "
+            "burn the user's patience.\n\n"
             "Pick trackers that match HOW the user described the goal. "
             "For 'pushups after every prayer', model both sessions_today "
             "(counter, daily, target 5) and pushups_today (counter, daily, "
@@ -533,7 +677,7 @@ class GoalsChatHandler:
             f"{_now_context_line()}\n"
             "Return ONLY the JSON object."
         )
-        user = f"Title: {title}\nDescription: {description}"
+        user = f"Title: {title}\nDescription: {description}{prior_block}"
         resp = await self.llm.chat(
             messages=[
                 {"role": "system", "content": system},
@@ -547,6 +691,10 @@ class GoalsChatHandler:
         )
         content = _extract_chat_content(resp)
         parsed = _parse_json_blob(content) or {}
+        ready = bool(parsed.get("ready"))
+        # Force-commit after 2 rounds of clarification to avoid infinite loops
+        if not ready and prior_answers and len(prior_answers) >= 2:
+            ready = True
         plan_text = str(parsed.get("plan_text") or "").strip()
         tracker_spec = parsed.get("tracker_spec")
         if not isinstance(tracker_spec, dict):
@@ -554,7 +702,10 @@ class GoalsChatHandler:
         milestones = parsed.get("milestones") or []
         if not isinstance(milestones, list):
             milestones = []
+        question = str(parsed.get("clarification_question") or "").strip()
         return {
+            "ready": ready,
+            "clarification_question": question if not ready else None,
             "plan_text": plan_text,
             "tracker_spec": tracker_spec,
             "milestones": milestones,
@@ -1259,6 +1410,52 @@ class GoalsChatHandler:
             )
         except Exception as exc:
             logger.warning("goals_chat_context_save_failed", error=str(exc))
+
+    # ── Goal-creation draft (Redis, 15-min TTL) ─────────────────
+
+    async def _load_draft(self, member_id: int) -> dict[str, Any] | None:
+        """Return the in-flight goal-creation draft for this member,
+        or None if none is open. The draft carries the title,
+        description, all answered Q&A so far, and the question we
+        most recently asked."""
+        if self.redis is None:
+            return None
+        try:
+            raw = await self.redis.get(DRAFT_KEY_PREFIX + str(member_id))
+        except Exception as exc:
+            logger.warning("goals_chat_draft_load_failed", error=str(exc))
+            return None
+        if not raw:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        try:
+            blob = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return blob if isinstance(blob, dict) else None
+
+    async def _save_draft(
+        self, member_id: int, draft: dict[str, Any],
+    ) -> None:
+        if self.redis is None:
+            return
+        try:
+            await self.redis.set(
+                DRAFT_KEY_PREFIX + str(member_id),
+                json.dumps(draft, default=str),
+                ex=DRAFT_TTL_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning("goals_chat_draft_save_failed", error=str(exc))
+
+    async def _clear_draft(self, member_id: int) -> None:
+        if self.redis is None:
+            return
+        try:
+            await self.redis.delete(DRAFT_KEY_PREFIX + str(member_id))
+        except Exception as exc:
+            logger.warning("goals_chat_draft_clear_failed", error=str(exc))
 
 
 # ── Helpers ──────────────────────────────────────────────────────

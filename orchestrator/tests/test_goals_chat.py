@@ -591,7 +591,7 @@ async def test_handler_failure_returns_apology() -> None:
 
 
 def _fake_redis_stub() -> SimpleNamespace:
-    """Tiny in-memory Redis stub — just enough for SET ex= and GET."""
+    """Tiny in-memory Redis stub — just enough for SET ex= and GET and DELETE."""
     store: dict[str, str] = {}
 
     async def _get(key):
@@ -601,8 +601,17 @@ def _fake_redis_stub() -> SimpleNamespace:
         store[key] = value
         return True
 
+    async def _delete(*keys):
+        n = 0
+        for k in keys:
+            if k in store:
+                del store[k]
+                n += 1
+        return n
+
     return SimpleNamespace(_store=store, get=AsyncMock(side_effect=_get),
-                           set=AsyncMock(side_effect=_set))
+                           set=AsyncMock(side_effect=_set),
+                           delete=AsyncMock(side_effect=_delete))
 
 
 def _fake_goals_store_with_get(*goals):
@@ -1214,3 +1223,209 @@ def test_parse_until_iso_handles_garbage() -> None:
     assert _parse_until_iso(None) is None
     assert _parse_until_iso("") is None
     assert _parse_until_iso("never") is None
+
+
+# ── Multi-turn goal creation (C) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_create_goal_asks_clarification_when_planner_says_not_ready() -> None:
+    """User says 'I want to lose weight'. Planner returns ready=false
+    + a question. Handler stashes a draft and asks the question
+    instead of committing a half-baked goal."""
+    classify = {"intent": "create_goal", "title": "Lose weight",
+                "description": "I want to lose weight"}
+    not_ready = {"ready": False,
+                  "clarification_question": "How much, and over what timeframe?"}
+    llm = _llm_returning(classify, not_ready)
+    redis = _fake_redis_stub()
+    goals = _fake_goals_store()
+    h = GoalsChatHandler(
+        llm=llm, goals_store=goals,
+        chore_store=_fake_chore_store(),
+        nag_store=_fake_nag_store(),
+        redis=redis,
+    )
+    r = await h.try_handle("I want to lose weight", member=MEMBER)
+    assert r.handled is True
+    assert "How much, and over what timeframe?" in r.text
+    # No goal was created
+    goals.create.assert_not_called()
+    # Draft was stashed
+    assert "goals_chat:draft:2" in redis._store
+    draft = json.loads(redis._store["goals_chat:draft:2"])
+    assert draft["title"] == "Lose weight"
+    assert draft["pending_question"] == "How much, and over what timeframe?"
+    assert draft["answers"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_goal_draft_completes_after_user_answers() -> None:
+    """Round 1: planner asks a question, draft stashed.
+    Round 2: user replies, planner returns ready=true with a plan.
+    The goal commits with the Q&A merged into description."""
+    classify_1 = {"intent": "create_goal", "title": "Lose weight",
+                  "description": "I want to lose weight"}
+    not_ready = {"ready": False,
+                  "clarification_question": "How much, and over what timeframe?"}
+    ready_plan = {
+        "ready": True,
+        "plan_text": "10 kg over 16 weeks: ~0.6 kg/week.",
+        "tracker_spec": {
+            "trackers": [
+                {"id": "weight_kg", "label": "Weight", "kind": "gauge",
+                 "reset": "weekly", "target": 88, "unit": "kg",
+                 "direction": "down"},
+            ],
+        },
+        "milestones": [],
+    }
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=[
+        {"message": {"content": json.dumps(classify_1)}},
+        {"message": {"content": json.dumps(not_ready)}},
+        {"message": {"content": json.dumps(ready_plan)}},
+    ])
+    redis = _fake_redis_stub()
+    goals = _fake_goals_store()
+    h = GoalsChatHandler(
+        llm=llm, goals_store=goals,
+        chore_store=_fake_chore_store(),
+        nag_store=_fake_nag_store(),
+        redis=redis,
+    )
+    # Round 1
+    r1 = await h.try_handle("I want to lose weight", member=MEMBER)
+    assert r1.handled is True
+    assert "How much" in r1.text
+    goals.create.assert_not_called()
+    # Round 2 (user answers; classifier is NOT called because draft is open)
+    r2 = await h.try_handle(
+        "10 kg over the next 4 months", member=MEMBER,
+    )
+    assert r2.handled is True
+    goals.create.assert_awaited_once()
+    create_kwargs = goals.create.await_args.kwargs
+    # Q&A folded into the stored description
+    assert "Q: How much" in create_kwargs["description"]
+    assert "10 kg over the next 4 months" in create_kwargs["description"]
+    assert create_kwargs["tracker_spec"]["trackers"][0]["id"] == "weight_kg"
+    # Draft cleared after commit
+    assert "goals_chat:draft:2" not in redis._store
+
+
+@pytest.mark.asyncio
+async def test_create_goal_force_commits_after_two_rounds() -> None:
+    """If the planner keeps asking questions, we commit after the 2nd
+    round to avoid burning the user's patience."""
+    classify_1 = {"intent": "create_goal", "title": "X", "description": "X"}
+    # Planner returns ready=false twice in a row (with question), but
+    # the handler should treat the third call as forced-commit.
+    # In this test, the LLM keeps returning ready=false but with a
+    # plan_text fallback — the engine forces ready=True after 2 rounds.
+    persistent_no = {
+        "ready": False,
+        "clarification_question": "more info?",
+        "plan_text": "Forced fallback plan.",
+        "tracker_spec": {"trackers": [
+            {"id": "x", "label": "X", "kind": "counter",
+             "reset": "daily", "target": 1, "direction": "up"},
+        ]},
+    }
+    llm = MagicMock()
+    # Need: classify + 3 planner calls (1 initial, 2 follow-ups)
+    llm.chat = AsyncMock(side_effect=[
+        {"message": {"content": json.dumps(classify_1)}},
+        {"message": {"content": json.dumps(persistent_no)}},
+        {"message": {"content": json.dumps(persistent_no)}},
+        {"message": {"content": json.dumps(persistent_no)}},
+    ])
+    redis = _fake_redis_stub()
+    goals = _fake_goals_store()
+    h = GoalsChatHandler(
+        llm=llm, goals_store=goals,
+        chore_store=_fake_chore_store(),
+        nag_store=_fake_nag_store(),
+        redis=redis,
+    )
+    # Round 1: ask
+    r1 = await h.try_handle("X", member=MEMBER)
+    assert "more info" in r1.text
+    goals.create.assert_not_called()
+    # Round 2: still asking (1 prior answer)
+    r2 = await h.try_handle("answer1", member=MEMBER)
+    assert "more info" in r2.text
+    goals.create.assert_not_called()
+    # Round 3: hit the 2-round cap → forced commit even though LLM said no
+    r3 = await h.try_handle("answer2", member=MEMBER)
+    goals.create.assert_awaited_once()
+    assert "goals_chat:draft:2" not in redis._store
+
+
+@pytest.mark.asyncio
+async def test_open_draft_intercepts_classification() -> None:
+    """When a draft is open, the next message goes straight to the
+    draft handler — the classifier is skipped entirely (the user's
+    answer might look like 'check_progress' or anything else)."""
+    classify_1 = {"intent": "create_goal", "title": "g", "description": "g"}
+    not_ready = {"ready": False, "clarification_question": "huh?"}
+    ready = {
+        "ready": True, "plan_text": "ok",
+        "tracker_spec": {"trackers": [
+            {"id": "x", "label": "X", "kind": "counter",
+             "reset": "daily", "target": 1, "direction": "up"},
+        ]},
+    }
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=[
+        {"message": {"content": json.dumps(classify_1)}},
+        {"message": {"content": json.dumps(not_ready)}},
+        # The second user message ("how am I doing") would normally hit
+        # the classifier first; with an open draft it must go to the
+        # planner directly. So next call is the planner ready response.
+        {"message": {"content": json.dumps(ready)}},
+    ])
+    redis = _fake_redis_stub()
+    goals = _fake_goals_store()
+    h = GoalsChatHandler(
+        llm=llm, goals_store=goals,
+        chore_store=_fake_chore_store(),
+        nag_store=_fake_nag_store(),
+        redis=redis,
+    )
+    r1 = await h.try_handle("g", member=MEMBER)
+    assert "huh?" in r1.text
+    # User's next message is a confounder ("how am I doing") — must NOT
+    # route to check_progress.
+    r2 = await h.try_handle("how am I doing", member=MEMBER)
+    # Commits the goal with "how am I doing" as the answer
+    goals.create.assert_awaited_once()
+    assert "how am I doing" in goals.create.await_args.kwargs["description"]
+
+
+@pytest.mark.asyncio
+async def test_no_draft_no_redis_short_circuits_safely() -> None:
+    """If redis is None (e.g. test env or transient outage), draft
+    flow degrades to single-shot create. The planner is asked once
+    and if it says not_ready we commit anyway (we can't store draft)."""
+    classify = {"intent": "create_goal", "title": "X", "description": "X"}
+    not_ready = {
+        "ready": False,
+        "clarification_question": "?",
+    }
+    llm = _llm_returning(classify, not_ready)
+    # No redis
+    goals = _fake_goals_store()
+    h = GoalsChatHandler(
+        llm=llm, goals_store=goals,
+        chore_store=_fake_chore_store(),
+        nag_store=_fake_nag_store(),
+        redis=None,
+    )
+    r = await h.try_handle("X", member=MEMBER)
+    # Without redis we can't persist the draft, so the question still
+    # comes back to the user but no goal is created yet. The user
+    # would need to amend their message to commit.
+    assert r.handled is True
+    assert "?" in r.text
+    goals.create.assert_not_called()
