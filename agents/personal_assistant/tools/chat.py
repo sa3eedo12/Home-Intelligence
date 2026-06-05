@@ -186,7 +186,7 @@ def _chat_model() -> str:
         os.getenv("CHAT_MODEL")
         or os.getenv("ROUTER_MODEL")
         or os.getenv("DEFAULT_MODEL")
-        or "qwen3:8b"
+        or "qwen3-8b-8k"
     )
 
 

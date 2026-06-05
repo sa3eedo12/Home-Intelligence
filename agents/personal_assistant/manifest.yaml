@@ -2,7 +2,7 @@ agent: personal_assistant
 version: 0.3.0
 description: Reminders, renewals, appointments, and personal daily briefings.
 defaults:
-  llm: qwen3:8b
+  llm: qwen3-8b-8k
   timeout_s: 30
 capabilities:
   - id: chat
@@ -47,7 +47,7 @@ capabilities:
     description: Compose today's briefing from reminders, appointments, and unfinished chores.
     side_effects: false
     cost: high
-    llm: qwen3:8b
+    llm: qwen3-8b-8k
   - id: evening_recap
     description: Compose tomorrow's appointments, tonight's reminders, and recent alerts.
     side_effects: false
@@ -72,7 +72,7 @@ capabilities:
     inputs: { context: string }
     side_effects: false
     cost: medium
-    llm: qwen3:8b
+    llm: qwen3-8b-8k
   - id: infer_presence_return
     description: |
       Guess where someone is returning from when the presence observer sees
@@ -92,7 +92,7 @@ capabilities:
     inputs: { agent: "string?", kind: string, summary: "string?", payload: "object?", ts: "string?" }
     side_effects: true
     cost: high
-    llm: qwen3:8b
+    llm: qwen3-8b-8k
   - id: confirm_auto_inference
     description: Confirm, reject, or skip an auto-inferred memory proposal.
     inputs: { auto_inference_id: integer, status: string, chat_id: "integer?" }

@@ -55,7 +55,7 @@ async def summarize_event(event_type: str, entity_id: str | None = None) -> dict
         )
         resp = await llm.chat(
             [{"role": "user", "content": prompt}],
-            model=os.getenv("DEFAULT_MODEL", "qwen3:8b"),
+            model=os.getenv("DEFAULT_MODEL", "qwen3-8b-8k"),
         )
         summary = resp.get("message", {}).get(
             "content", f"Visitor detected at doorbell ({event_type})."

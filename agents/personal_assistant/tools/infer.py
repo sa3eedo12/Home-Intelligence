@@ -45,7 +45,7 @@ def _llm() -> OllamaClient:
 
 
 def _model() -> str:
-    return os.getenv("DEFAULT_MODEL", "qwen3:8b")
+    return os.getenv("DEFAULT_MODEL", "qwen3-8b-8k")
 
 
 async def _event_store() -> EventLogStore:

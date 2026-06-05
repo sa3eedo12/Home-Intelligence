@@ -32,18 +32,18 @@ def _llm_client() -> OllamaClient:
 
 
 def _default_model() -> str:
-    return os.getenv("DEFAULT_MODEL", "qwen3:8b")
+    return os.getenv("DEFAULT_MODEL", "qwen3-8b-8k")
 
 
 def _narrative_model() -> str:
     """Model used for the chatty per-minute narrative summaries.
 
-    Defaults to the small qwen3:0.6b model (already warmed by the orchestrator)
+    Defaults to the small qwen3-0.6b-4k model (already warmed by the orchestrator)
     so the 60-second scheduled cycle doesn't pile up behind 30s LLM calls and
     blow the dispatch timeout. Override via DASHBOARD_NARRATIVE_MODEL for
     higher fidelity at the cost of latency.
     """
-    return os.getenv("DASHBOARD_NARRATIVE_MODEL", "qwen3:0.6b")
+    return os.getenv("DASHBOARD_NARRATIVE_MODEL", "qwen3-0.6b-4k")
 
 
 def _ms_since(iso_ts: str) -> float:

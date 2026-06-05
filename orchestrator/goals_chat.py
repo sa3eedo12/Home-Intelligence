@@ -39,8 +39,8 @@ from home_agents_sdk.telemetry import get_logger
 
 logger = get_logger("orchestrator.goals_chat")
 
-CLASSIFIER_MODEL_DEFAULT = "qwen3:8b"
-PLANNER_MODEL_DEFAULT = "gemma4:12b"
+CLASSIFIER_MODEL_DEFAULT = "qwen3-8b-8k"
+PLANNER_MODEL_DEFAULT = "qwen36-moe-32k"
 
 # Per-member context lives in Redis for this many seconds. Long enough
 # to cover a natural back-and-forth ("create goal" → "what's the plan?"
