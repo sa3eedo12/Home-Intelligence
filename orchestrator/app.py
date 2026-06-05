@@ -490,7 +490,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     policy_engine = PolicyEngine(_load_yaml(HERE / "policies.yaml"), redis, pool=pool)
-    reasoner_model = os.environ.get("REASONER_MODEL", "qwen3:14b")
+    reasoner_model = os.environ.get("REASONER_MODEL", "gemma4:12b")
     reflector = NightlyReflector(
         pool=pool,
         redis=redis,
@@ -730,7 +730,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     pool=pool, redis=redis,
                     goals_store=app.state.health_goals_store,
                     member_id=int(m["id"]), llm=llm,
-                    reasoner_model=os.environ.get("REASONER_MODEL", "qwen3:14b"),
+                    reasoner_model=os.environ.get("REASONER_MODEL", "gemma4:12b"),
                 )
             except Exception as exc:
                 logger.warning("cross_goal_run_failed",
@@ -746,7 +746,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             pool=pool, redis=redis,
             store=app.state.health_goals_store,
             llm=llm,
-            reasoner_model=os.environ.get("REASONER_MODEL", "qwen3:14b"),
+            reasoner_model=os.environ.get("REASONER_MODEL", "gemma4:12b"),
         )
 
     async def _run_goal_auto_log(_inputs: dict[str, Any]) -> dict[str, Any]:

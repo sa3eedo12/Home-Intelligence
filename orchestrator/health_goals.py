@@ -14,7 +14,7 @@ Three entrypoints:
   nagged 3 times today.
 
 - `run_weekly_reflection(...)`: Sundays at 21:00. For each active goal,
-  pulls the last 7 days of progress and asks the reasoner (qwen3:14b)
+  pulls the last 7 days of progress and asks the reasoner (gemma4:12b)
   to write a one-paragraph reflection + (optionally) a refreshed plan.
   Sends the reflection to the user via notify.outbound.
 
@@ -370,7 +370,7 @@ async def run_weekly_reflection(
     redis: Redis,
     store: HealthGoalsStore,
     llm: Any | None = None,
-    reasoner_model: str = "qwen3:14b",
+    reasoner_model: str = "gemma4:12b",
 ) -> dict[str, Any]:
     """Per active goal, build a tracker-spec-driven summary of the
     last 7 days and ask the reasoner for a one-paragraph reflection.

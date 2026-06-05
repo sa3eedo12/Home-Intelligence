@@ -17,7 +17,7 @@ and it'll run + tabulate.
 
 Run from inside the orchestrator container:
 
-    python3 -m orchestrator.eval.llm_eval --models qwen3:14b,gemma4:e4b
+    python3 -m orchestrator.eval.llm_eval --models gemma4:12b,qwen3:8b,gemma4:e4b
 
 Output: side-by-side per-task scores + raw JSON to
 ~/.copilot/session-state/<id>/files/llm_eval_<timestamp>/.
@@ -746,7 +746,7 @@ def render_summary(results: dict) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--models", default="qwen3:14b,qwen3:8b,gemma4:e4b",
+        "--models", default="gemma4:12b,qwen3:8b,gemma4:e4b",
         help="comma-separated list of Ollama model tags",
     )
     parser.add_argument(

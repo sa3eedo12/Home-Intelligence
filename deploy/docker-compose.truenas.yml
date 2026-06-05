@@ -84,13 +84,16 @@ services:
       # ROCm's HSA allocator treats the UMA carveout as opaque on this
       # consumer iGPU; Vulkan via mesa/radv addresses it natively.
       OLLAMA_VULKAN: "1"
+      # Ollama v0.30 started dropping integrated GPUs by default; this
+      # re-enables the Strix Halo iGPU so Vulkan offload works.
+      OLLAMA_IGPU_ENABLE: "1"
       # Keep models warm all day. The N5 Pro has 96GB RAM (62 GiB OS-
       # visible after the 32 GB BIOS UMA carveout) so eviction cost
       # (60-180s reload) is far worse than the memory cost.
       OLLAMA_KEEP_ALIVE: 24h
       OLLAMA_NUM_PARALLEL: "2"
-      # Allow all four models (qwen3.6:35b-a3b ~34GB runtime, qwen3:8b
-      # ~11GB, qwen3:0.6b ~1.5GB, bge-m3 ~1.2GB = ~48GB total) to stay
+      # Allow the active set (gemma4:12b ~10GB, qwen3:8b ~11GB,
+      # qwen3:0.6b ~1.5GB, bge-m3 ~1.2GB = ~24GB total) to stay
       # loaded simultaneously inside the 63 GiB Vulkan pool.
       OLLAMA_MAX_LOADED_MODELS: "4"
       OLLAMA_FLASH_ATTENTION: "1"
@@ -176,7 +179,7 @@ services:
       # run doesn't pay the cold-load tax. Inlined here (not in .env)
       # because docker compose's env_file parser was dropping negative-
       # integer values when read from the project .env on this host.
-      # Safe with the current default reasoner (qwen3:14b @ ~9 GB resident);
+      # Safe with the current default reasoner (gemma4:12b @ ~10 GB resident);
       # if you ever set REASONER_MODEL to a >20 GB model, double-check
       # ROCm/Vulkan reports enough VRAM headroom before keeping it pinned.
       REASONER_KEEP_ALIVE: "-1"
