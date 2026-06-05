@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -645,3 +646,72 @@ async def test_nag_text_handles_llm_crash() -> None:
     )
     assert "Run More" in out
     assert "goal still has room" in out
+
+
+@pytest.mark.asyncio
+async def test_nag_recent_log_filtered_to_today_only() -> None:
+    """Production bug: 4-day-old log entries leaked into the LLM prompt
+    because recent_log[:5] took rows by recency only, and the formatted
+    timestamp ('Tue 11:00') gave no hint about WHICH Tue. LLM then wrote
+    'You did 12 pushups after Dhuhr — keep going!' even though the
+    status line said today=0. Fix: filter to today's window, format with
+    explicit 'today HH:MM' label."""
+    goal = {"id": 1, "member_id": 2, "title": "Pushups",
+            "tracker_spec": {}, "quiet_until": None}
+    now = datetime.now(UTC).astimezone()
+    today_morning = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    four_days_ago = now - timedelta(days=4)
+    captured: dict[str, Any] = {}
+
+    async def _capture(messages, **_kw):
+        captured["user"] = next(m["content"] for m in messages if m["role"] == "user")
+        captured["system"] = next(m["content"] for m in messages if m["role"] == "system")
+        return {"message": {"content": "Today is in progress at 0 of 5."}}
+
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=_capture)
+
+    await hg._compose_nag_text(
+        llm=llm, goal=goal,
+        status_line="Today: 0 of 5",
+        nags_today=0,
+        recent_log=[
+            {"ts": four_days_ago, "raw_text": "did 12 pushups after Dhuhr"},
+            {"ts": today_morning, "raw_text": "had breakfast"},
+        ],
+    )
+    # The 4-day-old pushup line MUST NOT make it into the prompt.
+    assert "12 pushups" not in captured["user"]
+    # Today's entry IS allowed, prefixed with the unambiguous 'today' label.
+    assert "today 08:00" in captured["user"]
+    # System prompt warns the LLM that recent_activity is today-only.
+    assert "today" in captured["system"].lower()
+
+
+@pytest.mark.asyncio
+async def test_nag_recent_log_shows_placeholder_when_no_today_entries() -> None:
+    """If every recent_log row is stale (e.g. user took a multi-day
+    break), the prompt should say '(no logs yet today)' — not silently
+    drop the field and let the LLM infer from emptiness."""
+    goal = {"id": 1, "member_id": 2, "title": "Pushups",
+            "tracker_spec": {}, "quiet_until": None}
+    four_days_ago = datetime.now(UTC).astimezone() - timedelta(days=4)
+    captured: dict[str, Any] = {}
+
+    async def _capture(messages, **_kw):
+        captured["user"] = next(m["content"] for m in messages if m["role"] == "user")
+        return {"message": {"content": "0 of 5 today, no logs yet."}}
+
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=_capture)
+
+    await hg._compose_nag_text(
+        llm=llm, goal=goal,
+        status_line="Today: 0 of 5",
+        nags_today=0,
+        recent_log=[
+            {"ts": four_days_ago, "raw_text": "did 12 pushups after Dhuhr"},
+        ],
+    )
+    assert "12 pushups" not in captured["user"]
+    assert "no logs yet today" in captured["user"]

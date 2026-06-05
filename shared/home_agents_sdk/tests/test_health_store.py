@@ -73,6 +73,11 @@ async def test_list_recent_formats_rows() -> None:
 
 @pytest.mark.asyncio
 async def test_aggregate_daily_marks_sum_metrics() -> None:
+    """Steps is a cumulative-daily metric (exporter sends running totals
+    multiple times per day), so the aggregation label is 'max' and the
+    headline value is MAX(value) — see the JIRA-less production bug where
+    summing two cumulative snapshots gave 66948 steps for what was really
+    a single 35835-step day."""
     conn = MagicMock()
     conn.fetch = AsyncMock(
         return_value=[
@@ -94,8 +99,8 @@ async def test_aggregate_daily_marks_sum_metrics() -> None:
     assert rows == [
         {
             "metric": "steps",
-            "aggregation": "sum",
-            "value": 12000.0,
+            "aggregation": "max",
+            "value": 6000.0,
             "day": "2026-05-13",
             "count": 3,
             "sum": 12000.0,
@@ -189,21 +194,23 @@ async def test_aggregate_daily_session_metric_picks_max_value_per_day() -> None:
 
 
 @pytest.mark.asyncio
-async def test_aggregate_daily_steps_still_sums_all_intervals() -> None:
-    """Cumulative metrics like steps must KEEP summing across the day —
-    the per-day rank-by-value picks one interval but step intervals
-    don't overlap so the existing per-day single-row contract degrades
-    to the right value. Use the non-session code path."""
+async def test_aggregate_daily_steps_uses_max_per_day() -> None:
+    """Steps is in _CUMULATIVE_DAILY_METRICS because the exporter
+    sends running cumulative totals at multiple timestamps per day
+    (e.g. 31112 at 08:22, 35835 at 10:48 — both are 'steps so far
+    today', NOT two disjoint chunks to sum). So steps takes the
+    same code path as sleep — pick the row with the largest value
+    per day via row_number()."""
     conn = MagicMock()
     conn.fetch = AsyncMock(
         return_value=[
             {
                 "day": date(2026, 5, 13),
-                "count": 24,
-                "sum": 8500.0,
-                "avg": 354.16,
-                "min": 0.0,
-                "max": 1200.0,
+                "count": 1,
+                "sum": 35835.0,
+                "avg": 35835.0,
+                "min": 35835.0,
+                "max": 35835.0,
                 "unit": "count",
             }
         ]
@@ -212,7 +219,8 @@ async def test_aggregate_daily_steps_still_sums_all_intervals() -> None:
 
     await store.aggregate_daily("steps", days=7)
     query = conn.fetch.await_args.args[0]
-    # Non-session metrics still SUM across distinct intervals
-    assert "sum(value)" in query
-    # And do NOT use the row_number ranking
-    assert "row_number()" not in query
+    # Cumulative metrics ride the session-metric branch (rank by value,
+    # take the winner — which for cumulative snapshots is the latest /
+    # highest reading of the day).
+    assert "row_number()" in query
+    assert "value DESC" in query

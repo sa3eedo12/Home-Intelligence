@@ -10,8 +10,6 @@ from .telemetry import get_logger
 logger = get_logger("home_agents_sdk.health_store")
 
 _SUM_METRICS = {
-    "steps",
-    "active_energy",
     "sleep_asleep",
     "sleep_awake",
     "sleep_inBed",
@@ -21,6 +19,11 @@ _SUM_METRICS = {
     "mindfulness",
 }
 _COUNT_METRICS = {"workout"}
+# Metrics where the exporter sends a running cumulative total of the day's
+# count (e.g. HealthKit sends "31112 steps so far today" at 08:22 and
+# "35835 so far today" at 10:48). Summing those two rows = 66948 — wrong.
+# For these we take MAX(value) per day, not SUM.
+_CUMULATIVE_DAILY_METRICS = {"steps", "active_energy"}
 
 
 def _json_dumps(value: Any) -> str:
@@ -201,17 +204,19 @@ class HealthStore:
         # All three are the SAME sleep session expressed differently.
         # A naive sum gives 12.8h for a 7h night.
         #
+        # Cumulative-daily metrics (steps, active_energy) hit the same
+        # branch for the same reason — the exporter sends the running
+        # total at multiple timestamps through the day, so MAX per day
+        # is the correct daily total (not SUM).
+        #
         # Two-stage dedup: first within (started_at, ended_at) take the
         # MAX(value) latest snapshot, then within a day pick the SINGLE
-        # interval with the largest coverage (longest end-start span).
-        # Cumulative metrics like steps have distinct non-overlapping
-        # intervals so this is still correct for them — each interval
-        # is unique, max-by-coverage picks the only interval, sum picks
-        # all of them via the GROUP BY day.
-        is_session_metric = metric_filter.startswith("sleep_") or metric_filter in {
-            "workout",
-            "mindfulness",
-        }
+        # interval with the largest value/coverage.
+        is_session_metric = (
+            metric_filter.startswith("sleep_")
+            or metric_filter in {"workout", "mindfulness"}
+            or metric_filter in _CUMULATIVE_DAILY_METRICS
+        )
         if is_session_metric:
             query = """
                 WITH deduped AS (
@@ -368,6 +373,10 @@ class HealthStore:
         if metric in _COUNT_METRICS:
             aggregation = "count"
             value = float(data["count"])
+        elif metric in _CUMULATIVE_DAILY_METRICS:
+            # Exporter sends cumulative running totals; MAX is the day's total.
+            aggregation = "max"
+            value = data.get("max")
         elif metric in _SUM_METRICS or metric.startswith("sleep_"):
             aggregation = "sum"
             value = data.get("sum")

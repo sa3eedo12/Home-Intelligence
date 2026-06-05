@@ -89,14 +89,24 @@ async def _compose_nag_text(
     if llm is None:
         return _FALLBACK_NAG.format(title=title)
     plan = str(goal.get("plan_text") or "")[:400]
+    # Filter to today's events ONLY so the LLM cannot reference a 4-day-old
+    # pushup session as if it happened today. We format with explicit
+    # "today HH:MM" (no weekday) so even with a buggy ts it cannot drift.
+    today_start = datetime.now(UTC).astimezone().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     recent_lines = []
-    for row in recent_log[:5]:
+    for row in recent_log:
         ts = row.get("ts")
         text = row.get("raw_text") or ""
-        if isinstance(ts, datetime) and text:
-            recent_lines.append(
-                f"- {ts.strftime('%a %H:%M')}: {text[:120]}"
-            )
+        if not isinstance(ts, datetime) or not text:
+            continue
+        ts_local = ts.astimezone(today_start.tzinfo)
+        if ts_local < today_start:
+            continue  # silently drop stale rows; status_line is authoritative
+        recent_lines.append(f"- today {ts_local.strftime('%H:%M')}: {text[:120]}")
+        if len(recent_lines) >= 5:
+            break
     recent_block = "\n".join(recent_lines) or "(no logs yet today)"
     tone_hint = (
         "first nudge of the day — be warm and brief" if nags_today == 0
@@ -118,6 +128,10 @@ async def _compose_nag_text(
         "detail from the current state or recent activity — a specific "
         "number, count, time-of-day, or named action. Generic encouragement "
         "without an anchor is a fail. "
+        "The 'Recent activity' block contains ONLY today's events; if it "
+        "says '(no logs yet today)', treat today as zero — do NOT claim "
+        "the user did anything earlier today. The status line is the "
+        "authoritative source of truth for today's progress. "
         f"Tone: {tone_hint}.\n\n"
         "Return ONLY the sentence — no quotes, no preamble."
     )
