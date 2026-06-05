@@ -295,14 +295,14 @@ class NightlyReflector:
         self.redis = redis
         self.llm = llm
         self.registry = registry
-        # qwen36-moe-32k @ ~10 GB VRAM is the recommended reasoner: beat
+        # qwen36-moe-128k @ ~10 GB VRAM is the recommended reasoner: beat
         # qwen3:14b on our planner (88% vs 81%) and log_classifier (86%
         # vs 77%) fixtures, runs faster on Strix Halo iGPU (9.1 vs 8.5
         # tok/s), uses half the VRAM, and gives 256K context (vs 40K).
         # Verified Vulkan-compatible after Ollama v0.30.5 +
         # OLLAMA_IGPU_ENABLE=1. Falls back to REASONER_MODEL env for
         # callers that override.
-        self.reasoner_model = reasoner_model or os.environ.get("REASONER_MODEL", "qwen36-moe-32k")
+        self.reasoner_model = reasoner_model or os.environ.get("REASONER_MODEL", "qwen36-moe-128k")
         self.fallback_model = fallback_model or os.environ.get("DEFAULT_MODEL", "qwen3-8b-8k")
         self.store = ReflectionStore(pool)
         # gap_store is optional — when present, _mine_capability_gaps
@@ -750,11 +750,11 @@ class NightlyReflector:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                # Gap-clustering uses the reasoner (qwen36-moe-32k) with
+                # Gap-clustering uses the reasoner (qwen36-moe-128k) with
                 # thinking enabled. Same family as the router/default,
                 # ~9 GB resident, real reasoning upgrade over the 8B
                 # without the MoE/Vulkan deadlock risk that took
-                # qwen36-moe-32k out of rotation on Strix Halo.
+                # qwen36-moe-128k out of rotation on Strix Halo.
                 model=self.reasoner_model,
                 response_format="json",
                 think=True,
@@ -1020,7 +1020,7 @@ class NightlyReflector:
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                # Refinement runs the reasoner (qwen36-moe-32k) with thinking
+                # Refinement runs the reasoner (qwen36-moe-128k) with thinking
                 # enabled — the bigger model gives tighter rationale +
                 # better entity-narrowing on Saeed's Strix Halo (~9 GB
                 # resident is well within memory budget now that the
@@ -1094,7 +1094,7 @@ class NightlyReflector:
     ) -> dict[str, Any]:
         """ONE 35B call per nightly run, after every other phase has run.
 
-        The 35B (qwen36-moe-32k) deadlocks under sustained back-to-back
+        The 35B (qwen36-moe-128k) deadlocks under sustained back-to-back
         calls (Vulkan/RADV: GPU sits at 0% busy while requests hang at
         the network layer). But a single-shot call works fine — the
         deadlock is specific to sustained load.
@@ -1173,7 +1173,7 @@ class NightlyReflector:
             "Now produce the synthesis JSON."
         )
 
-        # Synthesis now uses the reasoner (qwen36-moe-32k). The historical
+        # Synthesis now uses the reasoner (qwen36-moe-128k). The historical
         # 35B-on-Strix-Halo deadlock that forced us to the 8B is gone:
         # the 14B fits in ~9 GB resident leaving plenty of headroom
         # alongside the 8B + 0.6B + bge-m3 (total ~30 GB / 64 GB).

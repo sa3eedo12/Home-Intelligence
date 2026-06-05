@@ -25,7 +25,7 @@ capabilities:
     description: Produce safe read-only cleanup suggestions.
     side_effects: false
     cost: high
-    llm: qwen36-moe-32k
+    llm: qwen36-moe-128k
   - id: summarize_storage
     description: Telegram-friendly storage status summary.
     side_effects: false

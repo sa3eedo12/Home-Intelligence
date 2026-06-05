@@ -13,7 +13,7 @@ base_models=(
 )
 
 derived=(
-  "qwen36-moe-32k"
+  "qwen36-moe-128k"
   "qwen3-8b-8k"
   "qwen3-0.6b-4k"
 )
