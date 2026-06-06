@@ -64,9 +64,15 @@ class TrackerState:
     unit: str
     reset: str
     current_value: float
-    pct_of_target: float | None  # 0..100, None if no target
+    pct_of_target: float | None  # 0..100, None if no target OR no reading
     period_start: datetime | None
     period_end: datetime | None
+    # False for gauges with no log row in the window. Counter trackers
+    # always have a reading (zero is a legitimate "you haven't done it
+    # yet" value). For gauges, missing data must NOT default to 0 — that
+    # would falsely satisfy a "body_fat ≤ 20%" target and award 100% pct
+    # for a tracker that has literally no source data.
+    has_reading: bool = True
 
 
 @dataclass(slots=True)
@@ -225,6 +231,7 @@ def evaluate(
                 if latest_ts is None or ts > latest_ts:
                     value = raw_value
                     latest_ts = ts
+            has_reading = latest_ts is not None
         else:
             # counter = sum of deltas in window
             value = 0.0
@@ -246,9 +253,13 @@ def evaluate(
                     value += float(raw)
                 except (TypeError, ValueError):
                     continue
+            # Counters always have a meaningful current value (0 = "you
+            # haven't done it yet today"). Only gauges need the
+            # has_reading guard.
+            has_reading = True
         target = tcfg["target"]
         pct: float | None = None
-        if target is not None and target != 0:
+        if target is not None and target != 0 and has_reading:
             if tcfg["direction"] == "down":
                 # Lower is better; treat target as a ceiling.
                 # pct = 100 * max(0, (start_value - value) / (start_value - target))
@@ -264,6 +275,7 @@ def evaluate(
             reset=tcfg["reset"],
             current_value=value, pct_of_target=pct,
             period_start=start, period_end=end,
+            has_reading=has_reading,
         ))
         state_blob[tcfg["id"]] = value
     overall = _overall_pct(states, spec)
@@ -318,6 +330,10 @@ def _evaluate_completion(
                 continue
             if s.target is None:
                 continue
+            # A gauge with no reading is N/A, not "passing." Treat the
+            # whole goal as incomplete until the user supplies data.
+            if not s.has_reading:
+                return False
             if s.direction == "up" and s.current_value < s.target:
                 return False
             if s.direction == "down" and s.current_value > s.target:
@@ -375,6 +391,22 @@ def format_status_line(result: GoalEvalResult) -> str:
         )
     parts = []
     for s in result.trackers:
+        if not s.has_reading:
+            # Gauge with no source data — render as 'no reading' instead
+            # of '0', which would mislead both the user and the LLM.
+            if s.target is None:
+                parts.append(f"{s.label}: no reading yet")
+            elif s.direction == "down":
+                target_str = _format_value(s.target)
+                parts.append(
+                    f"{s.label}: no reading yet (target ≤ {target_str} {s.unit})".rstrip()
+                )
+            else:
+                target_str = _format_value(s.target)
+                parts.append(
+                    f"{s.label}: no reading yet (target {target_str} {s.unit})".rstrip()
+                )
+            continue
         cv = _format_value(s.current_value)
         if s.target is None:
             parts.append(f"{s.label}: {cv} {s.unit}".rstrip())

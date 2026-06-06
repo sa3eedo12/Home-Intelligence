@@ -182,7 +182,7 @@ def _coerce_dt(value: Any) -> datetime | None:
 def _union_recent_sleep_minutes(
     rows: list[dict[str, Any]], metric: str
 ) -> float:
-    """Union-of-intervals minute total for a sleep metric.
+    """Most-recent-night-only minute total for a sleep metric.
 
     Two HAE quirks to defend against:
       1. Re-sync produces 2-3 rows for ONE sleep session with the same
@@ -192,9 +192,18 @@ def _union_recent_sleep_minutes(
          (two unrelated days' sleep bundled into one row). These must
          be excluded — see the long comment in sleep_inference.py.
 
+    One product quirk on top of the data quirks: the dashboard tile is
+    a single "Sleep" number that users read as "last night." The query
+    window pulls 36h of metrics, so on a normal morning we'd see TWO
+    sleep sessions (yesterday's and today's) — summing them gave the
+    "14h 15min sleep" production bug. Fix: cluster intervals into
+    nights (a >2h wake gap breaks the night), return ONLY the most
+    recent night's union.
+
     Strategy: per (started_at) bucket, keep the row with the LARGEST
     end_time (latest re-sync wins). Drop intervals longer than 14h.
-    Union the survivors using interval merging.
+    Sort + merge with a 2h wake-tolerance, then return the LAST
+    merged interval's duration.
     """
     by_start: dict[datetime, tuple[datetime, datetime]] = {}
     for row in rows:
@@ -217,14 +226,20 @@ def _union_recent_sleep_minutes(
     if not intervals:
         return 0.0
 
+    # 2h tolerance lets brief mid-night wakeups stay in the same "night";
+    # a >2h gap forces a new night and discards the older one.
+    wake_tolerance = timedelta(hours=2)
     merged: list[list[datetime]] = []
     for start, end in intervals:
-        if not merged or start > merged[-1][1]:
+        if not merged or start - merged[-1][1] > wake_tolerance:
             merged.append([start, end])
         elif end > merged[-1][1]:
             merged[-1][1] = end
 
-    seconds = sum((end - start).total_seconds() for start, end in merged)
+    # The dashboard tile is "last night," not "the sum of every night
+    # in the query window." Return the most recent merged session.
+    last_start, last_end = merged[-1]
+    seconds = (last_end - last_start).total_seconds()
     return round(seconds / 60, 1)
 
 

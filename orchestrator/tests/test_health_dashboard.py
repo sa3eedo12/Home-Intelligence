@@ -182,9 +182,15 @@ def test_union_drops_awake_envelope_yielding_zero() -> None:
     assert _union_recent_sleep_minutes(rows, "sleep_awake") == 0.0
 
 
-def test_union_unions_two_distinct_sessions() -> None:
-    """Two real non-overlapping sleep sessions (e.g. a nap + the night)
-    should be summed via interval union, not collapsed."""
+def test_union_returns_only_most_recent_sleep_session() -> None:
+    """When the 36h query window contains TWO distinct sleep sessions
+    (yesterday's night + today's night, or a nap + a night), the
+    dashboard tile must show ONLY the most recent — the user reads it
+    as 'last night's sleep,' not 'sum of every sleep event we have.'
+
+    Production bug: two consecutive 7h nights summed to 14h 15min.
+    Fix: 2h wake-tolerance clusters intervals into nights; return
+    just the last night's duration."""
     rows = [
         _sleep_row(
             "sleep_asleep",
@@ -199,7 +205,57 @@ def test_union_unions_two_distinct_sessions() -> None:
             420,
         ),
     ]
-    assert _union_recent_sleep_minutes(rows, "sleep_asleep") == 480.0
+    # Two sessions, separated by 8h. The night (420min) is the most
+    # recent and is what gets reported. The 60min nap is dropped.
+    assert _union_recent_sleep_minutes(rows, "sleep_asleep") == 420.0
+
+
+def test_union_two_consecutive_nights_returns_only_last() -> None:
+    """The exact production bug: 36h window contains last night
+    (7h10m) AND this morning's night (7h05m). Previously summed to
+    14h15m. Must now return only this morning's 425min."""
+    rows = [
+        _sleep_row(
+            "sleep_asleep",
+            "2026-06-04T21:22:00+00:00",
+            "2026-06-05T04:33:00+00:00",  # 7h11m
+            431,
+        ),
+        _sleep_row(
+            "sleep_asleep",
+            "2026-06-05T22:29:00+00:00",
+            "2026-06-06T05:34:00+00:00",  # 7h05m
+            425,
+        ),
+    ]
+    minutes = _union_recent_sleep_minutes(rows, "sleep_asleep")
+    # Only this morning's session — the 8h gap between yesterday's
+    # wake-up and tonight's bedtime breaks them into distinct nights.
+    assert 420 <= minutes <= 430
+
+
+def test_union_brief_midnight_wakeup_stays_same_night() -> None:
+    """A 30-min mid-night wake (kid woke up, bathroom, etc.) splits
+    HealthKit's sleep_asleep into two intervals within the same night.
+    The 2h wake-tolerance should keep them as ONE night, not drop the
+    earlier half."""
+    rows = [
+        _sleep_row(
+            "sleep_asleep",
+            "2026-06-05T22:00:00+00:00",
+            "2026-06-06T01:30:00+00:00",  # 3.5h
+            210,
+        ),
+        _sleep_row(
+            "sleep_asleep",
+            "2026-06-06T02:00:00+00:00",  # 30min gap — within tolerance
+            "2026-06-06T06:00:00+00:00",  # 4h
+            240,
+        ),
+    ]
+    minutes = _union_recent_sleep_minutes(rows, "sleep_asleep")
+    # 22:00 → 06:00 = 8h. The 30-min wake is absorbed into the night.
+    assert minutes == 480.0
 
 
 def test_union_accepts_iso_string_datetimes() -> None:
