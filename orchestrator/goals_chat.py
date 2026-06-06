@@ -60,14 +60,23 @@ DRAFT_KEY_PREFIX = "goals_chat:draft:"
 # the LLM is unsure between create_goal and check_progress, we tip
 # toward check_progress because create is irreversible (creates a row).
 VALID_INTENTS = {
-    "create_goal", "refine_goal", "check_progress", "list_goals",
-    "explain_plan",
-    "coach_question",
+    # Action intents (have side effects, need structured args):
+    "create_goal", "refine_goal",
     "skip_workout", "log_workout",
     "mute_goal", "unmute_goal", "abandon_goal", "pause_goal", "resume_goal",
     "set_nag_windows",
     "complete_chore", "list_chores",
-    "weekly_review",
+    # ── Informational/conversational intent. Anything the user asks
+    #    ABOUT their goals where they want information or coaching
+    #    (not a state-changing action) routes here. The handler loads
+    #    the full context (active goals, recent activity, plans,
+    #    milestones) and lets the reasoner answer naturally — no
+    #    templated dumps, no hardcoded response shapes. This replaces
+    #    the previous check_progress / list_goals / explain_plan /
+    #    weekly_review / coach_question buckets which were each just
+    #    a templated render of a slice of the same data.
+    "goal_chat",
+    # Off-topic — caller falls through to the regular assistant.
     "general_chat",
 }
 
@@ -212,6 +221,14 @@ class GoalsChatHandler:
         content = _extract_chat_content(resp)
         parsed = _parse_json_blob(content) or {}
         intent = str(parsed.get("intent") or "general_chat")
+        # Back-compat: the old classifier prompt had separate intents
+        # for check_progress / list_goals / explain_plan / weekly_review
+        # / coach_question. The LLM may still volunteer one of those
+        # names if it's been trained on similar schemas — fold them all
+        # into goal_chat so the right handler fires.
+        if intent in {"check_progress", "list_goals", "explain_plan",
+                      "weekly_review", "coach_question"}:
+            intent = "goal_chat"
         if intent not in VALID_INTENTS:
             intent = "general_chat"
         parsed["intent"] = intent
@@ -256,7 +273,7 @@ class GoalsChatHandler:
             "'general_chat' so the regular assistant handles it.\n\n"
             "Return ONLY a JSON object: "
             "{\"intent\": <name>, ...args}.\n\n"
-            "Allowed intents and what to extract:\n"
+            "ACTION intents (have side effects, need structured args):\n"
             "- create_goal: user wants to start a NEW health goal. "
             "args: {\"title\": str, \"description\": str}.\n"
             "- refine_goal: user proposes a different approach / "
@@ -264,19 +281,6 @@ class GoalsChatHandler:
             "talked about. args: {\"refinement\": str, \"which\": "
             "str|null}. Use this ONLY when recent context names a "
             "goal — never on a cold message.\n"
-            "- check_progress: user asks how they're doing on a goal.\n"
-            "- list_goals: user asks 'what goals do I have'.\n"
-            "- explain_plan: user asks what the plan for a goal is, what "
-            "it involves, what it looks like, how it works. "
-            "args: {\"which\": str|null}.\n"
-            "- coach_question: user asks for ADVICE — open-ended questions "
-            "where they want you to reason about their goal data and "
-            "suggest what to do, NOT just dump the plan or current "
-            "numbers. Examples: 'where am I lacking', 'what can I do "
-            "better', 'why am I not losing weight', 'should I change "
-            "anything', 'am I on track', 'what should I focus on'. "
-            "args: {\"question\": str (verbatim user message), "
-            "\"which\": str|null}.\n"
             "- skip_workout: user wants to skip today's workout / take "
             "a rest day. args: {\"reason\": str|null}.\n"
             "- log_workout: user reports they just worked out. "
@@ -295,9 +299,21 @@ class GoalsChatHandler:
             "into concrete weekday/weekend windows.\n"
             "- complete_chore: user reports finishing a chore. "
             "args: {\"name\": str}.\n"
-            "- list_chores: 'what chores are overdue / due today'.\n"
-            "- weekly_review: user asks for the weekly summary.\n"
-            "- general_chat: anything not in this list.\n\n"
+            "- list_chores: 'what chores are overdue / due today'.\n\n"
+            "INFORMATIONAL / CONVERSATIONAL intent:\n"
+            "- goal_chat: user asks ABOUT their goals — to see status, "
+            "list goals, explain a plan, review the week, get coaching, "
+            "or any other informational question. The handler loads "
+            "the full goal context and lets the reasoner answer "
+            "naturally; you do NOT need to subclassify. Use this for "
+            "ANY non-action question whose subject is a goal, tracker, "
+            "progress, plan, milestone, or coaching topic. "
+            "args: {\"which\": str|null} — name of goal if the user "
+            "explicitly references one.\n\n"
+            "- general_chat: off-topic message with no connection to "
+            "goals, trackers, chores, or notifications (e.g. 'what's "
+            "the weather', 'tell me a joke'). Caller falls through to "
+            "the regular assistant.\n\n"
             "Examples:\n"
             "USER: 'I want to work out four times a week'\n"
             "{\"intent\": \"create_goal\", \"title\": \"Work out 4x a week\", "
@@ -310,20 +326,19 @@ class GoalsChatHandler:
             "{\"intent\": \"refine_goal\", \"refinement\": \"shift to "
             "Tue/Thu/Sat\"}\n\n"
             "USER: 'how am I doing this week'\n"
-            "{\"intent\": \"check_progress\"}\n\n"
+            "{\"intent\": \"goal_chat\"}\n\n"
             "USER: 'what would the plan involve'\n"
-            "{\"intent\": \"explain_plan\"}\n\n"
-            "USER: 'tell me more about how the plan works'\n"
-            "{\"intent\": \"explain_plan\"}\n\n"
+            "{\"intent\": \"goal_chat\"}\n\n"
+            "USER: 'what goals do I have'\n"
+            "{\"intent\": \"goal_chat\"}\n\n"
             "USER: 'where am I lacking'\n"
-            "{\"intent\": \"coach_question\", "
-            "\"question\": \"where am I lacking\"}\n\n"
+            "{\"intent\": \"goal_chat\"}\n\n"
             "USER: 'so what can I do better'\n"
-            "{\"intent\": \"coach_question\", "
-            "\"question\": \"so what can I do better\"}\n\n"
+            "{\"intent\": \"goal_chat\"}\n\n"
             "USER: 'why isnt my weight dropping faster'\n"
-            "{\"intent\": \"coach_question\", "
-            "\"question\": \"why isnt my weight dropping faster\"}\n\n"
+            "{\"intent\": \"goal_chat\"}\n\n"
+            "USER: 'give me a weekly summary'\n"
+            "{\"intent\": \"goal_chat\"}\n\n"
             "USER: 'i did a workout just now'\n"
             "{\"intent\": \"log_workout\", \"note\": null}\n\n"
             "USER: 'skip workout today, sick'\n"
@@ -360,14 +375,17 @@ class GoalsChatHandler:
             return await self._handle_create_goal(args, text, member_id)
         if intent == "refine_goal":
             return await self._handle_refine_goal(args, text, member_id, context)
-        if intent == "check_progress":
-            return await self._handle_check_progress(args, member_id, context)
-        if intent == "list_goals":
-            return await self._handle_list_goals(member_id), None
-        if intent == "explain_plan":
-            return await self._handle_explain_plan(args, member_id, context)
-        if intent == "coach_question":
-            return await self._handle_coach_question(args, text, member_id, context)
+        # All informational/conversational intents collapse into one
+        # intelligent handler. The legacy names (check_progress,
+        # list_goals, explain_plan, weekly_review, coach_question)
+        # accept-and-forward so any cached context blob or stale
+        # client mapping still works. The classifier prompt now only
+        # emits "goal_chat" for new traffic.
+        if intent in {
+            "goal_chat", "check_progress", "list_goals", "explain_plan",
+            "weekly_review", "coach_question",
+        }:
+            return await self._handle_goal_chat(args, text, member_id, context)
         if intent == "skip_workout":
             return await self._handle_skip_workout(args, member_id)
         if intent == "log_workout":
@@ -383,8 +401,6 @@ class GoalsChatHandler:
             return await self._handle_complete_chore(args, member_id), None
         if intent == "list_chores":
             return await self._handle_list_chores(), None
-        if intent == "weekly_review":
-            return await self._handle_weekly_review(member_id), None
         return (
             "I picked up something about goals but I don't know how to "
             "handle that specific request yet."
@@ -919,138 +935,39 @@ class GoalsChatHandler:
             )
         return out
 
-    # ── Read intents ─────────────────────────────────────────────
+    # ── Informational / conversational intent ───────────────────
+    #
+    # Every "tell me about my goals" question — status, plan,
+    # weekly summary, coaching, advice, listing, why-am-I-not-X —
+    # collapses into ONE handler. We do not template the answer;
+    # we hand the full goal context to the reasoner and let it
+    # write a grounded natural-language response. This replaces
+    # the previous five hardcoded handlers (check_progress,
+    # list_goals, explain_plan, weekly_review, coach_question)
+    # which each just rendered one slice of the same data.
 
-    async def _handle_check_progress(
-        self, args: dict[str, Any], member_id: int,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[str, int | None]:
-        from . import goal_engine
-
-        goals = await self.goals.list_active(member_id=member_id)
-        if not goals:
-            return (
-                "You don't have any active goals right now. If you want "
-                "to start one, just tell me what you're aiming for."
-            ), None
-        which = str(args.get("which") or "").lower()
-        target_goal = _match_goal(goals, which)
-        if target_goal is None and context and context.get("last_goal_id"):
-            target_goal = next(
-                (g for g in goals if int(g["id"]) == context["last_goal_id"]),
-                None,
-            )
-        if target_goal is None:
-            target_goal = goals[0]
-        # Run the generic engine over recent log entries; this is the
-        # source of truth, not the cached progress row (which is just
-        # a nightly snapshot).
-        log_rows = await self.goals.recent_log(int(target_goal["id"]), limit=400)
-        if log_rows or target_goal.get("tracker_spec"):
-            eval_result = goal_engine.evaluate(
-                goal=target_goal, log_rows=log_rows,
-            )
-            line = goal_engine.format_status_line(eval_result)
-            return (
-                f"\"{target_goal['title']}\" — {line}",
-                int(target_goal["id"]),
-            )
-        return (
-            f"\"{target_goal['title']}\" is active but I don't have any "
-            "logs yet. Tell me what you've done and I'll start tracking."
-        ), int(target_goal["id"])
-
-    async def _handle_list_goals(self, member_id: int) -> str:
-        goals = await self.goals.list_all_for_member(
-            member_id, include_archived=False,
-        )
-        if not goals:
-            return "You don't have any goals yet."
-        lines = [f"You have {len(goals)} active or paused goal" +
-                 ("" if len(goals) == 1 else "s") + ":"]
-        for g in goals:
-            lines.append(f"- {g['title']} ({g['status']})")
-        return "\n".join(lines)
-
-    async def _handle_explain_plan(
-        self, args: dict[str, Any], member_id: int,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[str, int | None]:
-        """Explain the plan for a specific goal: plan_text, trackers,
-        milestones. Resolves the goal from explicit 'which' first,
-        then conversational context, then the most-recent active
-        goal."""
-        from . import goal_engine
-
-        goals = await self.goals.list_active(member_id=member_id)
-        if not goals:
-            return (
-                "You don't have any active goals yet. Tell me what you "
-                "want to work on and I'll write you a plan."
-            ), None
-        which = str(args.get("which") or "").lower()
-        target = _match_goal(goals, which)
-        if target is None and context and context.get("last_goal_id"):
-            target = next(
-                (g for g in goals if int(g["id"]) == context["last_goal_id"]),
-                None,
-            )
-        if target is None:
-            target = goals[0]
-        milestones = await self.goals.list_milestones(int(target["id"]))
-        bits = [f"Here's the plan for \"{target['title']}\":"]
-        plan_text = (target.get("plan_text") or "").strip()
-        if plan_text:
-            bits.append(plan_text)
-        else:
-            bits.append(
-                "I haven't written a detailed plan yet. Tell me a bit more "
-                "about how you'd like to approach it and I'll fill it in."
-            )
-        spec = goal_engine.normalize_spec(target.get("tracker_spec"))
-        if spec["trackers"]:
-            tracker_lines = ["What I'm tracking:"]
-            for t in spec["trackers"]:
-                tracker_lines.append("- " + _format_tracker_line(t))
-            bits.append("\n".join(tracker_lines))
-            # Also show current state if we have any logs
-            log_rows = await self.goals.recent_log(int(target["id"]), limit=400)
-            if log_rows:
-                ev = goal_engine.evaluate(goal=target, log_rows=log_rows)
-                bits.append("Current state: " + goal_engine.format_status_line(ev))
-        if milestones:
-            ms_lines = ["Milestones:"]
-            for ms in milestones[:5]:
-                due = ms.get("due_date")
-                due_str = due.isoformat() if hasattr(due, "isoformat") else str(due or "")
-                ms_lines.append(
-                    f"- {due_str}: {ms.get('target_description', '')}"
-                )
-            bits.append("\n".join(ms_lines))
-        return "\n\n".join(b for b in bits if b), int(target["id"])
-
-    async def _handle_coach_question(
+    async def _handle_goal_chat(
         self, args: dict[str, Any], text: str, member_id: int,
         context: dict[str, Any] | None = None,
     ) -> tuple[str, int | None]:
-        """Open-ended advice. The user asked something like 'where am I
-        lacking' or 'what can I do better' — they want analysis, not a
-        templated status dump. Build a goal + stats + recent-activity
-        prompt and let the reasoner write a short honest answer.
-
-        Resolves goal from 'which' arg, then context, then most-recent
-        active. If the user has multiple goals and gave no hint, we
-        coach across ALL of them rather than picking one silently."""
+        """Intelligent free-form responder for any informational /
+        conversational question about goals. Loads the user's full
+        goal context, gives the verbatim message to the reasoner,
+        and returns whatever the LLM writes. The LLM decides whether
+        the right answer is a status snapshot, a goal list, a plan
+        explanation, a weekly summary, or open coaching advice."""
         from . import goal_engine
 
-        question = (args.get("question") or text or "").strip()
         goals = await self.goals.list_active(member_id=member_id)
         if not goals:
             return (
-                "You don't have any active goals yet, so there's nothing "
-                "to coach on. Tell me what you want to work on first."
+                "You don\'t have any active goals yet. Tell me what "
+                "you\'d like to work on and I\'ll write you a plan."
             ), None
 
+        # Scope: if the user named a goal or context pins one, focus
+        # on it; otherwise the LLM gets all active goals and decides
+        # what's relevant to the question.
         which = str(args.get("which") or "").lower()
         target = _match_goal(goals, which)
         if target is None and context and context.get("last_goal_id"):
@@ -1058,51 +975,77 @@ class GoalsChatHandler:
                 (g for g in goals if int(g["id"]) == context["last_goal_id"]),
                 None,
             )
-        # If user gave no hint and there's no context, coach across the
-        # full active set — picking one silently was the bug behavior.
-        scope = [target] if target is not None else goals[:3]
+        scope = [target] if target is not None else goals[:5]
 
+        # Build a structured context block — facts, not prose. The
+        # LLM is free to surface, omit, or rephrase any of it based
+        # on what the user asked.
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(days=7)
         sections: list[str] = []
         for g in scope:
             log_rows = await self.goals.recent_log(int(g["id"]), limit=200)
             ev = goal_engine.evaluate(goal=g, log_rows=log_rows)
             status_line = goal_engine.format_status_line(ev)
-            recent_summary = self._summarize_recent_log_for_coach(log_rows)
+            recent = []
+            for row in log_rows:
+                ts = row.get("ts")
+                if not isinstance(ts, datetime) or ts < cutoff:
+                    continue
+                deltas = row.get("deltas") or {}
+                if not isinstance(deltas, dict) or not deltas:
+                    continue
+                delta_str = ", ".join(f"{k}={v}" for k, v in deltas.items())
+                recent.append(f"{ts.date().isoformat()}: {delta_str}")
+                if len(recent) >= 10:
+                    break
+            recent_str = "; ".join(recent) if recent else "(no log entries in the past 7 days)"
             milestones = await self.goals.list_milestones(int(g["id"]))
-            ms_line = ""
-            if milestones:
-                next_due = milestones[0]
-                due = next_due.get("due_date")
+            ms_lines = []
+            for ms in milestones[:3]:
+                due = ms.get("due_date")
                 due_str = due.isoformat() if hasattr(due, "isoformat") else str(due or "")
-                ms_line = f"Next milestone {due_str}: {next_due.get('target_description', '')}"
-            plan = (g.get("plan_text") or "").strip()[:600]
+                ms_desc = ms.get("target_description", "")
+                ms_lines.append(f"  - {due_str}: {ms_desc}")
+            ms_block = "\n".join(ms_lines) if ms_lines else "  (none)"
+            plan = (g.get("plan_text") or "").strip()
+            plan_str = plan or "(no detailed plan yet)"
+            g_status = g.get("status", "active")
+            g_title = g["title"]
             sections.append(
-                f"GOAL: {g['title']}\n"
-                f"Plan: {plan or '(no detailed plan)'}\n"
-                f"Status: {status_line}\n"
-                f"Last 7 days of activity: {recent_summary}\n"
-                f"{ms_line}".strip()
+                f"GOAL: {g_title} (status={g_status})\n"
+                f"Plan: {plan_str}\n"
+                f"Status now: {status_line}\n"
+                f"Last 7 days of activity: {recent_str}\n"
+                f"Upcoming milestones:\n{ms_block}"
             )
 
         system = (
-            "You are a calm, honest health coach. The user has asked you "
-            "an open advice question about their goals. Reason over the "
-            "data provided and write a SHORT answer (3 to 5 sentences) "
-            "that names ONE or TWO specific things to focus on next. "
-            "Be concrete and grounded: reference an actual tracker value, "
-            "a missing check-in, a milestone gap, or a recent pattern. "
-            "Never invent numbers or claim activity that isn't in the "
-            "data. If a gauge tracker shows 'no reading yet', that is "
-            "itself a useful signal — point out that the user needs to "
-            "log it so coaching can be honest. If the user is on track, "
-            "say so plainly and name what's working. Avoid clichés like "
-            "'crush it', 'you got this', 'stay consistent', 'one day at "
-            "a time'. No bullet lists. No markdown. Plain prose."
+            "You are the user's health-goals assistant. They have sent "
+            "you a message about their goals — it may be a question, a "
+            "request to see something, or a request for advice. Decide "
+            "what they actually want and answer it directly in plain "
+            "prose.\n\n"
+            "Rules:\n"
+            "- Stay grounded. Only use numbers, dates, and activities "
+            "that appear in the GOAL blocks below. Never invent.\n"
+            "- If a gauge tracker says 'no reading yet', name that as "
+            "a gap — the user needs to log it so coaching can be honest.\n"
+            "- Match the length of the response to the question. 'What "
+            "goals do I have' wants a brief list. 'Where am I lacking' "
+            "wants 2-4 sentences of analysis. 'What's the plan' wants "
+            "the plan plus current state.\n"
+            "- No emoji-as-syntax, no markdown headers, no bullet lists "
+            "longer than 5 items, no clichés like 'crush it', 'you got "
+            "this', 'stay consistent', 'one day at a time'.\n"
+            "- If the user is on track, say so plainly and name what's "
+            "working. If they're behind, name the specific gap.\n"
+            "- If the question is ambiguous about WHICH goal, address "
+            "the goals together rather than picking one silently."
         )
         user_msg = (
-            f"User question: {question}\n\n"
-            f"{'---'.join(sections)}\n\n"
-            "Now write the short coaching answer."
+            f"User message: {text.strip()}\n\n"
+            f"{chr(10).join(sections)}"
         )
         try:
             resp = await self.llm.chat(
@@ -1116,11 +1059,11 @@ class GoalsChatHandler:
                 timeout=120.0,
             )
         except Exception as exc:
-            logger.warning("coach_question_llm_failed",
+            logger.warning("goal_chat_llm_failed",
                            member_id=member_id, error=str(exc))
             return (
-                "I tried to think through that but the coaching model "
-                "was unreachable. Try again in a moment."
+                "I tried to think through that but the reasoner was "
+                "unreachable. Try again in a moment."
             ), (int(scope[0]["id"]) if scope else None)
 
         msg = resp.get("message") or {}
@@ -1129,37 +1072,11 @@ class GoalsChatHandler:
         if not reply:
             reply = (
                 "I don't have enough signal yet to give a useful answer. "
-                "Try logging your latest weight or body-fat reading and "
-                "ask again — without recent data I'd just be guessing."
+                "Try logging your latest reading and ask again — without "
+                "recent data I'd just be guessing."
             )
-        # If the scope was a single goal, return its id so the context
-        # tracker pins the follow-up. For multi-goal coaching, leave
-        # context untouched.
         touched = int(scope[0]["id"]) if len(scope) == 1 else None
         return reply, touched
-
-    @staticmethod
-    def _summarize_recent_log_for_coach(log_rows: list[dict[str, Any]]) -> str:
-        """Compress recent log entries into a single sentence for the
-        coach prompt — date + tracker deltas. Skips entries older than
-        7 days to keep the prompt focused on recent behavior."""
-        now = datetime.now(UTC)
-        cutoff = now - timedelta(days=7)
-        useful = []
-        for row in log_rows:
-            ts = row.get("ts")
-            if not isinstance(ts, datetime):
-                continue
-            if ts < cutoff:
-                continue
-            deltas = row.get("deltas") or {}
-            if not isinstance(deltas, dict) or not deltas:
-                continue
-            delta_str = ", ".join(f"{k}={v}" for k, v in deltas.items())
-            useful.append(f"{ts.date().isoformat()}: {delta_str}")
-            if len(useful) >= 10:
-                break
-        return "; ".join(useful) if useful else "(no log entries in the past 7 days)"
 
     # ── Workout actions ──────────────────────────────────────────
 
@@ -1644,24 +1561,6 @@ class GoalsChatHandler:
         if soon:
             bits.append("Coming up: " + _humanize_list([r.name for r in soon]))
         return ". ".join(bits) + "."
-
-    # ── Weekly review ────────────────────────────────────────────
-
-    async def _handle_weekly_review(self, member_id: int) -> str:
-        goals = await self.goals.list_active(member_id=member_id)
-        if not goals:
-            return "No active goals to review."
-        lines = []
-        for g in goals:
-            prog_rows = await self.goals.recent_progress(int(g["id"]), days=7)
-            workouts = sum(1 for r in prog_rows if r.get("workout_completed"))
-            target = (g.get("workout_budget") or {}).get("required_per_week")
-            line = f"- {g['title']}: {workouts} workout" + (
-                "" if workouts == 1 else "s") + " this week"
-            if target:
-                line += f" (target {target})"
-            lines.append(line)
-        return "Here's the week so far:\n" + "\n".join(lines)
 
     # ── Conversational context (Redis-backed, 30-min TTL) ────────
 

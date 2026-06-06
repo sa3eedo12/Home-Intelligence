@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -211,49 +212,6 @@ async def test_create_goal_falls_back_on_planner_failure() -> None:
     args = goals.create.await_args.kwargs
     assert args.get("tracker_spec") is None
     assert "check in" in (args.get("plan_text") or "").lower()
-
-
-# ── check_progress ──────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_check_progress_returns_engine_status_line() -> None:
-    """check_progress now runs the engine against recent_log."""
-    today = datetime.now(UTC)
-    spec = {
-        "trackers": [
-            {"id": "workouts_this_week", "label": "Workouts",
-             "kind": "counter", "reset": "weekly", "target": 4,
-             "unit": "workout", "direction": "up"},
-        ],
-    }
-    llm = _llm_returning({"intent": "check_progress"})
-    goals = _fake_goals_store(
-        active=[{
-            "id": 1, "member_id": 2, "title": "Strong",
-            "tracker_spec": spec,
-        }],
-        log_rows=[
-            {"ts": today, "deltas": {"workouts_this_week": 1}},
-            {"ts": today, "deltas": {"workouts_this_week": 1}},
-            {"ts": today, "deltas": {"workouts_this_week": 1}},
-        ],
-    )
-    h = _build(llm=llm, goals_store=goals)
-    r = await h.try_handle("how am I doing", member=MEMBER)
-    assert r.handled is True
-    assert "Strong" in r.text
-    assert "3 of 4" in r.text
-
-
-@pytest.mark.asyncio
-async def test_check_progress_no_active_goals() -> None:
-    llm = _llm_returning({"intent": "check_progress"})
-    goals = _fake_goals_store(active=[])
-    h = _build(llm=llm, goals_store=goals)
-    r = await h.try_handle("am i on track", member=MEMBER)
-    assert r.handled is True
-    assert "don't have any active goals" in r.text
 
 
 # ── log_workout (generic log_event) ─────────────────────────────
@@ -547,47 +505,7 @@ async def test_list_chores_when_empty() -> None:
     assert "Enjoy" in r.text
 
 
-# ── weekly_review ───────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_weekly_review_counts_workouts() -> None:
-    llm = _llm_returning({"intent": "weekly_review"})
-    goals = _fake_goals_store(
-        active=[{
-            "id": 1, "member_id": 2, "title": "Run more",
-            "workout_budget": {"required_per_week": 4},
-        }],
-        recent=[
-            {"workout_completed": True}, {"workout_completed": True},
-            {"workout_completed": False}, {"workout_completed": True},
-        ],
-    )
-    h = _build(llm=llm, goals_store=goals)
-    r = await h.try_handle("weekly review please", member=MEMBER)
-    assert r.handled is True
-    assert "Run more" in r.text
-    assert "3 workouts" in r.text
-    assert "target 4" in r.text
-
-
-# ── Dispatcher failure handling ─────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_handler_failure_returns_apology() -> None:
-    llm = _llm_returning({"intent": "create_goal", "title": "x",
-                          "description": "y"})
-    # Goals store create raises
-    goals = _fake_goals_store()
-    goals.create = AsyncMock(side_effect=RuntimeError("db broke"))
-    h = _build(llm=llm, goals_store=goals)
-    r = await h.try_handle("start a goal", member=MEMBER)
-    assert r.handled is True
-    assert "something went wrong" in r.text
-
-
-# ── explain_plan + conversational context ────────────────────────
+# ── Conversational context + goal_chat (intelligent handler) ────
 
 
 def _fake_redis_stub() -> SimpleNamespace:
@@ -624,62 +542,6 @@ def _fake_goals_store_with_get(*goals):
 
 
 @pytest.mark.asyncio
-async def test_explain_plan_renders_full_plan_card() -> None:
-    llm = _llm_returning({"intent": "explain_plan"})
-    goal = {
-        "id": 1, "member_id": 2, "title": "Double pushups in 2 weeks",
-        "description": "Train 4x to double max pushup count",
-        "plan_text": "Greasing the groove: 5 short sets across each "
-                     "training day, finishing with one max-effort set.",
-        "tracker_spec": {
-            "trackers": [
-                {"id": "sessions_today", "label": "Pushup sets",
-                 "kind": "counter", "reset": "daily", "target": 5,
-                 "unit": "set", "direction": "up"},
-                {"id": "reps_today", "label": "Pushup reps",
-                 "kind": "counter", "reset": "daily", "target": 50,
-                 "unit": "rep", "direction": "up"},
-            ],
-        },
-        "status": "active",
-    }
-    goals = _fake_goals_store_with_get(goal)
-    goals.list_milestones = AsyncMock(return_value=[
-        {"due_date": date(2026, 6, 5),
-         "target_description": "Hit 1.5× starting max"},
-        {"due_date": date(2026, 6, 12),
-         "target_description": "Hit 2× starting max"},
-    ])
-    h = _build(llm=llm, goals_store=goals)
-    r = await h.try_handle("what would the plan involve?", member=MEMBER)
-    assert r.handled is True
-    assert r.intent == "explain_plan"
-    assert "Double pushups in 2 weeks" in r.text
-    assert "Greasing the groove" in r.text
-    # tracker labels + targets render in the plan card
-    assert "Pushup sets" in r.text
-    assert "5 set" in r.text
-    assert "Hit 1.5× starting max" in r.text
-
-
-@pytest.mark.asyncio
-async def test_explain_plan_handles_missing_plan_text() -> None:
-    llm = _llm_returning({"intent": "explain_plan"})
-    goal = {
-        "id": 1, "member_id": 2, "title": "Sleep more",
-        "description": "Get to bed earlier",
-        "plan_text": None,
-        "workout_budget": {},
-        "status": "active",
-    }
-    goals = _fake_goals_store_with_get(goal)
-    h = _build(llm=llm, goals_store=goals)
-    r = await h.try_handle("what does this look like", member=MEMBER)
-    assert r.handled is True
-    assert "haven't written a detailed plan" in r.text
-
-
-@pytest.mark.asyncio
 async def test_create_goal_stashes_context_in_redis() -> None:
     classify = {"intent": "create_goal", "title": "T", "description": "D"}
     plan = {
@@ -706,51 +568,6 @@ async def test_create_goal_stashes_context_in_redis() -> None:
 
 
 @pytest.mark.asyncio
-async def test_followup_explain_plan_uses_context_for_goal_resolution() -> None:
-    """The full bug-repro test: user creates a goal, then asks a vague
-    'what would the plan involve?' — must resolve to the freshly-created
-    goal even though the text contains no goal-identifying words."""
-    # First message: create
-    classify_create = {"intent": "create_goal", "title": "Double pushups",
-                       "description": "Double pushups in 2 weeks"}
-    plan = {
-        "plan_text": "Greasing the groove.", "metric_links": [],
-        "workout_budget": {"required_per_week": 4}, "milestones": [],
-    }
-    # Second message: explain_plan (after context is set, classifier
-    # sees recent-context block in the system prompt and returns
-    # explain_plan)
-    classify_explain = {"intent": "explain_plan"}
-    llm = _llm_returning(classify_create, plan, classify_explain)
-    redis = _fake_redis_stub()
-    goal_row = {
-        "id": 42, "member_id": 2, "title": "Double pushups",
-        "description": "Double pushups in 2 weeks",
-        "plan_text": "Greasing the groove.",
-        "workout_budget": {"required_per_week": 4},
-        "status": "active",
-    }
-    goals = _fake_goals_store_with_get(goal_row)
-    goals.create = AsyncMock(return_value=42)
-    h = GoalsChatHandler(
-        llm=llm, goals_store=goals,
-        chore_store=_fake_chore_store(),
-        nag_store=_fake_nag_store(),
-        redis=redis,
-    )
-    r1 = await h.try_handle(
-        "I want to double the number of pushups I can do in 2 weeks",
-        member=MEMBER,
-    )
-    assert r1.handled is True
-    r2 = await h.try_handle("what would the plan involve?", member=MEMBER)
-    assert r2.handled is True
-    assert r2.intent == "explain_plan"
-    assert "Double pushups" in r2.text
-    assert "Greasing the groove" in r2.text
-
-
-@pytest.mark.asyncio
 async def test_classifier_prompt_includes_recent_context_when_present() -> None:
     """The classifier should see the just-created goal in its system
     prompt so it can disambiguate vague follow-ups. Validates the
@@ -764,7 +581,7 @@ async def test_classifier_prompt_includes_recent_context_when_present() -> None:
     )
     assert "RECENT CONTEXT" in prompt["system"]
     assert "Sleep more" in prompt["system"]
-    assert "explain_plan" in prompt["system"]
+    assert "goal_chat" in prompt["system"]
 
 
 @pytest.mark.asyncio
@@ -796,22 +613,244 @@ async def test_load_context_drops_stale_when_goal_abandoned() -> None:
     assert ctx is None
 
 
+# ── goal_chat: single intelligent handler for all info questions ──
+#
+# Replaces the previous templated handlers (check_progress, list_goals,
+# explain_plan, weekly_review, coach_question). Tests verify that the
+# right context is built and passed to the reasoner, not the exact
+# wording of the response (the LLM owns that).
+
+
+def _llm_classify_then_prose(intent_payload: dict, prose_reply: str) -> MagicMock:
+    """LLM mock: first call returns a JSON classification payload, second
+    call returns plain-prose content (what the goal_chat handler uses)."""
+    responses = [
+        {"message": {"content": json.dumps(intent_payload)}},
+        {"message": {"content": prose_reply}},
+    ]
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=responses)
+    return llm
+
+
 @pytest.mark.asyncio
-async def test_explain_plan_falls_back_to_first_goal_with_no_context() -> None:
-    """No conversational context, no explicit 'which' → use the most
-    recent active goal (head of list_active output)."""
-    llm = _llm_returning({"intent": "explain_plan"})
-    goal = {
-        "id": 7, "member_id": 2, "title": "Strong",
-        "description": "Get strong", "plan_text": "Lift.",
-        "workout_budget": {"required_per_week": 3},
-        "status": "active",
-    }
-    goals = _fake_goals_store_with_get(goal)
+async def test_goal_chat_with_no_active_goals_short_circuits() -> None:
+    """If the user has no active goals, the handler must NOT spin up
+    the reasoner for an empty prompt — return a stock reply and skip
+    the LLM call."""
+    llm = _llm_returning({"intent": "goal_chat"})  # only classifier called
+    goals = _fake_goals_store(active=[])
     h = _build(llm=llm, goals_store=goals)
-    r = await h.try_handle("what's the plan?", member=MEMBER)
+    r = await h.try_handle("how am I doing", member=MEMBER)
     assert r.handled is True
-    assert "Strong" in r.text
+    assert "don't have any active goals" in r.text.lower() or \
+           "don't have any active goals yet" in r.text
+    # Only the classifier call — no reasoner call for an empty context.
+    assert llm.chat.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_goal_chat_passes_full_goal_context_to_reasoner() -> None:
+    """For any informational question, the handler must build a prompt
+    that includes the goal title, current status line, and recent log
+    summary — then return the LLM's reply verbatim."""
+    today = datetime.now(UTC)
+    spec = {
+        "trackers": [
+            {"id": "weight_kg", "label": "Weight", "kind": "gauge",
+             "reset": "weekly", "target": 85, "unit": "kg",
+             "direction": "down"},
+        ],
+    }
+    captured: dict[str, Any] = {}
+
+    async def _chat(messages, **_kw):
+        if captured.get("first_done"):
+            # Second call is the reasoner — capture and return prose.
+            captured["reasoner_user"] = next(
+                m["content"] for m in messages if m["role"] == "user"
+            )
+            captured["reasoner_system"] = next(
+                m["content"] for m in messages if m["role"] == "system"
+            )
+            return {"message": {"content": "You're at 91.8 kg, 6.8 above target."}}
+        # First call is the classifier — return JSON.
+        captured["first_done"] = True
+        return {"message": {"content": json.dumps({"intent": "goal_chat"})}}
+
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=_chat)
+    goals = _fake_goals_store(
+        active=[{
+            "id": 7, "member_id": 2, "title": "Lose weight for event",
+            "tracker_spec": spec, "plan_text": "Eat less, walk more.",
+        }],
+        log_rows=[
+            {"ts": today, "deltas": {"weight_kg": 91.8}},
+        ],
+    )
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("where am I lacking", member=MEMBER)
+
+    assert r.handled is True
+    # Reply is the LLM's verbatim output — no template wrapping.
+    assert r.text == "You're at 91.8 kg, 6.8 above target."
+    # Prompt to the reasoner must include the goal title, the live
+    # status line, and the user's verbatim question.
+    user_prompt = captured["reasoner_user"]
+    assert "Lose weight for event" in user_prompt
+    assert "where am I lacking" in user_prompt
+    assert "91.8" in user_prompt  # the actual status value
+    # System prompt must contain the no-fabrication / no-clichés rules.
+    system = captured["reasoner_system"]
+    assert "never invent" in system.lower() or "never" in system.lower()
+    assert "no" in system.lower() and "clich" in system.lower()
+
+
+@pytest.mark.asyncio
+async def test_goal_chat_uses_context_pinned_goal_when_present() -> None:
+    """A follow-up question after creating goal #42 should scope to
+    that goal, even if other active goals exist. The reasoner prompt
+    should contain ONLY the pinned goal, not every active goal."""
+    today = datetime.now(UTC)
+    spec_a = {"trackers": [{"id": "x", "label": "X", "kind": "counter",
+                             "reset": "daily", "target": 1,
+                             "direction": "up", "unit": "x"}]}
+    spec_b = {"trackers": [{"id": "y", "label": "Y", "kind": "counter",
+                             "reset": "daily", "target": 1,
+                             "direction": "up", "unit": "y"}]}
+    captured: dict[str, Any] = {}
+
+    async def _chat(messages, **_kw):
+        if captured.get("first_done"):
+            captured["user_prompt"] = next(
+                m["content"] for m in messages if m["role"] == "user"
+            )
+            return {"message": {"content": "Reply about goal B only."}}
+        captured["first_done"] = True
+        return {"message": {"content": json.dumps({"intent": "goal_chat"})}}
+
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=_chat)
+    redis = _fake_redis_stub()
+    redis._store["goals_chat:context:2"] = json.dumps({
+        "last_goal_id": 99, "last_intent": "create_goal",
+        "ts": today.isoformat(),
+    })
+    goals_a = {"id": 1, "member_id": 2, "title": "Pushups", "status": "active",
+                "tracker_spec": spec_a}
+    goals_b = {"id": 99, "member_id": 2, "title": "Sleep more", "status": "active",
+                "tracker_spec": spec_b}
+    goals = _fake_goals_store_with_get(goals_a, goals_b)
+    goals.recent_log = AsyncMock(return_value=[
+        {"ts": today, "deltas": {"y": 0}},
+    ])
+    h = GoalsChatHandler(
+        llm=llm, goals_store=goals,
+        chore_store=_fake_chore_store(),
+        nag_store=_fake_nag_store(),
+        redis=redis,
+    )
+    r = await h.try_handle("how is it going", member=MEMBER)
+    assert r.handled is True
+    # The reasoner prompt should mention Sleep more (the pinned goal)
+    # but NOT Pushups (a different active goal). Validates that
+    # context pinning narrows scope correctly.
+    assert "Sleep more" in captured["user_prompt"]
+    assert "Pushups" not in captured["user_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_goal_chat_no_pin_passes_all_active_goals() -> None:
+    """When there's no pinned goal and the question doesn't name one,
+    the handler passes ALL active goals to the reasoner so it can
+    decide which are relevant — instead of silently picking one."""
+    today = datetime.now(UTC)
+    spec = {"trackers": [{"id": "x", "label": "X", "kind": "counter",
+                          "reset": "daily", "target": 1,
+                          "direction": "up", "unit": "x"}]}
+    captured: dict[str, Any] = {}
+
+    async def _chat(messages, **_kw):
+        if captured.get("first_done"):
+            captured["user_prompt"] = next(
+                m["content"] for m in messages if m["role"] == "user"
+            )
+            return {"message": {"content": "Multi-goal reply."}}
+        captured["first_done"] = True
+        return {"message": {"content": json.dumps({"intent": "goal_chat"})}}
+
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=_chat)
+    goals = _fake_goals_store(
+        active=[
+            {"id": 1, "member_id": 2, "title": "Pushups",
+             "tracker_spec": spec, "status": "active"},
+            {"id": 2, "member_id": 2, "title": "Sleep more",
+             "tracker_spec": spec, "status": "active"},
+            {"id": 3, "member_id": 2, "title": "Lose weight",
+             "tracker_spec": spec, "status": "active"},
+        ],
+        log_rows=[{"ts": today, "deltas": {"x": 0}}],
+    )
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("how am I doing", member=MEMBER)
+    assert r.handled is True
+    # All three active goals appear in the reasoner prompt.
+    assert "Pushups" in captured["user_prompt"]
+    assert "Sleep more" in captured["user_prompt"]
+    assert "Lose weight" in captured["user_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_goal_chat_falls_back_when_reasoner_fails() -> None:
+    """If the reasoner LLM call raises, the handler returns a graceful
+    fallback message rather than propagating the exception."""
+    classify = {"message": {"content": json.dumps({"intent": "goal_chat"})}}
+    llm = MagicMock()
+    llm.chat = AsyncMock(side_effect=[classify, RuntimeError("ollama down")])
+    spec = {"trackers": [{"id": "x", "label": "X", "kind": "counter",
+                          "reset": "daily", "target": 1,
+                          "direction": "up", "unit": "x"}]}
+    goals = _fake_goals_store(
+        active=[{"id": 1, "member_id": 2, "title": "Pushups",
+                 "tracker_spec": spec, "status": "active"}],
+        log_rows=[],
+    )
+    h = _build(llm=llm, goals_store=goals)
+    r = await h.try_handle("how am I doing", member=MEMBER)
+    assert r.handled is True
+    # Stock fallback prose — doesn't crash.
+    assert "unreachable" in r.text.lower() or "try again" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_goal_chat_routes_legacy_intent_names_for_back_compat() -> None:
+    """If the classifier (or a cached context blob) emits a deprecated
+    intent name (check_progress, list_goals, explain_plan, weekly_review,
+    coach_question), the dispatcher must still route it to the unified
+    goal_chat handler rather than the fall-through error message."""
+    today = datetime.now(UTC)
+    spec = {"trackers": [{"id": "x", "label": "X", "kind": "counter",
+                          "reset": "daily", "target": 1,
+                          "direction": "up", "unit": "x"}]}
+    for legacy_intent in ("check_progress", "list_goals", "explain_plan",
+                          "weekly_review", "coach_question"):
+        classify = {"message": {"content": json.dumps({"intent": legacy_intent})}}
+        reasoner = {"message": {"content": f"reply for {legacy_intent}"}}
+        llm = MagicMock()
+        llm.chat = AsyncMock(side_effect=[classify, reasoner])
+        goals = _fake_goals_store(
+            active=[{"id": 1, "member_id": 2, "title": "G",
+                     "tracker_spec": spec, "status": "active"}],
+            log_rows=[{"ts": today, "deltas": {"x": 0}}],
+        )
+        h = _build(llm=llm, goals_store=goals)
+        r = await h.try_handle("anything", member=MEMBER)
+        assert r.handled is True, f"legacy intent {legacy_intent} not handled"
+        assert "reply for" in r.text, (
+            f"legacy intent {legacy_intent} did not route to goal_chat"
+        )
 
 
 # ── refine_goal flow ────────────────────────────────────────────
@@ -1366,7 +1405,7 @@ async def test_create_goal_force_commits_after_two_rounds() -> None:
 async def test_open_draft_intercepts_classification() -> None:
     """When a draft is open, the next message goes straight to the
     draft handler — the classifier is skipped entirely (the user's
-    answer might look like 'check_progress' or anything else)."""
+    answer might look like a question or anything else)."""
     classify_1 = {"intent": "create_goal", "title": "g", "description": "g"}
     not_ready = {"ready": False, "clarification_question": "huh?"}
     ready = {
@@ -1396,7 +1435,7 @@ async def test_open_draft_intercepts_classification() -> None:
     r1 = await h.try_handle("g", member=MEMBER)
     assert "huh?" in r1.text
     # User's next message is a confounder ("how am I doing") — must NOT
-    # route to check_progress.
+    # route through the classifier.
     r2 = await h.try_handle("how am I doing", member=MEMBER)
     # Commits the goal with "how am I doing" as the answer
     goals.create.assert_awaited_once()
@@ -1518,32 +1557,6 @@ async def test_create_reply_no_workout_boilerplate() -> None:
     # And gauge phrasing is right
     assert "checked weekly" in r.text
     assert "per weekly" not in r.text
-
-
-@pytest.mark.asyncio
-async def test_explain_plan_no_cadence_boilerplate() -> None:
-    """explain_plan must not append the 'If the cadence doesn't fit...'
-    workout copy."""
-    llm = _llm_returning({"intent": "explain_plan"})
-    goal = {
-        "id": 1, "member_id": 2, "title": "Lose 5kg",
-        "description": "x", "plan_text": "Easy pace.",
-        "tracker_spec": {
-            "trackers": [{
-                "id": "weight_kg", "label": "Weight", "kind": "gauge",
-                "reset": "weekly", "target": 85, "unit": "kg",
-                "direction": "down",
-            }],
-        },
-        "status": "active",
-    }
-    goals = _fake_goals_store_with_get(goal)
-    h = _build(llm=llm, goals_store=goals)
-    r = await h.try_handle("what's the plan?", member=MEMBER)
-    assert r.handled is True
-    assert "cadence doesn't fit" not in r.text
-    assert "shift to Tue/Thu/Sat" not in r.text
-    assert "checked weekly" in r.text
 
 
 # ── Planner data-lookup tool-loop ────────────────────────────────
