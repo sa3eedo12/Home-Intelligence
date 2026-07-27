@@ -14,7 +14,7 @@ Three entrypoints:
   nagged 3 times today.
 
 - `run_weekly_reflection(...)`: Sundays at 21:00. For each active goal,
-  pulls the last 7 days of progress and asks the reasoner (qwen36-moe-128k)
+  pulls the last 7 days of progress and asks the reasoner (qwen36-moe-32k)
   to write a one-paragraph reflection + (optionally) a refreshed plan.
   Sends the reflection to the user via notify.outbound.
 
@@ -79,7 +79,7 @@ async def _compose_nag_text(
     status_line: str,
     nags_today: int,
     recent_log: list[dict[str, Any]],
-    model: str = "qwen3-8b-8k",
+    model: str = "qwen3-8b-16k",
 ) -> str:
     """Generate one warm, brief nag line grounded in the goal's real
     current state. The LLM gets the goal title + plan + status line +
@@ -254,7 +254,7 @@ async def run_workout_nags(
     store: HealthGoalsStore,
     nag_store: MemberNagWindowsStore,
     llm: Any | None = None,
-    nag_model: str = "qwen3-8b-8k",
+    nag_model: str = "qwen3-8b-16k",
     engagement_store: Any | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -388,7 +388,7 @@ async def run_weekly_reflection(
     redis: Redis,
     store: HealthGoalsStore,
     llm: Any | None = None,
-    reasoner_model: str = "qwen36-moe-128k",
+    reasoner_model: str = "qwen36-moe-32k",
 ) -> dict[str, Any]:
     """Per active goal, build a tracker-spec-driven summary of the
     last 7 days and ask the reasoner for a one-paragraph reflection.

@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -987,8 +988,18 @@ async def test_log_workout_resolves_ts_iso_from_classifier() -> None:
     """When the LLM returns a ts_iso for 'after Dhuhr earlier today',
     the log row is written with that timestamp instead of now()."""
     classify = {"intent": "log_workout"}
-    # Today's Dhuhr in Dubai is ~12:30 local. Pick a fixed valid past ts.
-    past_ts_local = (datetime.now(UTC) - timedelta(hours=4)).isoformat()
+    # Freeze the clock: the confirmation only says "earlier today" when the
+    # event is >10 min old AND on the same Asia/Dubai date, which is
+    # impossible to satisfy with a wall-clock offset just after local
+    # midnight. 15:00 local with Dhuhr at 11:00 satisfies both at any hour.
+    frozen_local = datetime(2026, 5, 22, 15, 0, tzinfo=ZoneInfo("Asia/Dubai"))
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen_local.astimezone(tz) if tz else frozen_local.replace(tzinfo=None)
+
+    past_ts_local = (frozen_local - timedelta(hours=4)).isoformat()
     log_response = {
         "deltas": {"sessions_today": 1, "pushups_today": 12},
         "ts_iso": past_ts_local,
@@ -1008,9 +1019,10 @@ async def test_log_workout_resolves_ts_iso_from_classifier() -> None:
         {"id": 4, "member_id": 2, "title": "Pushups", "tracker_spec": spec},
     ])
     h = _build(llm=llm, goals_store=goals)
-    r = await h.try_handle(
-        "did 12 pushups earlier today after Dhuhr prayer", member=MEMBER,
-    )
+    with patch("orchestrator.goals_chat.datetime", _FrozenDatetime):
+        r = await h.try_handle(
+            "did 12 pushups earlier today after Dhuhr prayer", member=MEMBER,
+        )
     assert r.handled is True
     goals.record_log_event.assert_awaited_once()
     call = goals.record_log_event.await_args

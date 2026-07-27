@@ -2,7 +2,7 @@ agent: entertainment
 version: 0.3.0
 description: Recommendations, library indexing/search, and watch history.
 defaults:
-  llm: qwen3-8b-8k
+  llm: qwen3-8b-16k
   timeout_s: 45
 capabilities:
   - id: recommend
@@ -29,7 +29,7 @@ capabilities:
     description: LLM-only discovery outside local library.
     side_effects: false
     cost: medium
-    llm: qwen3-8b-8k
+    llm: qwen3-8b-16k
   - id: suggest_tv_action
     description: Persist a TV/monitor left-on detection and offer Telegram quick actions.
     side_effects: true

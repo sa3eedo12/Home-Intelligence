@@ -92,9 +92,11 @@ services:
       # (60-180s reload) is far worse than the memory cost.
       OLLAMA_KEEP_ALIVE: 24h
       OLLAMA_NUM_PARALLEL: "2"
-      # Allow the active set (gemma4:12b ~10GB, qwen3:8b ~11GB,
-      # qwen3:0.6b ~1.5GB, bge-m3 ~1.2GB = ~24GB total) to stay
-      # loaded simultaneously inside the 63 GiB Vulkan pool.
+      # Keep this equal to the number of tags actually in rotation
+      # (qwen36-moe-32k 23GB, qwen3-8b-16k 9.9GB, qwen3-0.6b-4k 1.4GB,
+      # bge-m3 0.6GB = ~35GB inside the 63 GiB Vulkan pool). Adding a
+      # fifth tag silently evicts one of these and costs a 60-180s
+      # reload on the next call that needs it.
       OLLAMA_MAX_LOADED_MODELS: "4"
       OLLAMA_FLASH_ATTENTION: "1"
       OLLAMA_NO_ANALYTICS: "1"
@@ -108,7 +110,14 @@ services:
       timeout: 5s
       retries: 6
       start_period: 30s
-    networks: [agents]
+    networks:
+      agents:
+        aliases:
+          # OpenClaw only waives its 120s LLM idle timeout for providers it
+          # considers local, and Docker service names don't qualify while
+          # any *.local name does. Without this alias its requests to the
+          # reasoner are killed mid-generation. See infra/openclaw/README.md.
+          - ollama.local
 
   lemonade:
     # =====================================================================

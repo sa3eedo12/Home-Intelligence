@@ -57,7 +57,7 @@ async def run_once(
     redis: Redis,
     store: HealthGoalsStore,
     llm: Any | None = None,
-    classifier_model: str = "qwen3-8b-8k",
+    classifier_model: str = "qwen3-8b-16k",
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """One poll cycle. Returns counters for observability.

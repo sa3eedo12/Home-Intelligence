@@ -2,7 +2,7 @@ agent: knowledge_notes
 version: 0.3.0
 description: Document indexing, semantic search, summarization, and RAG Q&A for notes.
 defaults:
-  llm: qwen3-8b-8k
+  llm: qwen3-8b-16k
   timeout_s: 60
 capabilities:
   - id: index_path
@@ -17,12 +17,12 @@ capabilities:
     description: Summarize a document or search results.
     side_effects: false
     cost: medium
-    llm: qwen3-8b-8k
+    llm: qwen3-8b-16k
   - id: ask
     description: RAG Q&A over indexed chunks with source markers.
     side_effects: false
     cost: high
-    llm: qwen3-8b-8k
+    llm: qwen3-8b-16k
   - id: list_indexed
     description: Show indexed documents statistics.
     side_effects: false

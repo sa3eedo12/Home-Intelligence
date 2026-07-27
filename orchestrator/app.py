@@ -455,7 +455,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     agent_urls = _parse_agent_urls(agent_urls_raw)
     registry = CapabilityRegistry(agent_urls=agent_urls, qdrant=qdrant, embedder=embedder)
     await registry.bootstrap()
-    default_model = os.environ.get("DEFAULT_MODEL", "qwen3-8b-8k")
+    default_model = os.environ.get("DEFAULT_MODEL", "qwen3-8b-16k")
     humanizer_model = os.environ.get("HUMANIZER_MODEL", default_model)
     safety = SafetyPolicy(path=os.environ.get("SAFETY_POLICY_PATH", "policies/safety.yaml"))
     reflection_store = ReflectionStore(pool)
@@ -504,7 +504,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     policy_engine = PolicyEngine(_load_yaml(HERE / "policies.yaml"), redis, pool=pool)
-    reasoner_model = os.environ.get("REASONER_MODEL", "qwen36-moe-128k")
+    reasoner_model = os.environ.get("REASONER_MODEL", "qwen36-moe-32k")
     reflector = NightlyReflector(
         pool=pool,
         redis=redis,
@@ -698,7 +698,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             store=app.state.health_goals_store,
             nag_store=app.state.member_nag_windows_store,
             llm=llm,
-            nag_model=os.environ.get("DEFAULT_MODEL", "qwen3-8b-8k"),
+            nag_model=os.environ.get("DEFAULT_MODEL", "qwen3-8b-16k"),
             engagement_store=app.state.engagement_store,
         )
 
@@ -719,7 +719,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     engagement_store=app.state.engagement_store,
                     nag_windows_store=app.state.member_nag_windows_store,
                     member_id=int(m["id"]), llm=llm,
-                    classifier_model=os.environ.get("DEFAULT_MODEL", "qwen3-8b-8k"),
+                    classifier_model=os.environ.get("DEFAULT_MODEL", "qwen3-8b-16k"),
                 )
             except Exception as exc:
                 logger.warning("engagement_observe_failed",
@@ -744,7 +744,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     pool=pool, redis=redis,
                     goals_store=app.state.health_goals_store,
                     member_id=int(m["id"]), llm=llm,
-                    reasoner_model=os.environ.get("REASONER_MODEL", "qwen36-moe-128k"),
+                    reasoner_model=os.environ.get("REASONER_MODEL", "qwen36-moe-32k"),
                 )
             except Exception as exc:
                 logger.warning("cross_goal_run_failed",
@@ -760,7 +760,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             pool=pool, redis=redis,
             store=app.state.health_goals_store,
             llm=llm,
-            reasoner_model=os.environ.get("REASONER_MODEL", "qwen36-moe-128k"),
+            reasoner_model=os.environ.get("REASONER_MODEL", "qwen36-moe-32k"),
         )
 
     async def _run_goal_auto_log(_inputs: dict[str, Any]) -> dict[str, Any]:
@@ -770,7 +770,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             pool=pool, redis=redis,
             store=app.state.health_goals_store,
             llm=llm,
-            classifier_model=os.environ.get("DEFAULT_MODEL", "qwen3-8b-8k"),
+            classifier_model=os.environ.get("DEFAULT_MODEL", "qwen3-8b-16k"),
         )
 
     async def _run_pre_bedtime_scan(_inputs: dict[str, Any]) -> dict[str, Any]:

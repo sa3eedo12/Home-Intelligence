@@ -32,7 +32,7 @@ def _llm_client() -> OllamaClient:
 
 
 def _default_model() -> str:
-    return os.getenv("DEFAULT_MODEL", "qwen3-8b-8k")
+    return os.getenv("DEFAULT_MODEL", "qwen3-8b-16k")
 
 
 def _narrative_model() -> str:

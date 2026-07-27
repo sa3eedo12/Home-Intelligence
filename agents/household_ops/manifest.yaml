@@ -2,7 +2,7 @@ agent: household_ops
 version: 0.3.0
 description: Chores, shopping, pantry, and meal planning.
 defaults:
-  llm: qwen3-8b-8k
+  llm: qwen3-8b-16k
   timeout_s: 45
 capabilities:
   - id: chores_add
@@ -50,7 +50,7 @@ capabilities:
     description: Plan meals for N days using pantry and preferences.
     side_effects: false
     cost: high
-    llm: qwen36-moe-128k
+    llm: qwen36-moe-32k
   - id: meal_recipe
     description: Return recipe for a planned meal.
     side_effects: false

@@ -2,7 +2,7 @@ agent: system_health
 version: 0.4.0
 description: Hardware and container monitoring, anomaly checks, and optimization suggestions.
 defaults:
-  llm: qwen3-8b-8k
+  llm: qwen3-8b-16k
   timeout_s: 30
 capabilities:
   - id: scan
