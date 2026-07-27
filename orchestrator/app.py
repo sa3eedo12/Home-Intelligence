@@ -362,6 +362,20 @@ async def _build_status(app: FastAPI) -> dict[str, Any]:
     }
 
 
+# Telegram's Bot API allows exactly one getUpdates poller per token. When
+# another process owns the channel, the orchestrator must not build a bot at
+# all: python-telegram-bot's Application.initialize() calls getMe, which
+# raises InvalidToken and aborts startup. Guarding only start_polling() runs
+# too late -- and since the placeholder below is what .env.example ships, an
+# unconfigured deploy crash-looped as well.
+TELEGRAM_PLACEHOLDER_TOKEN = "replace-with-token-from-botfather"
+
+
+def telegram_enabled(token: str) -> bool:
+    """True when the orchestrator should own the Telegram channel."""
+    return bool(token) and token != TELEGRAM_PLACEHOLDER_TOKEN
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -816,26 +830,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.goals_chat_handler = goals_chat_handler
 
-    tg_app = await build_telegram_app(
-        token=telegram_token,
-        allowed_ids=allowed_ids,
-        router=router,
-        workflow_engine=workflow_engine,
-        policy_engine=policy_engine,
-        scheduler=scheduler,
-        admin_base_url=admin_base_url,
-        redis=redis,
-        knowledge_graph=knowledge_graph,
-        proposal_store=reflection_store,
-        goals_handler=goals_chat_handler,
-    )
-    tg_app_holder["app"] = tg_app
-    await tg_app.initialize()
-    await tg_app.start()
-    if telegram_token and telegram_token != "replace-with-token-from-botfather":
+    tg_app: Any | None = None
+    if telegram_enabled(telegram_token):
+        tg_app = await build_telegram_app(
+            token=telegram_token,
+            allowed_ids=allowed_ids,
+            router=router,
+            workflow_engine=workflow_engine,
+            policy_engine=policy_engine,
+            scheduler=scheduler,
+            admin_base_url=admin_base_url,
+            redis=redis,
+            knowledge_graph=knowledge_graph,
+            proposal_store=reflection_store,
+            goals_handler=goals_chat_handler,
+        )
+        tg_app_holder["app"] = tg_app
+        await tg_app.initialize()
+        await tg_app.start()
         await tg_app.updater.start_polling(drop_pending_updates=True)
+    else:
+        logger.info("telegram_disabled")
 
     async def _send_fn(chat_id: int, text: str, keyboard: Any) -> None:
+        if tg_app is None:
+            return
         await send(tg_app, chat_id, text, reply_markup=keyboard)
 
     notify_task = asyncio.create_task(
@@ -1055,12 +1074,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     notify_task.cancel()
     chore_auto_task.cancel()
     warmup_task.cancel()
-    try:
-        await tg_app.updater.stop()
-    except Exception:
-        pass
-    await tg_app.stop()
-    await tg_app.shutdown()
+    if tg_app is not None:
+        try:
+            await tg_app.updater.stop()
+        except Exception:
+            pass
+        await tg_app.stop()
+        await tg_app.shutdown()
     await redis.aclose()
     await pool.close()
     logger.info("orchestrator_stopped")
