@@ -46,8 +46,11 @@ gateway).
 Symptom: `LLM idle timeout (120s)`, then failover to the small model, which
 overflows its context (`stopReason=length`) and hard-fails the turn.
 
-OpenClaw disables the idle timeout entirely for local providers, but the check
-is stricter than it looks:
+**This fires on cold model loads and there is no config waiver for it.** The
+35B MoE takes ~3 minutes to load into VRAM. Nothing streams during that time,
+so the watchdog trips at 120s and kills the turn.
+
+`resolveLlmIdleTimeoutMs` *looks* like it exempts local providers:
 
 ```js
 const baseUrl = params?.model?.baseUrl;
@@ -56,21 +59,35 @@ if (typeof baseUrl === "string" && baseUrl.length > 0
 return DEFAULT_LLM_IDLE_TIMEOUT_MS;
 ```
 
-Two gotchas:
+`isLocalProviderBaseUrl` does accept `localhost`, `0.0.0.0`, `::1`, `*.local`
+and private IPv4 — but **this branch is dead in practice**: `params.model.baseUrl`
+is not populated by the time the resolver runs, so the check never passes.
 
-1. `isLocalProviderBaseUrl` accepts `localhost`, `0.0.0.0`, `::1`, `*.local`
-   and private IPv4 (`127.x`, `10.x`, `172.16-31.x`, `192.168.x`). It does
-   **not** accept Docker DNS service names like `ollama`.
-2. It reads **`model.baseUrl`, not the provider's**. Setting it only at
-   provider level has no effect.
+Setting a per-model `baseUrl` does **not** fix the timeout. This was tested
+directly: the same cold-load request failed identically at 120s with
+`http://ollama.local:11434` and with `http://172.16.4.7:11434`. Earlier runs
+that appeared to prove the fix worked were confounded — **the model was already
+warm**. The idle timeout measures the gap *between stream chunks*, not total
+duration, so a warm request happily runs 124s without tripping it.
 
-So every entry under `models.providers.ollama.models` needs its own `baseUrl`
-pointing at something the matcher recognises. Prefer a `.local` network alias
-over a container IP, which changes when the stack is recreated.
+### The actual mitigation: keep models resident
 
-This is the same class of bug as the earlier Ollama tool-args issue: OpenClaw's
-"is this local?" heuristics assume localhost and silently miss Docker service
-names.
+Warmth is the whole game. The orchestrator runs a self-healing warm loop
+(`_warm_models` in `orchestrator/app.py`) that polls Ollama's `/api/ps` every
+`MODEL_WARM_INTERVAL_SECONDS` (default 300) and re-warms anything missing.
+This matters because **Ollama drops every loaded model when it restarts**, and
+the orchestrator does not restart with it — without the loop, that window stays
+cold until the orchestrator happens to be redeployed, and every OpenClaw request
+in the meantime hard-fails.
+
+Warm calls request `keep_alive` of 3x the check interval so residency does not
+depend on the two timers interleaving favourably. The reasoner additionally
+honours `REASONER_KEEP_ALIVE=-1` to pin it permanently.
+
+Untested lever, if cold-start failures ever need a belt-and-braces fix:
+`runTimeoutMs` returns 0 (disabled) when `>= 2147e6` ms (~24.85 days). Note
+that `agents.defaults.timeoutSeconds` is capped at 120s by
+`clampImplicitTimeoutMs`, so it can only ever *shorten* the timeout.
 
 ## Compaction: `maxActiveTranscriptBytes` is gated
 

@@ -370,6 +370,20 @@ async def _build_status(app: FastAPI) -> dict[str, Any]:
 # unconfigured deploy crash-looped as well.
 TELEGRAM_PLACEHOLDER_TOKEN = "replace-with-token-from-botfather"
 
+# How often to re-check that the configured models are still resident in
+# Ollama. Ollama drops every loaded model when it restarts, and nothing else
+# notices, so this is the interval over which that window self-heals. The
+# check itself is a single cheap /api/ps call; only an actually-missing model
+# costs an inference.
+_WARM_INTERVAL_SECONDS = float(os.environ.get("MODEL_WARM_INTERVAL_SECONDS", "300"))
+
+# Warm calls must buy more residency than the gap between checks, otherwise
+# Ollama's own keep-alive can expire in the window between two cycles and the
+# next real request still pays the cold-load tax. Asking for several intervals'
+# worth means residency is maintained by this loop's own contract rather than
+# by the two timers happening to interleave favourably.
+_WARM_KEEP_ALIVE_SECONDS = int(_WARM_INTERVAL_SECONDS * 3)
+
 
 def telegram_enabled(token: str) -> bool:
     """True when the orchestrator should own the Telegram channel."""
@@ -878,29 +892,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.people_home_fetch = lambda: _people_home(app)
 
     async def _warm_models() -> None:
-        """Send a tiny inference to Ollama on startup so the first user
-        request doesn't pay the cold-load tax. Best-effort; never blocks
-        startup if Ollama is slow.
+        """Keep the configured models resident in Ollama.
 
-        The reasoner (35B MoE, ~23 GB) takes ~3 minutes to cold-load and
-        is only used by the nightly reflection job. Without a pin it
-        would be unloaded long before the next reflection run, forcing
-        reflection to silently fall back to the 8B (which is what's been
-        happening). We warm it once at boot with keep_alive=-1 so it
-        stays resident until Ollama restarts."""
-        for model in {router_model, default_model}:
-            if not model:
-                continue
+        Sends a tiny inference so the first real request doesn't pay the
+        cold-load tax. Best-effort; never blocks startup if Ollama is slow.
+
+        The reasoner (35B MoE, ~23 GB) takes ~3 minutes to cold-load and is
+        only used by the nightly reflection job. Without a pin it would be
+        unloaded long before the next reflection run, forcing reflection to
+        silently fall back to the 8B (which is what's been happening). We
+        warm it with keep_alive=-1 so it stays resident.
+
+        This re-checks periodically rather than warming only at boot.
+        Ollama restarts independently of this service (app updates, crashes,
+        manual restarts), and every model it holds is dropped when it does.
+        Anything that then sends the first request eats the full cold-load
+        wait, which exceeds the LLM idle timeout in OpenClaw and surfaces to
+        the user as a hard failure rather than a slow reply. Re-warming on a
+        loop makes that window self-heal instead of persisting until this
+        service happens to restart.
+        """
+        while True:
             try:
-                await llm.chat(
-                    messages=[{"role": "user", "content": "warm"}],
-                    model=model,
-                    temperature=0.0,
-                )
-                logger.info("orchestrator_warm_model_ok", model=model)
-            except Exception as exc:
-                logger.info("orchestrator_warm_model_skipped", model=model, error=str(exc))
+                await _warm_missing_models()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.info("orchestrator_warm_cycle_failed", error=str(exc))
+            await asyncio.sleep(_WARM_INTERVAL_SECONDS)
 
+    async def _warm_missing_models() -> None:
+        """Warm any configured model Ollama is not currently holding."""
         reasoner = os.environ.get("REASONER_MODEL")
         # keep_alive=-1 pins the model in VRAM forever. Disabled by
         # default because Strix Halo iGPUs with a large BIOS UMA
@@ -910,13 +932,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # in once you've confirmed ROCm reports >30 GiB available
         # (`docker logs ollama | grep "gpu memory"`).
         reasoner_keep_alive_raw = os.environ.get("REASONER_KEEP_ALIVE", "").strip()
-        if reasoner and reasoner not in {router_model, default_model}:
+
+        try:
+            resident = await llm.loaded_models()
+        except Exception as exc:
+            # Ollama unreachable — warming would fail anyway, so skip this
+            # cycle rather than emit a burst of misleading errors.
+            logger.info("orchestrator_warm_probe_failed", error=str(exc))
+            return
+
+        for model in {router_model, default_model}:
+            if not model or model in resident:
+                continue
+            try:
+                await llm.chat(
+                    messages=[{"role": "user", "content": "warm"}],
+                    model=model,
+                    temperature=0.0,
+                    keep_alive=_WARM_KEEP_ALIVE_SECONDS,
+                )
+                logger.info("orchestrator_warm_model_ok", model=model)
+            except Exception as exc:
+                logger.info("orchestrator_warm_model_skipped", model=model, error=str(exc))
+
+        if reasoner and reasoner not in {router_model, default_model} and reasoner not in resident:
             warm_kwargs: dict[str, Any] = {
                 "messages": [{"role": "user", "content": "warm"}],
                 "model": reasoner,
                 "temperature": 0.0,
                 "think": False,
                 "timeout": 600.0,
+                "keep_alive": _WARM_KEEP_ALIVE_SECONDS,
             }
             if reasoner_keep_alive_raw:
                 try:

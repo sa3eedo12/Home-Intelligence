@@ -120,3 +120,24 @@ class OllamaClient:
             resp.raise_for_status()
             data = resp.json()
             return data.get("embedding", [])
+
+    async def loaded_models(self) -> set[str]:
+        """Names of the models Ollama currently holds resident.
+
+        Ollama reports tags as `name:tag`; callers generally hold the bare
+        tag name, so both forms are returned. Raises on transport errors so
+        callers can distinguish "Ollama is down" from "nothing is loaded" —
+        treating an unreachable Ollama as an empty set would trigger a
+        pointless warm of every model against a dead endpoint.
+        """
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{self.base_url}/api/ps")
+            resp.raise_for_status()
+            names: set[str] = set()
+            for entry in resp.json().get("models") or []:
+                name = entry.get("name") or entry.get("model")
+                if not name:
+                    continue
+                names.add(name)
+                names.add(name.split(":", 1)[0])
+            return names

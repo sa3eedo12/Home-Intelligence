@@ -143,3 +143,73 @@ async def test_embed_passes_small_num_ctx_for_vulkan(monkeypatch) -> None:
     assert payload["prompt"] == "hello world"
     assert payload.get("options", {}).get("num_ctx") == 512
     assert out == [0.1, 0.2, 0.3]
+
+
+class _FakePsClient:
+    """Serves a canned /api/ps body so loaded_models can be asserted on."""
+
+    body: dict[str, Any] = {"models": []}
+    raise_on_get: Exception | None = None
+    last_url: str | None = None
+
+    def __init__(self, *, timeout: Any = None, **_: Any) -> None:
+        _FakePsClient.last_timeout = timeout
+
+    async def __aenter__(self) -> "_FakePsClient":
+        return self
+
+    async def __aexit__(self, *_args: Any) -> bool:
+        return False
+
+    async def get(self, url: str) -> _FakeResponse:
+        _FakePsClient.last_url = url
+        if _FakePsClient.raise_on_get is not None:
+            raise _FakePsClient.raise_on_get
+        return _FakeResponse(_FakePsClient.body)
+
+
+@pytest.mark.asyncio
+async def test_loaded_models_returns_tagged_and_bare_names(monkeypatch) -> None:
+    """Ollama reports `name:tag` but callers hold bare tag names from env,
+    so both forms must be present or the warmer re-warms models that are
+    already resident on every cycle."""
+    _FakePsClient.raise_on_get = None
+    _FakePsClient.body = {
+        "models": [
+            {"name": "qwen36-moe-32k:latest"},
+            {"name": "bge-m3:latest"},
+        ]
+    }
+    monkeypatch.setattr("home_agents_sdk.llm.httpx.AsyncClient", _FakePsClient)
+
+    names = await OllamaClient("http://ollama:11434").loaded_models()
+
+    assert "qwen36-moe-32k" in names
+    assert "qwen36-moe-32k:latest" in names
+    assert "bge-m3" in names
+    assert _FakePsClient.last_url == "http://ollama:11434/api/ps"
+
+
+@pytest.mark.asyncio
+async def test_loaded_models_empty_when_nothing_resident(monkeypatch) -> None:
+    """An empty model list is a valid answer, not an error."""
+    _FakePsClient.raise_on_get = None
+    _FakePsClient.body = {"models": []}
+    monkeypatch.setattr("home_agents_sdk.llm.httpx.AsyncClient", _FakePsClient)
+
+    assert await OllamaClient("http://ollama:11434").loaded_models() == set()
+
+
+@pytest.mark.asyncio
+async def test_loaded_models_raises_when_ollama_unreachable(monkeypatch) -> None:
+    """Transport failures must propagate. Returning an empty set instead
+    would look identical to "nothing is loaded" and send the warmer off to
+    warm every model against a dead endpoint."""
+    _FakePsClient.body = {"models": []}
+    _FakePsClient.raise_on_get = RuntimeError("connection refused")
+    monkeypatch.setattr("home_agents_sdk.llm.httpx.AsyncClient", _FakePsClient)
+
+    with pytest.raises(RuntimeError):
+        await OllamaClient("http://ollama:11434").loaded_models()
+
+    _FakePsClient.raise_on_get = None
