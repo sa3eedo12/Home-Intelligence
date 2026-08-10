@@ -6,7 +6,7 @@ import os
 import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -377,12 +377,18 @@ TELEGRAM_PLACEHOLDER_TOKEN = "replace-with-token-from-botfather"
 # costs an inference.
 _WARM_INTERVAL_SECONDS = float(os.environ.get("MODEL_WARM_INTERVAL_SECONDS", "300"))
 
-# Warm calls must buy more residency than the gap between checks, otherwise
-# Ollama's own keep-alive can expire in the window between two cycles and the
-# next real request still pays the cold-load tax. Asking for several intervals'
-# worth means residency is maintained by this loop's own contract rather than
-# by the two timers happening to interleave favourably.
-_WARM_KEEP_ALIVE_SECONDS = int(_WARM_INTERVAL_SECONDS * 3)
+# Warm calls used to force an explicit keep_alive here. That was a mistake:
+# passing one *overrides* the server's own OLLAMA_KEEP_ALIVE, so a deployment
+# configured for 24h residency was silently downgraded to minutes and paid a
+# disk reload every cycle. Leave it unset so the server's policy wins, and
+# instead act on the expiry Ollama reports (see _warm_missing_models). Set
+# MODEL_WARM_KEEP_ALIVE only to deliberately override that policy.
+_WARM_KEEP_ALIVE = os.environ.get("MODEL_WARM_KEEP_ALIVE", "").strip()
+
+# How far ahead of a reported eviction to re-warm. Absence is a lagging
+# signal — by then a real request has already paid the cold-load tax — so
+# refresh anything due to expire before the check after next.
+_WARM_EXPIRY_MARGIN_SECONDS = _WARM_INTERVAL_SECONDS * 2
 
 
 def telegram_enabled(token: str) -> bool:
@@ -934,36 +940,48 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         reasoner_keep_alive_raw = os.environ.get("REASONER_KEEP_ALIVE", "").strip()
 
         try:
-            resident = await llm.loaded_models()
+            residency = await llm.model_residency()
         except Exception as exc:
             # Ollama unreachable — warming would fail anyway, so skip this
             # cycle rather than emit a burst of misleading errors.
             logger.info("orchestrator_warm_probe_failed", error=str(exc))
             return
 
+        deadline = datetime.now(UTC) + timedelta(seconds=_WARM_EXPIRY_MARGIN_SECONDS)
+
+        def needs_warm(model: str) -> bool:
+            """True when a model is absent, or due to be evicted shortly."""
+            if model not in residency:
+                return True
+            expires = residency[model]
+            return expires is not None and expires <= deadline
+
         for model in {router_model, default_model}:
-            if not model or model in resident:
+            if not model or not needs_warm(model):
                 continue
+            warm_kwargs: dict[str, Any] = {
+                "messages": [{"role": "user", "content": "warm"}],
+                "model": model,
+                "temperature": 0.0,
+            }
+            if _WARM_KEEP_ALIVE:
+                warm_kwargs["keep_alive"] = _WARM_KEEP_ALIVE
             try:
-                await llm.chat(
-                    messages=[{"role": "user", "content": "warm"}],
-                    model=model,
-                    temperature=0.0,
-                    keep_alive=_WARM_KEEP_ALIVE_SECONDS,
-                )
+                await llm.chat(**warm_kwargs)
                 logger.info("orchestrator_warm_model_ok", model=model)
             except Exception as exc:
                 logger.info("orchestrator_warm_model_skipped", model=model, error=str(exc))
 
-        if reasoner and reasoner not in {router_model, default_model} and reasoner not in resident:
-            warm_kwargs: dict[str, Any] = {
+        if reasoner and reasoner not in {router_model, default_model} and needs_warm(reasoner):
+            warm_kwargs = {
                 "messages": [{"role": "user", "content": "warm"}],
                 "model": reasoner,
                 "temperature": 0.0,
                 "think": False,
                 "timeout": 600.0,
-                "keep_alive": _WARM_KEEP_ALIVE_SECONDS,
             }
+            if _WARM_KEEP_ALIVE:
+                warm_kwargs["keep_alive"] = _WARM_KEEP_ALIVE
             if reasoner_keep_alive_raw:
                 try:
                     warm_kwargs["keep_alive"] = int(reasoner_keep_alive_raw)

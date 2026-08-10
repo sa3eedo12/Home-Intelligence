@@ -213,3 +213,59 @@ async def test_loaded_models_raises_when_ollama_unreachable(monkeypatch) -> None
         await OllamaClient("http://ollama:11434").loaded_models()
 
     _FakePsClient.raise_on_get = None
+
+
+@pytest.mark.asyncio
+async def test_model_residency_parses_expiry(monkeypatch) -> None:
+    """The warmer needs to act before eviction, not after, so the expiry
+    Ollama reports must survive the round trip as an aware datetime."""
+    _FakePsClient.raise_on_get = None
+    _FakePsClient.body = {
+        "models": [{"name": "qwen3-8b-16k:latest", "expires_at": "2026-08-10T07:19:07.123Z"}]
+    }
+    monkeypatch.setattr("home_agents_sdk.llm.httpx.AsyncClient", _FakePsClient)
+
+    residency = await OllamaClient("http://ollama:11434").model_residency()
+
+    expires = residency["qwen3-8b-16k"]
+    assert expires is not None
+    assert expires.tzinfo is not None
+    assert expires.year == 2026 and expires.hour == 7
+    # bare and tagged keys must agree, as for loaded_models
+    assert residency["qwen3-8b-16k:latest"] == expires
+
+
+@pytest.mark.asyncio
+async def test_model_residency_expiry_none_when_absent_or_unparsable(monkeypatch) -> None:
+    """A missing or malformed expires_at means "unknown", which callers read
+    as "no scheduled eviction" — reporting it as expired would make the
+    warmer re-warm a healthy model on every single cycle."""
+    _FakePsClient.raise_on_get = None
+    _FakePsClient.body = {
+        "models": [
+            {"name": "no-expiry:latest"},
+            {"name": "bad-expiry:latest", "expires_at": "not-a-date"},
+        ]
+    }
+    monkeypatch.setattr("home_agents_sdk.llm.httpx.AsyncClient", _FakePsClient)
+
+    residency = await OllamaClient("http://ollama:11434").model_residency()
+
+    assert residency["no-expiry"] is None
+    assert residency["bad-expiry"] is None
+
+
+@pytest.mark.asyncio
+async def test_model_residency_handles_pinned_far_future_expiry(monkeypatch) -> None:
+    """keep_alive=-1 makes Ollama report a date centuries out. It must parse
+    like any other, so a pinned model compares as "not expiring soon" without
+    needing a special case."""
+    _FakePsClient.raise_on_get = None
+    _FakePsClient.body = {
+        "models": [{"name": "qwen36-moe-64k:latest", "expires_at": "2318-11-20T04:58:04Z"}]
+    }
+    monkeypatch.setattr("home_agents_sdk.llm.httpx.AsyncClient", _FakePsClient)
+
+    residency = await OllamaClient("http://ollama:11434").model_residency()
+
+    assert residency["qwen36-moe-64k"].year == 2318

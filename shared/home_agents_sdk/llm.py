@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -130,14 +131,39 @@ class OllamaClient:
         treating an unreachable Ollama as an empty set would trigger a
         pointless warm of every model against a dead endpoint.
         """
+        return set(await self.model_residency())
+
+    async def model_residency(self) -> dict[str, datetime | None]:
+        """Resident model names mapped to when Ollama will evict them.
+
+        Absence alone is a lagging signal: by the time a model has dropped
+        out, the next real request already pays the cold-load tax. Exposing
+        the expiry lets callers act on the *approaching* eviction instead.
+
+        Both `name:tag` and bare-tag keys are returned, as for
+        `loaded_models`. The value is None when Ollama omits or cannot parse
+        `expires_at`, which callers should read as "no expiry known" rather
+        than "expires now". Pinned models (keep_alive=-1) report a date
+        centuries out, which compares correctly without special-casing.
+        """
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"{self.base_url}/api/ps")
             resp.raise_for_status()
-            names: set[str] = set()
+            residency: dict[str, datetime | None] = {}
             for entry in resp.json().get("models") or []:
                 name = entry.get("name") or entry.get("model")
                 if not name:
                     continue
-                names.add(name)
-                names.add(name.split(":", 1)[0])
-            return names
+                expires: datetime | None = None
+                raw = entry.get("expires_at")
+                if isinstance(raw, str):
+                    try:
+                        expires = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                    except ValueError:
+                        expires = None
+                    else:
+                        if expires.tzinfo is None:
+                            expires = expires.replace(tzinfo=timezone.utc)
+                residency[name] = expires
+                residency[name.split(":", 1)[0]] = expires
+            return residency
