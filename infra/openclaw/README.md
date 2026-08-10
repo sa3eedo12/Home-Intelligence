@@ -235,6 +235,60 @@ is: leading metadata lines (`session`, `model_change`, `thinking_level_change`,
 starting at a clean turn boundary. A single `toolResult` line can be tens of
 kilobytes — those are usually the whole problem.
 
+## Reaching the Control UI (secure-context problem)
+
+The Control UI is served by the gateway itself on `:30262` (`/`, `/control`,
+`/app`). Browsing to it via the NAS LAN IP fails with:
+
+> Secure browser context required — this page is running over plain HTTP, so
+> the browser cannot create the device identity the Gateway expects.
+
+The UI needs WebCrypto, which browsers only expose in a *secure context*. Plain
+HTTP over a LAN IP is not one. The config knob
+`gateway.controlUi.allowInsecureAuth: true` sidesteps this by dropping to
+token-only auth — **don't**; it removes device identity for everyone on the LAN.
+
+Use an SSH tunnel instead. `127.0.0.1` is a "potentially trustworthy origin"
+per the Secure Contexts spec, so it *is* a secure context even over plain HTTP,
+and device auth keeps working:
+
+```bash
+ssh -f -N -L 18789:127.0.0.1:30262 truenas
+# then open http://127.0.0.1:18789  (auth with OPENCLAW_GATEWAY_TOKEN)
+```
+
+**TrueNAS blocks this by default.** Its sshd ships `AllowTcpForwarding no`, so
+the tunnel accepts the local connection then dies with
+`Recv failure: Connection reset by peer`. Enable it persistently through the
+middleware, not by editing `sshd_config` (which gets regenerated):
+
+```bash
+midclt call ssh.update '{"tcpfwd": true}'   # UI: Services -> SSH -> Allow TCP Port Forwarding
+```
+
+## Device scopes and the CLI bootstrap deadlock
+
+Admin commands (`cron edit`, `cron run`, `devices approve`) need
+`operator.admin`. A freshly paired CLI only gets `operator.write`, and it
+**cannot approve its own upgrade request** — that needs `operator.pairing`,
+which is what it is asking for. Only a device already holding
+`operator.approvals` (e.g. the iOS app) can break the tie.
+
+If no such device is reachable, grant scopes offline. Pairing state is JSON,
+not just SQLite:
+
+```bash
+docker stop ix-openclaw-openclaw-1
+# edit .openclaw/devices/paired.json: add the scopes to BOTH
+#   scopes[] and approvedScopes[], and to tokens.operator.scopes[]
+# then clear .openclaw/devices/pending.json
+docker start ix-openclaw-openclaw-1
+```
+
+Note `openclaw.json` holds `channels.telegram.botToken` in plaintext, and the
+gateway token is the `OPENCLAW_GATEWAY_TOKEN` env var (set from the TrueNAS app
+UI, not stored in the config file). Treat both files as secrets.
+
 ## Config gotchas
 
 - `idleTimeoutMs` is **not** valid under `agents.defaults.models.<model>`; it
