@@ -192,6 +192,71 @@ So the big model is both smarter and ~3x faster — do not "optimise" by
 switching to the small one. The 8B is still the right choice for the
 orchestrator's short classification prompts, where prefill depth is trivial.
 
+### Do not extrapolate that table — prefill degrades with depth
+
+The 506 t/s above is real *at 10.7k tokens* and meaningless as a constant.
+Measured on unique (cache-defeating) prompts against the live 64k model:
+
+| prompt | prefill | rate |
+|---|---|---|
+| 10,684 tok | 21.1s | 506 t/s |
+| 27,578 tok | 100.0s | 276 t/s |
+| 65,535 tok | **431.1s** | 152 t/s |
+
+2.4x the tokens costs 4.3x the time. Attention is quadratic in sequence
+length, so the *rate itself* falls as the prompt deepens. The practical
+consequence: **filling the current 64k window costs over seven minutes of
+prefill on a cache miss.**
+
+### Why a bigger context window is not the free win it looks like
+
+The VRAM cost of more context is genuinely trivial on this model. It is a
+hybrid: only **10 of its 41 layers** keep a KV cache, the rest use recurrent
+state that is constant-size regardless of context.
+
+```
+llama_kv_cache:       size = 1280.00 MiB (65536 cells, 10 layers, 1/1 seqs)
+llama_memory_recurrent: size =   62.81 MiB (    1 cells, 41 layers, 1 seqs)
+```
+
+That is 20 KB/token, so 64k -> 128k costs only ~1.25 GiB and the full native
+262144 window ~3.75 GiB, against ~14 GB of headroom. **VRAM is not the
+constraint, and freeing the 8B's 9.9 GB is not required to raise the window.**
+
+The constraint is the table above. A context window is a ceiling on how much
+prompt you can be forced to re-prefill, and this architecture hits that ceiling
+often: llama.cpp logs `forcing full prompt re-processing due to lack of cache
+data (likely due to SWA or hybrid/recurrent memory)`, because recurrent state
+cannot be partially reused the way a KV cache can. Raising the window to 128k
+would let sessions grow into a worst case measured in tens of minutes. 64k is
+already past the point where a full re-prefill fits in any sane timeout — the
+right lever is bounding session growth, not enlarging the window.
+
+### Why the 8B stays, despite the MoE being faster
+
+Two measured reasons, neither of them quality:
+
+1. **The MoE serialises; the 8B does not.** The MoE loads with `n_seq_max = 1`
+   (hybrid recurrent memory supports one sequence), the 8B gets two slots. A
+   short call issued 1s into a long generation:
+
+   | | alone | during a long request |
+   |---|---|---|
+   | `qwen3-8b-16k` | 0.37s | 0.36s — unaffected |
+   | `qwen36-moe-64k` | 0.56s | **10.47s** — queued |
+
+   Routing classifiers, the dashboard and the doorbell at the MoE would park
+   them behind every multi-minute OpenClaw turn.
+
+2. **The MoE ignores `format: "json"`.** Grammar-constrained decoding is not
+   applied on the `RENDERER/PARSER qwen3.5` path, so it emits markdown-fenced
+   JSON with `think:false` and a stray `</think>` with `think:true`. The 8B
+   honours the constraint. Only `goals_chat` strips fences today, so every
+   other JSON call site would break.
+
+Both are fixable — the second with a shared fence-tolerant parser — but until
+then the 8B earns its 9.9 GB.
+
 ## Cron jobs must not share your chat session
 
 A cron job's `sessionTarget` defaults to the session it was created from. An
