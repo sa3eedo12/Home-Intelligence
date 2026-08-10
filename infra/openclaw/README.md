@@ -14,7 +14,13 @@ The TrueNAS app template runs the container with `CapDrop=[ALL]` and
   as the default `node` user.
 - `apt` fails twice over: `setgroups` is blocked (needs
   `APT::Sandbox::User "root"`) and `/var/cache/apt/archives/partial` is
-  `0700 _apt`. See `install-browser-deps.sh` for the working workaround.
+  `0700 _apt`. You should never need `apt` (see
+  [Browser / Playwright](#browser--playwright)), but if you do, write
+  `/etc/apt/apt.conf.d/99-local` with `APT::Sandbox::User "root";`,
+  `Dir::Cache::archives "/tmp/aptcache";` and
+  `Dir::State::lists "/tmp/aptlists";` (both pre-created `777`).
+- Root also lacks `CAP_KILL`, so it cannot signal node-owned processes. Kill as
+  `node`, and always by explicit PID.
 - Scripts must be **piped in** (`cat f | docker exec -i ... sh -s`) rather than
   written under `/home/node` and executed as root.
 - If the gateway is crash-looping, `docker exec` is unavailable. Recover by
@@ -23,23 +29,92 @@ The TrueNAS app template runs the container with `CapDrop=[ALL]` and
 
 ## Browser / Playwright
 
-Playwright's Chromium build ships in the image and lives on the persistent
-mount, but its **system libraries do not** — they are installed into the
-container overlay and are therefore **lost on every app update**.
+**Everything needed for browser automation is already in place. No `apt`, no
+sidecar container.** Measured 2026-08-10.
 
-Re-run after any update:
+- All Chromium system libraries **are baked into the image** (Debian 12
+  bookworm): libnss3, libgbm, libatk, libcups, libdrm, libxkbcommon, libpango,
+  libasound, libatspi. The earlier claim that they live in the overlay and are
+  lost on update was wrong.
+- `PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright` sits inside the
+  `/mnt/Pool1/Docker/OpenClaw/config -> /home/node` bind mount, so browser
+  downloads **already survive app updates**.
+- `infra/openclaw/install-browser-deps.sh` was **deleted** — it existed to
+  reinstall those libraries after every update, which was never necessary.
+
+Install/repair the browser with Playwright itself, as `node`:
 
 ```sh
-cat infra/openclaw/install-browser-deps.sh \
-  | docker exec -i --user root ix-openclaw-openclaw-1 sh -s
+docker exec -u node ix-openclaw-openclaw-1 npx playwright install chromium
 ```
 
-The script is idempotent and verifies via `ldconfig` (it cannot run the browser
-itself, because root cannot read node's home).
+### Diagnosing
 
-Test browser support through the **agent**, not the `openclaw browser` CLI —
-the CLI needs gateway device pairing, the agent does not (it runs inside the
-gateway).
+`openclaw browser doctor` is the fastest signal and **does work from inside the
+container** (no device pairing needed — pairing only applies to the remote
+Control UI):
+
+```sh
+docker exec -u node ix-openclaw-openclaw-1 openclaw browser doctor
+```
+
+Healthy output is five `OK` lines. `FAIL browser: not running` on a cold
+gateway is normal — Chrome is launched on demand by the first browser call.
+
+> **Never trust the agent's prose to confirm the browser works.** When the
+> browser tool fails, the model silently falls back to `fetch`/`curl` and still
+> returns a plausible answer. Verify with the failure-count delta or an
+> artifact:
+> ```sh
+> grep -c "browser failed" /tmp/openclaw/openclaw-$(date +%F).log
+> ```
+> Run it before and after; the delta must be `0`. A saved screenshot under
+> `~/.openclaw/media/browser/*.png` is proof the real browser ran.
+
+### Failure mode: corrupt profile → Chrome exits before binding CDP
+
+Symptom in `/tmp/openclaw/openclaw-*.log`:
+
+```
+[tools] browser failed: Chrome CDP websocket for profile "openclaw" is not
+reachable after start. CDP diagnostic: http_unreachable after 2ms;
+cdp=http://127.0.0.1:30273; fetch failed: connect ECONNREFUSED 127.0.0.1:30273
+```
+
+Chrome starts, prints `DevTools listening on ws://127.0.0.1:30273`, then exits
+**without writing `DevToolsActivePort`** and without a crash message.
+
+Root cause is an accumulated/corrupted profile under
+`.openclaw/browser/openclaw/user-data`, not the binary, the libraries, or the
+flags. Proven by isolation: identical full flag set failed on the 13 MB
+inherited profile and succeeded on a fresh directory on the same ZFS mount.
+
+Fix — reset the profile (Chrome recreates it):
+
+```sh
+docker exec -u node ix-openclaw-openclaw-1 openclaw browser reset-profile
+```
+
+**This is not a timeout problem — do not raise the timeouts.** On a healthy
+profile CDP is ready in **219–256 ms**, against defaults of
+`localCdpReadyTimeoutMs: 8000` and `localLaunchTimeoutMs: 15000` (~30× headroom).
+
+### Do not pin `browser.executablePath`
+
+It was pinned to `chromium-1234`, but the bundled Playwright resolves
+`chromium-1223`; a version-pinned path breaks on every browser update. Leave it
+unset and let Playwright resolve. Current config is just:
+
+```json
+"browser": { "enabled": true, "headless": true, "noSandbox": true }
+```
+
+`chrome-headless-shell` and full `chrome` both work; `headless: true` resolves
+to full Chrome with `--headless=new`. Chrome's dbus/bluez/Floss errors and the
+`GLib-GIO-CRITICAL` assertion are harmless container noise.
+
+A remote CDP browser is supported (`browser.cdpUrl` + `attachOnly`) but is
+**not needed here** and adds a container, a network hop, and SSRF surface.
 
 ## The 120s idle-timeout trap
 
