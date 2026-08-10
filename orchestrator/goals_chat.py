@@ -823,7 +823,6 @@ class GoalsChatHandler:
             temperature=0.4,
             response_format="json",
             think=False,
-            keep_alive=120,
         )
         content = _extract_chat_content(resp)
         parsed = _parse_json_blob(content) or {}

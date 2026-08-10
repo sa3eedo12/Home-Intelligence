@@ -359,7 +359,6 @@ async def run_cross_goal_insight(
             temperature=0.4,
             response_format="json",
             think=False,
-            keep_alive=60,
         )
     except Exception as exc:
         logger.warning("cross_goal_llm_failed", error=str(exc))

@@ -661,7 +661,6 @@ async def _llm_reflect(
         temperature=0.3,
         response_format="json",
         think=False,
-        keep_alive=60,
     )
     msg = resp.get("message") or {}
     content = msg.get("content") if isinstance(msg, dict) else ""
