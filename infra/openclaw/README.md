@@ -115,7 +115,10 @@ Consequences worth internalising before touching anything else:
 3. **The window must comfortably exceed 27.5k.** At 32k that left ~5k for
    actual conversation. The poisoned session's recorded `input` counts climb
    `28270 → 30044 → 32346 → 32760 → 32767` and stop dead at the ceiling —
-   that flat-line at 32767 *is* the `stopReason=length` error.
+   that flat-line at 32767 *is* the `stopReason=length` error. Even a *fresh*
+   session is tight: the monitor job's single Amazon fetch adds ~5k tokens of
+   HTML, taking turn one to **32,616 — 99.5% of a 32k window with zero
+   history**. At 64k the same run sits at 50%.
 4. **`--light-context` is not a lever for this.** Measured: 27,510 tokens with
    it vs 27,507 without. It trims conversation history, not the system prompt
    or tool schemas. Do not reach for it to fix cold-start cost.
