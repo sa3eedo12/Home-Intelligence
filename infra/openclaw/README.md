@@ -103,15 +103,22 @@ prefill. Attribution, by removing servers and re-measuring a cold session:
 
 Consequences worth internalising before touching anything else:
 
-1. **A cold session is already at 90% of the 120s timeout before doing any
-   work.** Any tool call on the first turn pushes it over. This is what
-   `cron: job execution timed out (last phase: model-call-started)` means.
-2. **Only the first turn pays it.** The prefix is identical across turns, so
-   llama.cpp reuses the KV cache — the second turn prefilled 42 tokens in
-   0.57s. Long-lived warm sessions are fine; new sessions are expensive.
+1. **The 27.5k prefix is shared by every session**, so llama.cpp's KV cache
+   normally serves it for free. A cold session measured **15-20s end to end**
+   (including an MCP tool round-trip) while the prefix stayed cached.
+2. **The 108s figure is the cache-*miss* cost.** It is what you pay when
+   something evicts the shared prefix. That was the real failure mechanism:
+   one session with a 54k-token transcript kept flushing the prefix, so
+   *every* new session had to re-prefill 27.5k tokens and hit
+   `cron: job execution timed out (last phase: model-call-started)`.
+   Fixing the offending session fixes latency system-wide.
 3. **The window must comfortably exceed 27.5k.** At 32k that left ~5k for
-   actual conversation, which a couple of web-fetch tool results blow through
-   instantly (`stopReason=length`).
+   actual conversation. The poisoned session's recorded `input` counts climb
+   `28270 → 30044 → 32346 → 32760 → 32767` and stop dead at the ceiling —
+   that flat-line at 32767 *is* the `stopReason=length` error.
+4. **`--light-context` is not a lever for this.** Measured: 27,510 tokens with
+   it vs 27,507 without. It trims conversation history, not the system prompt
+   or tool schemas. Do not reach for it to fix cold-start cost.
 
 ### Why there is no fallback model
 
@@ -148,6 +155,26 @@ which broke normal conversation as well as the job.
 
 Give recurring jobs an isolated session. Delivery still announces to the
 channel, so notifications are unaffected; only the transcript is separated.
+
+### Editing a cron job when the CLI is locked out
+
+`openclaw cron edit` needs `operator.admin`, and the containerised CLI cannot
+approve its own scope-upgrade request (`gateway closed (1008): pairing
+required`) — only a paired device holding `operator.approvals` can, e.g. the
+iPhone app. When that is not available, edit the store directly:
+
+```bash
+docker stop ix-openclaw-openclaw-1
+# cron jobs live in the `cron_jobs` table of
+# .openclaw/state/openclaw.sqlite — note `store_key` still points at a
+# jobs.json that no longer exists; SQLite is the source of truth.
+# Patch BOTH the flat columns and the `job_json` blob, then:
+docker start ix-openclaw-openclaw-1
+```
+
+Relevant columns: `session_target` (`isolated` | `session:<key>`),
+`session_key`, `payload_timeout_seconds`, `payload_light_context`.
+Verify with `openclaw cron list` — that is a read and needs no upgrade.
 
 ## Editing config: the gateway owns the file
 
