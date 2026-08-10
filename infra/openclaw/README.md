@@ -80,9 +80,53 @@ the orchestrator does not restart with it — without the loop, that window stay
 cold until the orchestrator happens to be redeployed, and every OpenClaw request
 in the meantime hard-fails.
 
-Warm calls request `keep_alive` of 3x the check interval so residency does not
-depend on the two timers interleaving favourably. The reasoner additionally
-honours `REASONER_KEEP_ALIVE=-1` to pin it permanently.
+Warm calls used to request `keep_alive` of 3x the check interval. That was
+wrong, and it caused a real regression. `keep_alive` is **per-request and
+last-write-wins**: sending one *overrides* the server's `OLLAMA_KEEP_ALIVE`
+for that model. This deployment sets 24h, so the warm loop was silently
+cutting residency to 15 minutes and forcing a 9.9 GB reload every ~20 min.
+
+The loop now sends no `keep_alive` at all and instead reads `expires_at` from
+`/api/ps`, re-warming anything **approaching** eviction (within
+`MODEL_WARM_INTERVAL_SECONDS * 2`) rather than only what is already gone. The
+original reasoning — "a warm must outlast the gap between checks" — was a valid
+*floor* but was being applied as a *ceiling*. Set `MODEL_WARM_KEEP_ALIVE` only
+to deliberately override server policy; it is unset by default. The reasoner
+still honours `REASONER_KEEP_ALIVE=-1` to pin it permanently, since a pin is a
+residency decision the operator is making on purpose.
+
+The same anti-pattern had leaked into feature code: `health_goals` and
+`engagement` passed `keep_alive=60` on **reasoner** calls and `goals_chat`
+passed `keep_alive=120` on the planner. Because both resolve to the same 24 GB
+MoE here, every background run rescheduled its eviction for a minute later and
+left the next real request to pay a ~3 min reload — a likely contributor to the
+intermittent agent timeouts. `orchestrator/tests/test_model_residency_policy.py`
+now fails the build if a short `keep_alive` reappears, in either the kwarg or
+the payload-dict spelling. `reflector` is exempt: its `keep_alive=0` is a
+deliberate unload to free VRAM before the 35B loads.
+
+#### Measured residency behaviour
+
+Verified against the live server rather than assumed:
+
+| model | TTL from a request that sends no `keep_alive` |
+|---|---|
+| `qwen36-moe-64k` | pinned (year 2318) via `REASONER_KEEP_ALIVE=-1` |
+| `bge-m3`, `qwen3-0.6b-4k` | 86,400s — the `OLLAMA_KEEP_ALIVE=24h` default |
+| `qwen3-8b-16k` | only 600–900s |
+
+The env var *is* parsed (`server config` logs `OLLAMA_KEEP_ALIVE:24h0m0s`) and
+*is* applied to most models, so the 8B's short TTL is Ollama's own scheduling,
+not our code — a raw `curl` that bypasses the SDK entirely reproduces it, and
+an explicit `"keep_alive":"24h"` on the same model is honoured in full. All
+four model slots are occupied (`OLLAMA_MAX_LOADED_MODELS=4`), which is the
+likely trigger.
+
+This is not worth "fixing" by hardcoding a keep-alive back into the warmer:
+the expiry-aware loop already refreshes the 8B every cycle, well before it
+could evict, and observation over a full warm cycle confirms it never leaves
+`/api/ps`. Reacting to observed expiry is what makes the loop robust to a
+server-side default we do not control.
 
 Untested lever, if cold-start failures ever need a belt-and-braces fix:
 `runTimeoutMs` returns 0 (disabled) when `>= 2147e6` ms (~24.85 days). Note

@@ -26,15 +26,23 @@ _ORCHESTRATOR = Path(__file__).resolve().parent.parent
 
 
 def _keep_alive_calls(path: Path) -> list[tuple[int, str]]:
-    """Line numbers and rendered values of any keep_alive kwarg in a file."""
+    """Line numbers and rendered values of any keep_alive a file sends.
+
+    Covers both spellings: the ``keep_alive=`` kwarg and a ``"keep_alive"``
+    key in a payload dict, since reflector uses the latter and a kwarg-only
+    check would miss it.
+    """
     tree = ast.parse(path.read_text(), filename=str(path))
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        for kw in node.keywords:
-            if kw.arg == "keep_alive":
-                found.append((node.lineno, ast.unparse(kw.value)))
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg == "keep_alive":
+                    found.append((node.lineno, ast.unparse(kw.value)))
+        elif isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if isinstance(key, ast.Constant) and key.value == "keep_alive":
+                    found.append((key.lineno, ast.unparse(value)))
     return found
 
 
