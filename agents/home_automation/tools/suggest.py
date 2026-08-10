@@ -62,7 +62,7 @@ Based on the following device activity in the last {window_hours} hours:
 Suggest 2-3 useful Home Assistant automations as YAML. Reply ONLY with valid YAML, no prose."""
 
     llm = _get_llm()
-    model = os.getenv("REASONER_MODEL", "qwen36-moe-32k")
+    model = os.getenv("REASONER_MODEL", "qwen36-moe-64k")
     resp = await llm.chat(
         messages=[{"role": "user", "content": prompt}],
         model=model,

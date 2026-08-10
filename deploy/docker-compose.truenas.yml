@@ -93,7 +93,7 @@ services:
       OLLAMA_KEEP_ALIVE: 24h
       OLLAMA_NUM_PARALLEL: "2"
       # Keep this equal to the number of tags actually in rotation
-      # (qwen36-moe-32k 23GB, qwen3-8b-16k 9.9GB, qwen3-0.6b-4k 1.4GB,
+      # (qwen36-moe-64k 23GB, qwen3-8b-16k 9.9GB, qwen3-0.6b-4k 1.4GB,
       # bge-m3 0.6GB = ~35GB inside the 63 GiB Vulkan pool). Adding a
       # fifth tag silently evicts one of these and costs a 60-180s
       # reload on the next call that needs it.

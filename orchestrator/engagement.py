@@ -295,7 +295,7 @@ async def run_cross_goal_insight(
     goals_store: Any,
     member_id: int,
     llm: Any | None = None,
-    reasoner_model: str = "qwen36-moe-32k",
+    reasoner_model: str = "qwen36-moe-64k",
 ) -> dict[str, Any]:
     """Once a week, if the member has 2+ active goals, ask the
     reasoner for ONE cross-cutting observation. Save it to

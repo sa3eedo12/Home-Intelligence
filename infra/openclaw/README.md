@@ -89,6 +89,76 @@ Untested lever, if cold-start failures ever need a belt-and-braces fix:
 that `agents.defaults.timeoutSeconds` is capped at 120s by
 `clampImplicitTimeoutMs`, so it can only ever *shorten* the timeout.
 
+## The system prompt is ~27.5k tokens
+
+Measured, not estimated: a bare `openclaw agent --message "Reply with exactly:
+ok"` in a fresh session sends **27,500 prompt tokens** and takes **108s** of
+prefill. Attribution, by removing servers and re-measuring a cold session:
+
+| source | tokens |
+|---|---|
+| OpenClaw system prompt + built-in tools + skills + workspace docs | ~23,400 |
+| `home-assistant` MCP (27 tools) | ~4,100 |
+| **total** | **~27,500** |
+
+Consequences worth internalising before touching anything else:
+
+1. **A cold session is already at 90% of the 120s timeout before doing any
+   work.** Any tool call on the first turn pushes it over. This is what
+   `cron: job execution timed out (last phase: model-call-started)` means.
+2. **Only the first turn pays it.** The prefix is identical across turns, so
+   llama.cpp reuses the KV cache — the second turn prefilled 42 tokens in
+   0.57s. Long-lived warm sessions are fine; new sessions are expensive.
+3. **The window must comfortably exceed 27.5k.** At 32k that left ~5k for
+   actual conversation, which a couple of web-fetch tool results blow through
+   instantly (`stopReason=length`).
+
+### Why there is no fallback model
+
+`qwen3-8b-16k` was configured as OpenClaw's fallback. It cannot work, for two
+independent reasons:
+
+- Its **16k window cannot hold a 27.5k prompt**, so every failover failed
+  immediately with `stopReason=length`.
+- Raising it to 32k does not help: the dense 8B prefills at **161 tok/s**, so
+  27.5k tokens needs **171s** — past the 120s timeout no matter the window.
+  It also costs +5.1 GB (vs +0.7 GB to double the MoE's window).
+
+Counter-intuitively the 23 GB MoE is the *fast* model here. Measured on a
+10,684-token prompt:
+
+| model | prefill | prefill t/s | gen t/s |
+|---|---|---|---|
+| `qwen36-moe-64k` (35B-A3B) | 21.1s | 506 | 27 |
+| `qwen3-8b-16k` (dense 8B) | 66.2s | 161 | 13 |
+
+A 35B MoE activates only ~3B params per token; the dense 8B activates all 8B.
+On a bandwidth-bound iGPU, **active** parameters set the speed, not total size.
+So the big model is both smarter and ~3x faster — do not "optimise" by
+switching to the small one. The 8B is still the right choice for the
+orchestrator's short classification prompts, where prefill depth is trivial.
+
+## Cron jobs must not share your chat session
+
+A cron job's `sessionTarget` defaults to the session it was created from. An
+hourly job created from Telegram therefore appended its tool output — ~10 KB of
+fetched HTML per run — into the **user's own chat transcript**. That session
+reached 190 KB (77% of it tool results) and ~54k tokens against a 32k window,
+which broke normal conversation as well as the job.
+
+Give recurring jobs an isolated session. Delivery still announces to the
+channel, so notifications are unaffected; only the transcript is separated.
+
+## Editing config: the gateway owns the file
+
+The running gateway rewrites `~/.openclaw/openclaw.json` from its in-memory
+state, so **editing the file under a live gateway silently loses the change**.
+Either use the `openclaw` CLI, or edit and restart immediately. Also note the
+config is schema-validated on boot: an unknown key (e.g. adding one under
+`meta`) makes the gateway refuse to start and crash-loop with
+`Invalid config ... meta: Invalid input`. Fix by removing the key from the host
+path (`/mnt/Pool1/Docker/OpenClaw/config/.openclaw/`) with a root container.
+
 ## Compaction: `maxActiveTranscriptBytes` is gated
 
 Sessions grow unbounded because auto-compaction triggers near the **context

@@ -176,7 +176,7 @@ async def test_loaded_models_returns_tagged_and_bare_names(monkeypatch) -> None:
     _FakePsClient.raise_on_get = None
     _FakePsClient.body = {
         "models": [
-            {"name": "qwen36-moe-32k:latest"},
+            {"name": "qwen36-moe-64k:latest"},
             {"name": "bge-m3:latest"},
         ]
     }
@@ -184,8 +184,8 @@ async def test_loaded_models_returns_tagged_and_bare_names(monkeypatch) -> None:
 
     names = await OllamaClient("http://ollama:11434").loaded_models()
 
-    assert "qwen36-moe-32k" in names
-    assert "qwen36-moe-32k:latest" in names
+    assert "qwen36-moe-64k" in names
+    assert "qwen36-moe-64k:latest" in names
     assert "bge-m3" in names
     assert _FakePsClient.last_url == "http://ollama:11434/api/ps"
 

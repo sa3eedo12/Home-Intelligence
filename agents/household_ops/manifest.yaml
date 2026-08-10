@@ -50,7 +50,7 @@ capabilities:
     description: Plan meals for N days using pantry and preferences.
     side_effects: false
     cost: high
-    llm: qwen36-moe-32k
+    llm: qwen36-moe-64k
   - id: meal_recipe
     description: Return recipe for a planned meal.
     side_effects: false
