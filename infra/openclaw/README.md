@@ -116,6 +116,36 @@ to full Chrome with `--headless=new`. Chrome's dbus/bluez/Floss errors and the
 A remote CDP browser is supported (`browser.cdpUrl` + `attachOnly`) but is
 **not needed here** and adds a container, a network hop, and SSRF surface.
 
+## Session store
+
+Transcripts live in `~/.openclaw/agents/main/sessions/`, three files per
+session (`<uuid>.jsonl`, `.trajectory.jsonl`, `.trajectory-path.json`), with
+`sessions.json` as a key -> `sessionId` index.
+
+**There is no `sessions delete` command** (`cleanup`, `compact`,
+`export-trajectory`, `list`, `tail` only), so pruning means editing the index
+and removing files. Two traps:
+
+1. **`sessions.json` does not list every real session.** Telegram history
+   rollovers and each cron *run* get their own files under keys like
+   `agent:main:cron:<id>:run:<uuid>` that never appear in the index. Deleting
+   "anything not in the index" destroys real history — in one prune that was
+   9 live sessions. Decide ownership by reading the `sessionKey` values
+   *inside* each `.jsonl` instead.
+2. **Stop the gateway first**, or it rewrites `sessions.json` from memory and
+   restores what you removed. Since `docker exec` then dies with it, edit
+   through a throwaway container that has full capabilities:
+
+   ```sh
+   docker stop ix-openclaw-openclaw-1
+   docker run --rm -v /mnt/Pool1/Docker/OpenClaw/config:/cfg \
+     -v /tmp/prune.py:/p.py python:3-alpine python /p.py --apply
+   docker start ix-openclaw-openclaw-1
+   ```
+
+Restore ownership after writing (`chown 1000:1000`, `chmod 600`) — a root-owned
+`sessions.json` is unreadable to the `node` user the gateway runs as.
+
 ## The 120s idle-timeout trap
 
 Symptom: `LLM idle timeout (120s)`, then failover to the small model, which
@@ -298,14 +328,66 @@ That is 20 KB/token, so 64k -> 128k costs only ~1.25 GiB and the full native
 262144 window ~3.75 GiB, against ~14 GB of headroom. **VRAM is not the
 constraint, and freeing the 8B's 9.9 GB is not required to raise the window.**
 
-The constraint is the table above. A context window is a ceiling on how much
-prompt you can be forced to re-prefill, and this architecture hits that ceiling
-often: llama.cpp logs `forcing full prompt re-processing due to lack of cache
-data (likely due to SWA or hybrid/recurrent memory)`, because recurrent state
-cannot be partially reused the way a KV cache can. Raising the window to 128k
-would let sessions grow into a worst case measured in tens of minutes. 64k is
-already past the point where a full re-prefill fits in any sane timeout — the
-right lever is bounding session growth, not enlarging the window.
+The constraint is the table above — but only on a **cache miss**. Measured
+against the live model, prompt-cache reuse does work, and matters enormously:
+
+| request | prompt | prefill |
+|---|---|---|
+| unique 50k prompt (cold) | 50,019 tok | **269.2s** |
+| same + 12 more tokens appended | 50,031 tok | **18.6s** |
+| same + 12 more again | 50,042 tok | **18.8s** |
+| byte-identical 65k prompt re-sent | 65,535 tok | **0.1s** |
+
+So llama.cpp's `forcing full prompt re-processing due to lack of cache data
+(likely due to SWA or hybrid/recurrent memory)` fires when the prefix
+*diverges*, **not** on every turn. A normal conversation only appends, which is
+a pure prefix extension and hits the cache.
+
+The catch is that a cache hit is not free on this architecture: extending a 50k
+context still costs **~18.6s per turn** for a 12-token delta, because the
+recurrent state cannot be partially reused. That cost scales with context
+depth, so **every turn of a long session pays for its length**, even cached.
+Raising the window to 128k would raise both the per-turn floor and the
+worst-case miss. 64k is already past the point where a full re-prefill fits in
+a sane timeout — the right lever is bounding session growth, not enlarging the
+window.
+
+### Declare `contextTokens` — OpenClaw cannot infer it from Ollama
+
+**This caused a real outage of the browser workflow.** With no `contextTokens`
+on the model entries, OpenClaw assumed **200,000** tokens while the Ollama
+model is built with `num_ctx 65536`. Two things follow, both bad:
+
+- Ollama **silently truncates** at `num_ctx` rather than erroring. Measured: a
+  ~96k-token prompt came back as `prompt_eval_count=65535`. Nothing warns you.
+- `toolResultMaxChars` **auto-derives from the context window**
+  (`resolveAutoLiveToolResultMaxChars(contextWindowTokens)`), so the 3x
+  overestimate also tripled the budget allowed for a single tool result.
+
+A single `browser` screenshot + page snapshot then pushed one session to
+**111,253 tokens**. It was truncated to 64k, missed the cache, and needed a
+full ~430s re-prefill — well past the model timeout, so the turn died with
+`LLM request timed out`.
+
+Fixed by declaring the real windows and letting compaction act mid-tool-loop:
+
+```jsonc
+// models.providers.ollama.models[]
+{ "id": "qwen36-moe-64k", "contextTokens": 65536 }
+{ "id": "qwen3-8b-16k",   "contextTokens": 16384 }
+
+// agents.defaults.compaction
+"midTurnPrecheck": { "enabled": true }   // default false
+```
+
+`midTurnPrecheck` is what catches an oversized tool result *after it is
+appended but before the next model call* — turn-end compaction is too late
+when one tool result blows the window on its own.
+
+Verified on the same request that previously failed: **111,253 -> 36,560
+tokens**, and a timeout became a **164s** success. Confirm the models report
+their real windows with `openclaw models list` (expect `64k` and `16k`, not
+`195k`).
 
 ### Why the 8B stays, despite the MoE being faster
 
@@ -376,10 +458,12 @@ path (`/mnt/Pool1/Docker/OpenClaw/config/.openclaw/`) with a root container.
 ## Compaction: `maxActiveTranscriptBytes` is gated
 
 Sessions grow unbounded because auto-compaction triggers near the **context
-limit**, and the primary model declares 128k. The hardware cannot process a
-55k-token prompt inside the timeout, so the session deadlocks long before
-OpenClaw thinks it is full. A declared context window far larger than what the
-hardware can actually chew through is actively harmful.
+limit**, and an undeclared model context is assumed to be very large (200k as
+measured — see [Declare `contextTokens`](#declare-contexttokens--openclaw-cannot-infer-it-from-ollama)).
+The hardware cannot process a 55k-token prompt inside the timeout, so the
+session deadlocks long before OpenClaw thinks it is full. A declared context
+window far larger than what the hardware can actually chew through is actively
+harmful — declare `contextTokens` so this trigger uses the real number.
 
 The byte guard fixes this, but it is **silently ignored** unless the enabling
 flag is set too:
@@ -398,7 +482,8 @@ Required together:
 "compaction": {
   "truncateAfterCompaction": true,
   "maxActiveTranscriptBytes": 60000,
-  "keepRecentTokens": 8000
+  "keepRecentTokens": 8000,
+  "midTurnPrecheck": { "enabled": true }
 }
 ```
 
